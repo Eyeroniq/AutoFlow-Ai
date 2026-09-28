@@ -41,6 +41,13 @@ class LLMConfig(NodeConfig):
             "reported as provider_used."
         ),
     )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Stream the response through the provider's streaming API and forward each text "
+            "delta as a node.token event to live watchers (WebSocket). The node output is the same."
+        ),
+    )
 
     @field_validator("fallback")
     @classmethod
@@ -125,13 +132,17 @@ class LLMNode(NodeDefinition[LLMConfig]):
             model = requested_model or context.services.default_model(provider_name)
             try:
                 provider = context.services.llm(provider_name)
-                text = await provider.generate(
-                    system_prompt=config.system_prompt,
-                    user_prompt=config.user_prompt,
-                    model=model,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
-                )
+                request = {
+                    "system_prompt": config.system_prompt,
+                    "user_prompt": config.user_prompt,
+                    "model": model,
+                    "temperature": config.temperature,
+                    "max_tokens": config.max_tokens,
+                }
+                if config.stream and context.on_token is not None:
+                    text = await _collect_stream(provider, provider_name, request, context.on_token)
+                else:
+                    text = await provider.generate(**request)
             except ProviderError as exc:
                 errors.append({"provider": provider_name, "model": model, "error": str(exc)})
                 if len(chain) > 1:
@@ -164,6 +175,24 @@ class LLMNode(NodeDefinition[LLMConfig]):
             return NodeResult.fail(errors[0]["error"], fallback_errors=errors)
         summary = "; ".join(e["error"] for e in errors)
         return NodeResult.fail(f"All {len(errors)} providers failed: {summary}", fallback_errors=errors)
+
+
+async def _collect_stream(
+    provider: Any, provider_name: str, request: dict[str, Any], on_token: Any
+) -> str:
+    """Stream the answer, forwarding each delta; returns the full text.
+
+    If the provider fails mid-stream and the fallback chain continues, later tokens carry
+    the next provider's name, so watchers can tell the attempts apart.
+    """
+    parts: list[str] = []
+    async for chunk in provider.stream(**request):
+        parts.append(chunk)
+        await on_token(chunk, provider_name)
+    text = "".join(parts)
+    if not text:
+        raise ProviderError(provider_name, "stream ended without any text")
+    return text
 
 
 @register_node("gemini")

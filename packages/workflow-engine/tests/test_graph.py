@@ -76,7 +76,7 @@ class TestValidateGraph:
         assert {i.field for i in issues} == {"temperature", "user_promt"}
 
     def test_out_of_range_value(self):
-        issues = validate_graph([node("d", "delay", seconds=60)], [])
+        issues = validate_graph([node("d", "delay", seconds=61)], [])
         assert codes(issues) == [IssueCode.INVALID_CONFIG]
         assert issues[0].field == "seconds"
 

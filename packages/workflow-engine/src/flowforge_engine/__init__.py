@@ -14,7 +14,12 @@ from flowforge_engine.errors import (
     ProviderNotSupportedError,
     VariableResolutionError,
 )
-from flowforge_engine.executor import DEFAULT_NODE_TIMEOUT_SECONDS, execute_graph
+from flowforge_engine.executor import (
+    DEFAULT_NODE_TIMEOUT_SECONDS,
+    ExecutionControl,
+    ExecutionHooks,
+    execute_graph,
+)
 from flowforge_engine.graph import topological_sort, validate_graph, validate_workflow
 from flowforge_engine.models import (
     ExecutionResult,
@@ -42,13 +47,17 @@ from flowforge_engine.registry import (
     register_node,
 )
 from flowforge_engine.providers.settings import ProviderSettings
+from flowforge_engine.routing import DEFAULT_QUEUE, queue_for_graph
 from flowforge_engine.services import ExecutionServices
 from flowforge_engine.variables import find_references, resolve_string, resolve_value
 
 __all__ = [
     "DEFAULT_NODE_TIMEOUT_SECONDS",
+    "DEFAULT_QUEUE",
     "CycleError",
     "EngineError",
+    "ExecutionControl",
+    "ExecutionHooks",
     "ExecutionResult",
     "ExecutionServices",
     "GraphEdge",
@@ -79,6 +88,7 @@ __all__ = [
     "find_references",
     "get_node_definition",
     "list_node_definitions",
+    "queue_for_graph",
     "register_node",
     "resolve_string",
     "resolve_value",

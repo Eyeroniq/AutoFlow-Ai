@@ -110,7 +110,7 @@ class TestSettingsFromEnv:
         settings = ProviderSettings.from_mapping({
             "TESTING": "true",
             "GEMINI_API_KEY": "g-key", "GEMINI_MODEL": "gemini-3.5-flash-lite", "GEMINI_EMBEDDING_MODEL": "gemini-embedding-001",
-            "GROQ_API_KEY": "q-key", "GROQ_MODEL": "llama-3.1-8b-instant",
+            "GROQ_API_KEY": "q-key", "GROQ_MODEL": "qwen/qwen3.8-27b",
             "OPENROUTER_API_KEY": "o-key", "OPENROUTER_MODEL": "google/gemma-4-31b-it:free",
             "OLLAMA_BASE_URL": "http://host.docker.internal:11434/v1", "OLLAMA_MODEL": "qwen3",
             "SMTP_USER": "me@gmail.com", "SMTP_PASSWORD": "app-pass", "SMTP_PORT": "465",
@@ -119,7 +119,7 @@ class TestSettingsFromEnv:
         assert settings.testing is True
         assert settings.default_model("gemini") == "gemini-3.5-flash-lite"
         assert settings.embedding_model("gemini") == "gemini-embedding-001"
-        assert settings.default_model("groq") == "llama-3.1-8b-instant"
+        assert settings.default_model("groq") == "qwen/qwen3.8-27b"
         assert settings.default_model("openrouter") == "google/gemma-4-31b-it:free"
         assert settings.base_url("ollama") == "http://host.docker.internal:11434/v1"
         assert settings.default_model("ollama") == "qwen3"
@@ -266,7 +266,7 @@ class TestOpenAICompatibleAdapter:
 
     async def test_groq_generate(self):
         transport, captured = recorder(json_response(self.completion("Hi from Groq")))
-        text = await self.provider("groq", transport).generate("sys", "Hello", "llama-3.3-70b-versatile", 0.2, 50)
+        text = await self.provider("groq", transport).generate("sys", "Hello", "openai/gpt-oss-20b", 0.2, 50)
         assert text == "Hi from Groq"
         [request] = captured
         assert str(request.url) == "https://api.groq.com/openai/v1/chat/completions"
@@ -364,6 +364,17 @@ class TestOpenAICompatibleAdapter:
         transport, _ = recorder(models)
         with pytest.raises(ProviderError, match="run `ollama pull qwen3`"):
             await self.provider("ollama", transport).verify("qwen3")
+
+    async def test_verify_fails_when_the_model_isnt_available_to_the_key(self):
+        transport, _ = recorder(json_response({"object": "list", "data": [
+            {"id": "openai/gpt-oss-20b", "object": "model", "created": 0, "owned_by": "OpenAI"},
+        ]}))
+        with pytest.raises(ProviderError, match="model 'llama-3.3-70b-versatile' isn't available to it; set GROQ_MODEL"):
+            await self.provider("groq", transport).verify("llama-3.3-70b-versatile")
+        transport, _ = recorder(json_response({"object": "list", "data": [
+            {"id": "openai/gpt-oss-20b", "object": "model", "created": 0, "owned_by": "OpenAI"},
+        ]}))
+        assert (await self.provider("groq", transport).verify("openai/gpt-oss-20b"))["model_available"] is True
 
     async def test_openrouter_verify_uses_key_endpoint(self):
         transport, captured = recorder(json_response({"data": {"label": "sk-or-v1-abc...", "is_free_tier": True, "limit_remaining": None}}))

@@ -51,7 +51,7 @@ stays a dict). References embedded in text are stringified (objects as JSON).
 | `output`       | io          | **value**, name (default `result`)                                   |
 | `text`         | io          | **text**                                                             |
 | `condition`    | logic       | **left**, **operator** (equals/not_equals/contains/greater_than/less_than), **right**; outgoing edges need `source_handle` `true`/`false` |
-| `delay`        | logic       | **seconds** (0–10)                                                   |
+| `delay`        | logic       | **seconds** (0–60)                                                   |
 | `gemini`       | ai          | **user_prompt**, provider, model, system_prompt, temperature, max_tokens, fallback |
 | `groq`         | ai          | same as gemini                                                       |
 | `openrouter`   | ai          | same as gemini (`:free` models welcome)                              |
@@ -63,6 +63,22 @@ stays a dict). References embedded in text are stringified (objects as JSON).
 | `http_request` | integration | **url**, method, headers, query, body, timeout_seconds, fail_on_error |
 
 `default_registry.describe()` returns every type with its JSON config schema.
+
+## Observing and stopping a run
+
+`execute_graph(graph, context, hooks=..., control=...)` takes two optional objects:
+
+- `ExecutionHooks` (subclass it): `node_started(node, label, started_at)`,
+  `node_finished(result)` (success, failure, or skip), and `node_token(node_id, text, provider)`
+  for streamed LLM deltas (only called when overridden, and for LLM nodes with `"stream": true`).
+  The API's worker uses these to write node rows and publish live events.
+- `ExecutionControl`: `request_stop(reason, status=RunStatus.STOPPED)` from another task skips
+  every node that hasn't started and cancels the running one if its type is `interruptible`
+  (Gmail sending isn't: it finishes first). The result's status is `stopped`, or whatever
+  `status` was passed (e.g. `FAILED` for a time limit).
+
+Node types also declare `queue` (default `"default"`); `queue_for_graph(graph)` picks the
+task queue for a run.
 
 ## Providers
 

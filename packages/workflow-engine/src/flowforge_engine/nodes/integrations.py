@@ -83,6 +83,8 @@ class GmailNode(NodeDefinition[GmailConfig]):
     icon = "mail"
     config_schema = GmailConfig
     output_schema = GmailResult
+    # Cancelling mid-send could leave it unknown whether the email went out.
+    interruptible = False
 
     def required_providers(self, node: GraphNode) -> list[tuple[str, str]]:
         return _auth_requirement(node)

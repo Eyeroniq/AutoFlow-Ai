@@ -50,7 +50,9 @@ LLM_PROVIDERS: dict[str, ProviderInfo] = {
         ),
         ProviderInfo(
             "groq", "Groq", "llm", base_url="https://api.groq.com/openai/v1",
-            default_model="llama-3.3-70b-versatile",
+            # A Groq production model. (Model access varies by account: the Llama models
+            # weren't offered to the key this was verified with; /test says what is.)
+            default_model="openai/gpt-oss-20b",
             env_vars=("GROQ_API_KEY",), get_key_url="https://console.groq.com/keys",
         ),
         ProviderInfo(

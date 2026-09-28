@@ -1,0 +1,45 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "type": "text",
+      "label": "Start",
+      "config": {
+        "text": "queued at {{system.execution_id}}"
+      }
+    },
+    {
+      "id": "wait",
+      "type": "delay",
+      "label": "Wait",
+      "config": {
+        "seconds": "{{vars.seconds}}"
+      }
+    },
+    {
+      "id": "out",
+      "type": "output",
+      "label": "Done",
+      "config": {
+        "value": "{{start.text}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "wait"
+    },
+    {
+      "source": "wait",
+      "target": "out"
+    }
+  ],
+  "variables": [
+    {
+      "key": "seconds",
+      "value": "5",
+      "type": "workflow"
+    }
+  ]
+}

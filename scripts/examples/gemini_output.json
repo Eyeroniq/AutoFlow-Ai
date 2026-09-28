@@ -1,0 +1,43 @@
+{
+  "nodes": [
+    {
+      "id": "input",
+      "type": "input",
+      "label": "Topic",
+      "config": {
+        "name": "topic",
+        "input_type": "text",
+        "default": "the history of workflow automation"
+      }
+    },
+    {
+      "id": "gemini",
+      "type": "gemini",
+      "label": "Summarize",
+      "config": {
+        "system_prompt": "You are a concise technical writer.",
+        "user_prompt": "Write a three-sentence summary of {{input.topic}}.",
+        "temperature": 0.4
+      }
+    },
+    {
+      "id": "output",
+      "type": "output",
+      "label": "Result",
+      "config": {
+        "name": "result",
+        "value": "{{gemini.response}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "input",
+      "target": "gemini"
+    },
+    {
+      "source": "gemini",
+      "target": "output"
+    }
+  ]
+}

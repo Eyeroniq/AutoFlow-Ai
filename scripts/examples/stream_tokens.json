@@ -1,0 +1,41 @@
+{
+  "nodes": [
+    {
+      "id": "input",
+      "type": "input",
+      "config": {
+        "name": "topic",
+        "default": "message queues"
+      }
+    },
+    {
+      "id": "llm",
+      "type": "groq",
+      "label": "Explain",
+      "config": {
+        "user_prompt": "Explain {{input.topic}} in about 60 words.",
+        "stream": true,
+        "fallback": [
+          "gemini"
+        ]
+      }
+    },
+    {
+      "id": "out",
+      "type": "output",
+      "config": {
+        "value": "{{llm.response}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "input",
+      "target": "llm"
+    },
+    {
+      "source": "llm",
+      "target": "out"
+    }
+  ]
+}

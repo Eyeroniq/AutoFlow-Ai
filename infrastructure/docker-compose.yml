@@ -27,7 +27,7 @@ services:
       retries: 10
       start_period: 10s
 
-  # Provisioned for the Phase 2+ task queue; nothing connects to it yet.
+  # Celery broker + result backend, stop flags, and pub/sub for live execution events.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -85,6 +85,56 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+
+  # Celery worker: runs queued workflow executions. Same image and code as the API (it uses
+  # the API's models/services and the workflow engine). Scale with
+  #   docker compose up -d --scale worker=3
+  # or add a dedicated service with WORKER_QUEUES=<queue> for node types that set `queue`.
+  worker:
+    build:
+      context: ../apps/api
+      additional_contexts:
+        workflow_engine: ../packages/workflow-engine
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:-flowforge}@postgres:5432/${POSTGRES_DB:-flowforge}
+      REDIS_URL: redis://redis:6379/0
+      WATCHFILES_FORCE_POLLING: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # watchfiles restarts the worker when app/ or the engine changes (dev hot reload).
+    # The node name worker@<container hostname> is stable across container restarts,
+    # which lets a restarted worker fail the runs it was executing when it died.
+    command:
+      - sh
+      - -c
+      - >-
+        exec watchfiles --filter python
+        "celery -A app.worker.celery_app:celery_app worker --loglevel=INFO
+        --hostname=worker@%h --queues=${WORKER_QUEUES:-default} --concurrency=${WORKER_CONCURRENCY:-4}"
+        app /packages/workflow-engine/src
+    volumes:
+      - ../apps/api:/app
+      - ../packages/workflow-engine:/packages/workflow-engine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # The API applies migrations on start; the worker needs the current schema.
+      api:
+        condition: service_healthy
+    # Warm shutdown lets running nodes finish; runs still going after this are killed and
+    # marked failed when the worker comes back.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping --destination worker@$$HOSTNAME --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
 
   web:
     build:

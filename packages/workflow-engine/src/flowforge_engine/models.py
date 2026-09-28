@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, Self
@@ -53,6 +54,9 @@ class NodeContext(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     # Provider access. Excluded from serialization; tests inject mocks here.
     services: ExecutionServices = Field(default_factory=ExecutionServices, exclude=True, repr=False)
+    # Set by the executor for the running node when an observer wants streamed LLM
+    # tokens: await on_token(text, provider). None means "don't stream".
+    on_token: Callable[[str, str], Awaitable[None]] | None = Field(default=None, exclude=True, repr=False)
 
 
 # --- Graph ------------------------------------------------------------------------------
@@ -148,6 +152,8 @@ class NodeStatus(StrEnum):
 class RunStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
+    # A stop was requested (ExecutionControl.request_stop) before the graph finished.
+    STOPPED = "stopped"
 
 
 class NodeRunResult(BaseModel):

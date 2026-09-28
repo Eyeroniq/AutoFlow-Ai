@@ -13,6 +13,10 @@ bcrypt==4.0.1
 slowapi==0.1.10
 # Fernet encryption for stored credentials (app/core/crypto.py).
 cryptography==50.0.1
+# Async execution: Celery workers with Redis as broker + result backend, and Redis pub/sub
+# for live execution events. kombu[redis] requires redis<6.5.
+celery[redis]==5.6.3
+redis==6.4.0
 
 # Workflow engine (packages/workflow-engine), installed editable. pip resolves the path
 # from the working directory, so run pip from apps/api (in Docker that's /app -> /packages).

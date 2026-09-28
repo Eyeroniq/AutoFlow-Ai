@@ -75,8 +75,46 @@ class Settings(BaseSettings):
     LLM_RETRY_MAX_DELAY_SECONDS: float | None = Field(default=None, ge=0)
     LLM_REQUEST_TIMEOUT_SECONDS: float | None = Field(default=None, gt=0)
 
-    # Upper bound for a single node during a (synchronous) workflow run.
+    # Upper bound for a single node during a workflow run.
     WORKFLOW_NODE_TIMEOUT_SECONDS: float = Field(default=120, gt=0)
+
+    # --- Async execution (Celery) ----------------------------------------------------
+    # Broker and result backend default to REDIS_URL.
+    CELERY_BROKER_URL: str | None = None
+    CELERY_RESULT_BACKEND: str | None = None
+    # A whole run is stopped (and marked failed) after this long. Celery's own hard limit
+    # sits a minute above it as a backstop.
+    EXECUTION_TIME_LIMIT_SECONDS: float = Field(default=600, gt=0)
+    # Retries for infrastructure errors (database/broker unreachable) before a run starts.
+    # Node failures are never retried: they are recorded as the run's result.
+    CELERY_TASK_MAX_RETRIES: int = Field(default=3, ge=0)
+    # A running execution's worker writes a heartbeat this often; one silent for
+    # EXECUTION_STALE_AFTER_SECONDS is treated as crashed and marked failed.
+    EXECUTION_HEARTBEAT_SECONDS: float = Field(default=5, gt=0)
+    EXECUTION_STALE_AFTER_SECONDS: float = Field(default=30, gt=0)
+    # A pending execution no worker picked up within this long is marked failed.
+    EXECUTION_PENDING_TIMEOUT_SECONDS: float = Field(default=3600, gt=0)
+    # How often the API sweeps for stale executions.
+    EXECUTION_RECOVERY_INTERVAL_SECONDS: float = Field(default=15, gt=0)
+    # POST /stop waits this long for the worker to confirm before answering 202.
+    EXECUTION_STOP_WAIT_SECONDS: float = Field(default=5, ge=0)
+    # How often a running execution checks for a stop request.
+    EXECUTION_STOP_POLL_SECONDS: float = Field(default=0.25, gt=0)
+
+    # --- WebSocket ---------------------------------------------------------------------
+    WS_HEARTBEAT_SECONDS: float = Field(default=15, gt=0)
+    WS_AUTH_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+    # Safety net: a watched execution's state is re-read from the database this often, so
+    # a missed pub/sub message can't leave a client waiting forever.
+    WS_DB_CHECK_SECONDS: float = Field(default=10, gt=0)
+
+    @property
+    def celery_broker_url(self) -> str:
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+
+    @property
+    def celery_result_backend(self) -> str:
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
     @property
     def cors_origins(self) -> list[str]:

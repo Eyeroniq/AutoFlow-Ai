@@ -1,7 +1,13 @@
 # FlowForge AI — Worker
 
-Placeholder. A later phase adds the Celery worker here: it will consume workflow runs from
-Redis (already provisioned in `infrastructure/docker-compose.yml`) and write
-`WorkflowExecution` / `NodeExecution` rows using the models in `apps/api/app/models`.
+The Celery worker's code lives in the API package, [`apps/api/app/worker`](../api/app/worker),
+because it uses the same models, settings, credential resolution, and run service as the
+API (`app.services.runs.run_execution`). The Compose `worker` service runs it from the API
+image:
 
-Nothing in this directory runs yet.
+```bash
+celery -A app.worker.celery_app:celery_app worker --hostname=worker@%h --queues=default --concurrency=4
+```
+
+See the root README: "Asynchronous execution" (lifecycle and reliability rules) and
+"Workers: running and scaling".

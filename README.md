@@ -6,13 +6,19 @@ A visual AI workflow automation builder. This repository is being built in phase
   authentication (with refresh), and a minimal Next.js frontend that proves auth end to end.
 - **Phase 2:** the workflow engine package (node registry, `{{...}}` variable resolution,
   graph validation, execution) and workflow CRUD + synchronous execution APIs.
-- **Phase 2.5 (this state):** real, free-tier-friendly providers instead of mocks: Google
+- **Phase 2.5:** real, free-tier-friendly providers instead of mocks: Google
   Gemini, Groq, OpenRouter (`:free` models), and local Ollama for LLMs (plus OpenAI and
   Anthropic if you add keys), and Gmail over SMTP/IMAP with an App Password. Per-user
   credentials are encrypted at rest, and a provider without credentials is a validation
-  error, never a silent mock. Everything is testable from `/docs`; the frontend is unchanged.
+  error, never a silent mock.
+- **Phase 3 (this state):** asynchronous execution. `POST /run` queues the run on Redis and
+  returns `202` at once; Celery workers execute it, recording every node's state in Postgres
+  and publishing live events that `WS /ws/executions/{id}` streams to clients (with a
+  database replay for late joiners). Runs can be stopped, crashed workers are detected, and
+  delivery is idempotent. Everything is testable from `/docs` and `scripts/watch_run.py`; the
+  frontend is unchanged.
 
-The canvas, Celery worker, WebSockets, and templates come in later phases.
+The canvas and templates come in later phases.
 
 ## Stack
 
@@ -23,7 +29,8 @@ The canvas, Celery worker, WebSockets, and templates come in later phases.
 | Engine   | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs; stdlib smtplib/imaplib |
 | Secrets  | Fernet (`cryptography`) for stored credentials                                |
 | Auth     | JWT (python-jose, HS256), passlib + bcrypt, slowapi rate limiting           |
-| Data     | PostgreSQL 16, Redis 7 (provisioned but not used yet)                       |
+| Async    | Celery 5.6 (Redis broker + result backend), Redis pub/sub, WebSockets       |
+| Data     | PostgreSQL 16, Redis 7                                                      |
 | Tests    | pytest + pytest-asyncio, against a real Postgres test database              |
 | Infra    | Docker Compose                                                              |
 
@@ -82,22 +89,23 @@ What happens on `up`:
 
 1. `postgres` and `redis` start and wait until healthy.
 2. `api` runs `alembic upgrade head`, then starts uvicorn with `--reload`.
-3. `web` starts `next dev` once the API healthcheck passes.
+3. `worker` (Celery) and `web` (`next dev`) start once the API healthcheck passes.
 
-Both `api` and `web` bind-mount their source directories, so edits hot-reload. The API
-container also mounts `packages/workflow-engine` (installed editable), so engine edits
-reload it too.
+`api`, `worker`, and `web` bind-mount their source directories, so edits hot-reload (the
+worker is restarted by `watchfiles`). The API and worker also mount `packages/workflow-engine`
+(installed editable), so engine edits reload them too.
 
 Useful commands:
 
 ```bash
 docker compose up -d                   # run in the background
 docker compose logs -f api             # follow API logs (structured JSON)
+docker compose logs -f worker          # follow the Celery worker
 docker compose ps                      # service status and health
 docker compose down                    # stop (keeps the database volume)
 docker compose down -v                 # stop and delete all data
 docker compose up --build -V web       # after changing package.json (renews node_modules volume)
-docker compose up --build api          # after changing requirements.txt or the engine's dependencies
+docker compose up --build api worker   # after changing requirements.txt or the engine's dependencies
 ```
 
 ## Tests
@@ -130,7 +138,23 @@ IMAP login and an inbox read; the `/api/integrations/{provider}/test` endpoint; 
 workflow. Keys are never printed. Free tiers have small daily quotas, so don't run the live
 suite in a loop.
 
-Locally (venv, with the dockerized Postgres running): `cd apps/api && pytest`.
+**Async execution and WebSocket tests** use no Celery eager mode and no mocks of Redis:
+
+- `test_async_runs.py` and `test_websocket.py` call the worker's own code
+  (`app.services.runs.run_execution`) in-process, as a background task, against the test
+  database and a **real Redis** (database 15, so the dev worker's queue on db 0 is never
+  touched). The socket is driven in-process with `httpx-ws`. They cover 202 + enqueue, the
+  pending → running → success/failed/stopped transitions and their event order (checked
+  against the database at each event), stop semantics, stale-heartbeat and restart
+  recovery, idempotent re-delivery, time limits, token events, WS auth/ownership, snapshot
+  replay, heartbeats, and Redis-drop resync. Only the task *sender* is faked in the API
+  route tests (to assert what would be queued).
+- `test_worker_integration.py` starts a **real Celery worker** in a thread
+  (`celery.contrib.testing.worker.start_worker`, solo pool) on the real Redis broker, with
+  committed rows, and checks a queued run, a double enqueue running once, and a stop through
+  the worker.
+
+Locally (venv, with the dockerized Postgres and Redis running): `cd apps/api && pytest`.
 
 ## Database migrations
 
@@ -205,7 +229,7 @@ optional `model` (blank = the provider's default below), `system_prompt`, `user_
 | Provider     | Node type    | Adapter                  | Default model (`*_MODEL` to change)  | Key                      |
 | ------------ | ------------ | ------------------------ | ------------------------------------ | ------------------------ |
 | Gemini       | `gemini`     | google-genai (AI Studio) | `gemini-3.5-flash-lite`              | `GEMINI_API_KEY` (free)  |
-| Groq         | `groq`       | OpenAI-compatible        | `llama-3.3-70b-versatile`            | `GROQ_API_KEY` (free)    |
+| Groq         | `groq`       | OpenAI-compatible        | `openai/gpt-oss-20b`                 | `GROQ_API_KEY` (free)    |
 | OpenRouter   | `openrouter` | OpenAI-compatible        | `openrouter/free` (any `…:free` model works) | `OPENROUTER_API_KEY` (free) |
 | Ollama       | `ollama`     | OpenAI-compatible        | `llama3.2`                           | none (local)             |
 | OpenAI       | `openai`     | OpenAI-compatible        | `gpt-4.1-mini`                       | `OPENAI_API_KEY` (paid)  |
@@ -311,6 +335,213 @@ content_type}]`, usually filled from references like `{{http.body}}`. Output: `m
 from, from_address, to, cc, subject, date, unread, snippet, body_text, body_truncated,
 attachments: [{filename, content_type, size}], size}`, plus `count` and `folder`.
 
+## Asynchronous execution
+
+```
+                    POST /api/workflows/{id}/run  ->  202 {execution_id}
+  +--------+  ------------------------------------------------>  +------------------+
+  | client |                                                     |  api (FastAPI)   |
+  |        |  <------------------------------------------------  |  REST + WS       |
+  +--------+    WS /ws/executions/{id}: snapshot + live events   +---+-----------+--+
+      |                                                              |           |
+      |  GET /api/executions/{id}             reads state (snapshot) |           | send_task(queue)
+      |                                                              v           v    SUBSCRIBE
+      |                                                   +------------+   +--------------------+
+      +-------------------------------------------------> | PostgreSQL |   | Redis              |
+                                                          |            |   |  broker (queues)   |
+                                                          +------------+   |  pub/sub (events)  |
+                                                                ^          |  stop flags, seq   |
+                                           node + run rows,     |          +--+--------------+--+
+                                           heartbeat            |     consume |              ^ PUBLISH events,
+                                                                |             v              | poll stop flag
+                                                          +-----+------------------------------+
+                                                          | worker(s): Celery, prefork pool    |
+                                                          |   run_execution -> flowforge_engine|
+                                                          +------------------------------------+
+```
+
+**Lifecycle.** `POST /run` validates the graph (including `auth_missing`), records a
+`pending` execution with one `pending` row per node, plus the run's inputs and a snapshot of
+the graph (later edits don't affect a queued run), and sends a Celery task named
+`flowforge.run_execution` whose task id *is* the execution id. A worker then:
+
+1. **claims** it with a compare-and-set (`UPDATE ... SET status='running' WHERE status='pending'`).
+   A second delivery of the same task, or a run that was stopped while queued, fails the
+   claim and does nothing, so each execution runs **at most once**;
+2. runs the graph with the engine, writing each node's transition (`pending → running →
+   success | failed | skipped`, with input, output, error, timing) and publishing an event
+   after each commit;
+3. heartbeats `heartbeat_at` every `EXECUTION_HEARTBEAT_SECONDS` and polls a Redis stop flag
+   every `EXECUTION_STOP_POLL_SECONDS`;
+4. finishes the execution as `success`, `failed`, or `stopped` (again compare-and-set, so it
+   never overwrites a stop or a recovery that happened meanwhile).
+
+`?sync=true` runs the same code inside the request (and still publishes events) and returns
+`200` with the finished execution, which is handy in Swagger and scripts.
+
+**Reliability rules.**
+
+- *Late acks.* `task_acks_late` with `worker_prefetch_multiplier=1`: a worker that dies before
+  or during a run doesn't lose the message. Redelivery is harmless thanks to the claim.
+- *Retries only for infrastructure.* If the database is unreachable *before* the claim, the
+  task retries with backoff (`CELERY_TASK_MAX_RETRIES`). After the claim nothing is retried:
+  node failures (API errors, bad input) are the run's result, and re-running could send an
+  email twice.
+- *Time limit.* `EXECUTION_TIME_LIMIT_SECONDS` stops a run cooperatively and marks it
+  `failed` ("Execution exceeded the time limit of 600s"). Celery's soft/hard limits sit 30/60 s
+  above it as a backstop, and Redis' visibility timeout is longer still, so a long run isn't
+  redelivered while it's running.
+- *Crash recovery.* A worker records its node name (`worker@<container hostname>`). On
+  startup it immediately fails executions its previous incarnation left `running` (the
+  container restarted). Independently, the API sweeps every
+  `EXECUTION_RECOVERY_INTERVAL_SECONDS` for `running` executions whose heartbeat is older than
+  `EXECUTION_STALE_AFTER_SECONDS` (the worker was killed and didn't come back) and for
+  `pending` ones older than `EXECUTION_PENDING_TIMEOUT_SECONDS`. Recovered runs get a clear
+  `error_message` (e.g. *"No heartbeat from worker 'worker@0df0151afe8e' for 41s: it crashed or
+  was killed while running this execution"*), their running node is `failed`, and the rest
+  are `skipped`; the matching events are published so watchers finish too. If a worker that
+  is actually alive finds its execution was finalized elsewhere, its next heartbeat notices
+  and it abandons the run.
+- *Stop.* `POST /api/executions/{id}/stop` marks a `pending` run `stopped` at once and revokes
+  its task. For a `running` one it sets the stop flag. The worker cancels the current node if
+  its type is `interruptible` (Delay, LLM calls, HTTP), or lets it finish (Gmail sending: never
+  cut off mid-send), skips the remaining nodes, and marks the run `stopped`. The endpoint
+  waits up to `EXECUTION_STOP_WAIT_SECONDS` and returns `200` with the final state (usually well
+  under a second), `202` if the worker hasn't confirmed yet, or finalizes the run itself if
+  the worker's heartbeat is stale. Only the owner can stop a run (others get `404`); a
+  finished run gives `409`.
+- *Queues.* Every node type has a `queue` attribute (default `"default"`). A run is routed to
+  the first non-default queue its nodes need, else `default`
+  (`flowforge_engine.queue_for_graph`), so a future GPU or long-running node type only needs
+  `queue = "gpu"` plus a worker started with `-Q gpu`.
+
+### Real-time events (WebSocket)
+
+`WS /ws/executions/{execution_id}` streams one execution.
+
+**Authentication** uses a JWT access token, either way:
+
+- **first message** (recommended; keeps the token out of URLs and proxy logs): connect, then
+  send `{"type": "auth", "token": "<access token>"}` within `WS_AUTH_TIMEOUT_SECONDS` (10 s);
+- **query parameter**: `ws://localhost:8000/ws/executions/<id>?token=<access token>`.
+
+| Close code | Meaning                                                            |
+| ---------- | ------------------------------------------------------------------ |
+| `1000`     | Normal: the execution finished and every event was delivered       |
+| `4401`     | Not authenticated: missing, invalid, or expired token, or a first message that isn't `auth` |
+| `4404`     | The execution doesn't exist or isn't yours (same rule as the REST API's `404`) |
+| `1011`     | Internal error                                                     |
+
+Every rejection is preceded by `{"type": "error", "code": 4401, "message": "..."}`.
+
+**Message sequence.**
+
+1. `{"type": "snapshot", "seq": N, "resync": false, "execution": {...}}`: the full current
+   state from the database, the same shape as `GET /api/executions/{id}`. A client that
+   joins late, or after the run finished, still gets the whole picture.
+2. Live events with `seq > N`, in order. The server subscribes to Redis *before* reading
+   the snapshot and drops events the snapshot already contains, so there are no gaps or
+   duplicates.
+3. After `execution.finished` the server closes with `1000`. Joining a finished execution
+   yields the snapshot, `execution.finished` with `"replayed": true`, and the close.
+
+Also: the server sends `{"type": "heartbeat"}` every `WS_HEARTBEAT_SECONDS` and answers
+`{"type": "ping"}` with `{"type": "pong"}`. If Redis drops, it reconnects with backoff and sends
+a new snapshot with `"resync": true`. As a safety net against a missed event, it also re-checks
+the database every `WS_DB_CHECK_SECONDS`.
+
+**Event schema.** Every event has `seq` (per execution, gapless, increasing across all
+publishers), `type`, `execution_id`, and `timestamp` (ISO 8601, UTC). They're published on
+Redis channel `flowforge:execution:<id>:events`, so other consumers can subscribe too.
+
+| `type`               | Extra fields                                                                  |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `execution.started`  | `status: "running"`, `workflow_id`, `worker`, `queue`, `started_at`, `nodes: [{node_key, node_type}]` |
+| `node.started`       | `node_key`, `node_type`, `label`, `status: "running"`, `started_at`           |
+| `node.token`         | `node_key`, `text` (a streamed delta), `provider`; only for LLM nodes with `"stream": true` |
+| `node.succeeded`     | `node_key`, `node_type`, `label`, `status`, `input` (resolved config), `output`, `started_at`, `finished_at`, `duration_ms` |
+| `node.failed`        | same as `node.succeeded`, plus `error`                                          |
+| `node.skipped`       | `node_key`, `node_type`, `label`, `status`, `reason`, timing when it was interrupted mid-run |
+| `execution.finished` | `status` (`success` / `failed` / `stopped`), `final_output`, `error`, `started_at`, `finished_at`, `duration_ms` |
+
+```json
+{"seq": 5, "type": "node.succeeded", "execution_id": "b2778fcf-...", "timestamp": "2026-09-28T08:05:22.188Z",
+ "node_key": "gemini", "node_type": "gemini", "label": "Summarize", "status": "success",
+ "input": {"user_prompt": "Write a three-sentence summary of event-driven architecture.", "...": "..."},
+ "output": {"response": "Event-driven architecture (EDA) is ...", "provider": "gemini", "provider_used": "gemini",
+            "model": "gemini-3.5-flash-lite", "mock": false, "fallback_errors": []},
+ "started_at": "2026-09-28T08:05:20.433Z", "finished_at": "2026-09-28T08:05:22.188Z", "duration_ms": 1755}
+```
+
+**LLM token streaming.** Set `"stream": true` on an LLM node: the provider's streaming API
+is used and each text delta is forwarded as `node.token`. The node's output, and every other
+event, is the same as without streaming. If the fallback chain moves to another provider
+mid-stream, later tokens carry that provider's name.
+
+### Workers: running and scaling
+
+The Compose `worker` service runs:
+
+```bash
+celery -A app.worker.celery_app:celery_app worker --hostname=worker@%h --queues=${WORKER_QUEUES:-default} --concurrency=${WORKER_CONCURRENCY:-4}
+```
+
+It uses the API image and code (the models, credentials, and engine are shared), the prefork
+pool (one run per process at a time), and a healthcheck based on `celery inspect ping`. It
+depends on Postgres, Redis, and a healthy API, since the API applies migrations.
+
+```bash
+docker compose up -d --scale worker=3              # more workers on the default queue
+docker compose logs -f worker                      # structured JSON logs, one line per event
+docker compose exec worker celery -A app.worker.celery_app:celery_app inspect active   # what's running
+```
+
+- **Dedicated queues:** add a service like `worker` with `WORKER_QUEUES=gpu` (or run
+  `celery ... worker -Q gpu`) for node types that declare `queue = "gpu"`.
+- **Shutdown:** `docker compose stop worker` sends SIGTERM. Celery stops taking tasks and
+  waits up to `stop_grace_period` (30 s) for running ones; anything still running is killed
+  and marked failed when the worker comes back (or by the API's sweep).
+- **Outside Docker:** from `apps/api` with the venv active and Redis/Postgres up:
+  `celery -A app.worker.celery_app:celery_app worker -Q default` (on Windows add
+  `--pool=threads`, since prefork needs fork).
+
+### Watching a run from the command line
+
+[`scripts/watch_run.py`](scripts/watch_run.py) logs in, creates a workflow from a JSON graph
+(or uses an existing one), queues a run, connects to the WebSocket (first-message auth by
+default, `--auth-mode query` for `?token=`), and prints each event as it arrives with the
+time since the `POST`. The password comes from `FLOWFORGE_PASSWORD` or a prompt.
+
+It needs `httpx` and `websockets`. Either run it with the API's venv, which has both
+(`apps/api/venv/Scripts/python scripts/watch_run.py ...` on Windows,
+`apps/api/venv/bin/python ...` elsewhere), or install them into the Python you use:
+
+```bash
+python -m pip install -r scripts/requirements.txt
+export FLOWFORGE_PASSWORD='...'
+python scripts/watch_run.py --email you@example.com --register \
+    --graph scripts/examples/gemini_gmail.json --var recipient=you@gmail.com \
+    --inputs '{"topic": "event-driven architecture"}' --show-final
+python scripts/watch_run.py --email you@example.com --graph scripts/examples/delay.json --var seconds=30 --stop-after 2
+python scripts/watch_run.py --email you@example.com --graph scripts/examples/delay.json --connect-delay 8   # late join
+python scripts/watch_run.py --email you@example.com --graph scripts/examples/stream_tokens.json --show-tokens
+python scripts/watch_run.py --email you@example.com --execution-id <id>   # watch an existing run
+```
+
+Sample output (Input → Gemini → Gmail → Output on the real stack):
+
+```
++     101 ms  POST /run -> 202 in 101 ms: execution b2778fcf-... status=pending queue=default
++     161 ms  [seq   0] snapshot            status=pending | input=pending, gemini=pending, gmail=pending, output=pending
++     257 ms  [seq   1] execution.started   worker=worker@0df0151afe8e queue=default
++     372 ms  [seq   4] node.started        gemini (gemini)
++    2185 ms  [seq   5] node.succeeded      gemini in 1755 ms provider_used=gemini -> Event-driven architecture (EDA) is ...
++    2224 ms  [seq   6] node.started        gmail (gmail)
++    6191 ms  [seq   7] node.succeeded      gmail in 3892 ms -> <179058272296.10.7892257543988529204@gmail.com>
++    6337 ms  [seq  10] execution.finished  status=success duration_ms=6169 final_output={"result": {...}}
++    6338 ms  WS closed by server: code=1000 reason=''
+```
+
 ## API
 
 ### Auth
@@ -369,9 +600,11 @@ is a `404`).
 | PUT    | `/api/workflows/{id}`                 | Update `name` / `description` / `status`; `graph` fully replaces nodes, edges, and variables and bumps `version` |
 | DELETE | `/api/workflows/{id}`                 | Delete the workflow and its execution history                      |
 | POST   | `/api/workflows/{id}/validate`        | `{valid, errors: [...]}`; an empty list means the graph can run (includes `auth_missing` checks) |
-| POST   | `/api/workflows/{id}/run`             | Run synchronously with `{inputs}`; returns the full execution      |
+| POST   | `/api/workflows/{id}/run`             | Queue a run with `{inputs}` → `202 {execution_id, status: "pending", queue, links}`; `?sync=true` runs it in-request → `200` with the full execution; `503` if the broker is down |
 | GET    | `/api/workflows/{id}/executions`      | Past executions, newest first (`limit`, `offset`)                  |
 | GET    | `/api/executions/{id}`                | One execution with every node's resolved input, output, and timing |
+| POST   | `/api/executions/{id}/stop`           | Stop a pending/running execution → `200` final state, `202` stop pending; `409` if finished |
+| WS     | `/ws/executions/{id}`                 | Snapshot + live events (see [Real-time events](#real-time-events-websocket)) |
 
 Notes:
 
@@ -379,9 +612,10 @@ Notes:
   types or cycles, so unfinished work can be saved. `/validate` reports the problems, and `/run`
   refuses an invalid graph with `422` without recording an execution. Duplicate node ids are
   rejected at save time because they can't be mapped to rows.
-- **Run results:** a run that fails at a node still returns `200` with `status: "failed"`. The
-  failing node's `error_message` explains why, and the nodes after it are `skipped` with the
-  reason in their `error_message`.
+- **Run results:** a run that fails at a node ends with `status: "failed"` (a `?sync=true` run
+  still returns `200`). The failing node's `error_message` explains why, and the nodes after it
+  are `skipped` with the reason in their `error_message`. Node rows exist from the moment the
+  run is queued (`pending`, in execution order via `position`).
 - **Node rows and history:** `PUT` matches nodes to `workflow_nodes` rows by graph id. A node
   that survives a save keeps its row, and so its links in execution history. A removed node's
   history rows remain, with `node_id: null` and the `node_key`/`node_type`/`node_label`
@@ -415,9 +649,11 @@ Notes:
    change the `recipient` variable to your own address.
 5. `POST /api/workflows/{id}/validate` → `{"valid": true, "errors": []}`, or `auth_missing`
    errors naming what isn't configured.
-6. `POST /api/workflows/{id}/run` with `{"inputs": {"topic": "..."}}` → `status: "success"`,
-   `final_output.result.summary` is Gemini's real text, and `final_output.result.email` is the
-   Gmail receipt (`status: "sent"`, a real `Message-ID`). The email arrives in the inbox.
+6. `POST /api/workflows/{id}/run` with `{"inputs": {"topic": "..."}}` → `202` with the
+   `execution_id`. `GET /api/executions/{execution_id}` a few seconds later shows
+   `status: "success"`, `final_output.result.summary` is Gemini's real text, and
+   `final_output.result.email` is the Gmail receipt (`status: "sent"`, a real `Message-ID`).
+   The email arrives in the inbox. (Add `?sync=true` to get the finished execution directly.)
 7. `GET /api/workflows/{id}/executions` → the run is listed.
 
 ## Workflow engine
@@ -444,7 +680,11 @@ every node's config. In short:
 - **Execution** runs nodes in topological order, resolving each node's config just before it
   runs. The first failure stops the run and skips the rest. Nodes behind a condition branch
   that wasn't taken are skipped without failing the run. Each node gets a timeout of
-  `WORKFLOW_NODE_TIMEOUT_SECONDS`.
+  `WORKFLOW_NODE_TIMEOUT_SECONDS`. `execute_graph(..., hooks=ExecutionHooks, control=ExecutionControl)`
+  reports node starts, finishes, and LLM tokens to an observer (the worker's recorder) and
+  supports cooperative stops (`control.request_stop(...)`: cancels an `interruptible` node,
+  skips the rest; result status `stopped`). Node types declare `queue` and `interruptible`.
+  Delay allows up to 60 s now that runs are off the request path.
 
 **Providers** (see [Providers and free API keys](#providers-and-free-api-keys)): real
 adapters only; a missing credential raises `MissingCredentialsError` ("Authentication
@@ -475,8 +715,8 @@ All tables use UUID primary keys, `timestamptz` timestamps, and JSONB for JSON c
 | `workflow_nodes`      | `node_key` (the graph id, unique per workflow), `node_type`, `label`, position, `config_json` |
 | `workflow_edges`      | source/target node FKs, optional handles                                          |
 | `workflow_variables`  | `key`, `value`, `var_type` enum                                                   |
-| `workflow_executions` | `status` and `trigger` enums, timings, `final_output_json`, `error_message`       |
-| `node_executions`     | per-node status, input/output JSON, timings, `duration_ms`; `node_id` is nullable, plus a `node_key`/`node_type`/`node_label` snapshot |
+| `workflow_executions` | `status` and `trigger` enums, `created_at`, timings, `final_output_json`, `error_message`; for async runs `inputs_json` + `graph_json` (what was queued), `queue`, `celery_task_id`, `worker_hostname`, `heartbeat_at`, `stop_requested_at` |
+| `node_executions`     | per-node status, `position` (execution order), input/output JSON, timings, `duration_ms`; `node_id` is nullable, plus a `node_key`/`node_type`/`node_label` snapshot |
 | `credentials`         | per-user provider secrets: Fernet-encrypted JSON in `encrypted_value`; unique per (user, provider) |
 | `integrations`        | per-user connection `status` enum and non-secret metadata (masked values, last test); unique per (user, provider) |
 | `templates`           | `name`, `category`, starter `graph_json`                                          |
@@ -487,7 +727,7 @@ is `ON DELETE SET NULL`, and the snapshot columns keep the row readable.
 `workflow_executions.triggered_by_user_id` is set to NULL if that user is deleted.
 
 Migrations: `initial schema` → `preserve node execution history` (node_id SET NULL +
-snapshot) → `graph node keys` → `unique credential per provider`. The downgrade of the second one deletes history rows whose
+snapshot) → `graph node keys` → `unique credential per provider` → `async execution columns`. The downgrade of the second one deletes history rows whose
 node is gone, since those can't satisfy the old NOT NULL constraint.
 
 ## Environment variables
@@ -497,7 +737,7 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | Variable                        | Default                          | Used by              |
 | ------------------------------- | -------------------------------- | -------------------- |
 | `DATABASE_URL`                  | `postgresql+asyncpg://…@localhost:5433/flowforge` | API (local run) |
-| `REDIS_URL`                     | `redis://localhost:6379/0`       | API (not used yet)   |
+| `REDIS_URL`                     | `redis://localhost:6379/0`       | API + worker: broker, results, pub/sub |
 | `JWT_SECRET`                    | none, **required** (≥ 32 chars)  | API                  |
 | `ENCRYPTION_KEY`                | none, **required** (Fernet key; comma-separate to rotate) | API (stored credentials) |
 | `JWT_ALGORITHM`                 | `HS256`                          | API                  |
@@ -506,7 +746,7 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `CORS_ORIGINS`                  | `http://localhost:3000,http://127.0.0.1:3000` | API     |
 | `AUTH_RATE_LIMIT`               | `10/minute`                      | API                  |
 | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL` | blank, `gemini-3.5-flash-lite`, `gemini-embedding-2` | Gemini nodes |
-| `GROQ_API_KEY`, `GROQ_MODEL`    | blank, `llama-3.3-70b-versatile` | Groq nodes           |
+| `GROQ_API_KEY`, `GROQ_MODEL`    | blank, `openai/gpt-oss-20b`      | Groq nodes           |
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | blank, `openrouter/free` | OpenRouter nodes     |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBEDDING_MODEL` | `http://host.docker.internal:11434/v1` (`.env.example`), `llama3.2`, `nomic-embed-text` | Ollama nodes |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | blank, `gpt-4.1-mini`           | OpenAI nodes         |
@@ -516,7 +756,16 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `IMAP_HOST`, `IMAP_PORT`        | `imap.gmail.com`, `993`          | Gmail Read node      |
 | `LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECONDS`, `LLM_RETRY_MAX_DELAY_SECONDS` | `3`, `1`, `30` | backoff for 429/5xx/network errors |
 | `LLM_REQUEST_TIMEOUT_SECONDS`   | `60`                             | per provider request |
-| `WORKFLOW_NODE_TIMEOUT_SECONDS` | `120`                            | API (per-node limit during a run) |
+| `WORKFLOW_NODE_TIMEOUT_SECONDS` | `120`                            | per-node limit during a run |
+| `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | blank (= `REDIS_URL`) | API + worker |
+| `EXECUTION_TIME_LIMIT_SECONDS`  | `600`                            | worker: whole-run limit (Celery limits +30/+60 s) |
+| `CELERY_TASK_MAX_RETRIES`       | `3`                              | worker: retries for infrastructure errors before a run starts |
+| `EXECUTION_HEARTBEAT_SECONDS`, `EXECUTION_STALE_AFTER_SECONDS` | `5`, `30` | crash detection |
+| `EXECUTION_RECOVERY_INTERVAL_SECONDS` | `15`                       | API: stale-execution sweep |
+| `EXECUTION_PENDING_TIMEOUT_SECONDS` | `3600`                       | pending runs no worker picked up |
+| `EXECUTION_STOP_WAIT_SECONDS`, `EXECUTION_STOP_POLL_SECONDS` | `5`, `0.25` | stop endpoint wait; worker's stop-flag poll |
+| `WORKER_QUEUES`, `WORKER_CONCURRENCY` | `default`, `4`             | Compose `worker` service |
+| `WS_HEARTBEAT_SECONDS`, `WS_AUTH_TIMEOUT_SECONDS`, `WS_DB_CHECK_SECONDS` | `15`, `10`, `10` | WebSocket |
 | `TESTING`                       | unset                            | set by the test suite only: all providers become mocks |
 | `POSTGRES_USER/PASSWORD/DB`     | `flowforge`                      | Compose              |
 | `*_HOST_PORT`                   | `5433`, `6379`, `8000`, `3000`   | Compose port mapping |
@@ -549,11 +798,15 @@ dotenv parser accepts trailing `# comments`.
 │   │       ├── db/               # declarative base, async session, seed
 │   │       ├── models/           # SQLAlchemy models + enums
 │   │       ├── schemas/          # Pydantic request/response models
-│   │       ├── services/         # graph sync, run + persist, credentials + per-user providers
+│   │       ├── services/         # graph sync, runs (create/claim/run/record), stop + recovery, events, task queue, credentials
+│   │       ├── worker/           # Celery app + task (the `worker` service runs this)
 │   │       ├── api/              # deps (get_current_user) + routes
 │   │       └── alembic/          # env.py + versions/
 │   ├── web/                      # Next.js frontend (see apps/web/README.md)
-│   └── worker/                   # placeholder (Celery worker, later phase)
+│   └── worker/                   # README only: the worker's code is apps/api/app/worker
+├── scripts/
+│   ├── watch_run.py              # CLI: run a workflow and print its WebSocket events live
+│   └── examples/                 # graphs for the CLI (gemini_gmail, gemini_output, delay, stream_tokens)
 └── packages/
     ├── workflow-engine/          # flowforge_engine: registry, nodes, resolver, validator, executor, providers
     └── shared/                   # placeholder (shared types, later phase)
@@ -581,6 +834,14 @@ dotenv parser accepts trailing `# comments`.
 - **Gemini `429 ... quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier=N`.** The
   free daily quota for that model is used up. Wait for the reset, switch `GEMINI_MODEL` to a
   model with more free quota, or add a `fallback` chain.
+- **Runs stay `pending`.** No worker consumes that queue: `docker compose ps worker`, then
+  `docker compose logs worker`. After `EXECUTION_PENDING_TIMEOUT_SECONDS` they're marked failed.
+- **A run was marked failed with "No heartbeat from worker ..." or "... restarted while this
+  execution was running".** The worker was killed, crashed, or was restarted (including a
+  `watchfiles` reload after a code change) mid-run; that's crash recovery doing its job.
+- **WebSocket closes with 4401 / 4404.** 4401: send `{"type": "auth", "token": ...}` first (or
+  `?token=`) with a current *access* token (not the refresh token). 4404: the execution id is
+  wrong or belongs to another user.
 - **Ollama "cannot connect ... is `ollama serve` running?"** Start Ollama on the host. From
   Docker, `OLLAMA_BASE_URL` must be `http://host.docker.internal:11434/v1`, not `localhost`.
   "model is not pulled" means you need to run `ollama pull <model>`.

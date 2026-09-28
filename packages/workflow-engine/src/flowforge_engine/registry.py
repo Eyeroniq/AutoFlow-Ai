@@ -35,6 +35,13 @@ class NodeDefinition(ABC, Generic[ConfigT]):
     branches: ClassVar[tuple[str, ...]] = ()
     # Output nodes contribute {name: value} to the execution's final output.
     produces_final_output: ClassVar[bool] = False
+    # Celery queue for runs containing this node (see flowforge_engine.routing). Everything
+    # built in uses "default"; a heavy node type can name its own queue and get dedicated
+    # workers (`celery worker -Q gpu`) without other changes.
+    queue: ClassVar[str] = "default"
+    # Whether a stop request may cancel the node mid-run. Nodes with side effects that
+    # can't be safely interrupted (sending an email) finish first; the run stops after.
+    interruptible: ClassVar[bool] = True
 
     @abstractmethod
     async def execute(self, context: NodeContext, config: ConfigT) -> NodeResult: ...
@@ -63,6 +70,8 @@ class NodeDefinition(ABC, Generic[ConfigT]):
             "config_schema": cls.config_schema.model_json_schema(),
             "output_schema": cls.output_schema.model_json_schema() if cls.output_schema else None,
             "branches": list(cls.branches),
+            "queue": cls.queue,
+            "interruptible": cls.interruptible,
         }
 
 

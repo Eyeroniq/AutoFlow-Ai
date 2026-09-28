@@ -24,7 +24,7 @@ async def test_input_gemini_gmail_output_end_to_end(client, user):
     assert validation.json() == {"valid": True, "errors": []}
 
     run = await client.post(
-        f"/api/workflows/{wid}/run", json={"inputs": {"topic": "solar power"}}, headers=user.headers
+        f"/api/workflows/{wid}/run?sync=true", json={"inputs": {"topic": "solar power"}}, headers=user.headers
     )
     assert run.status_code == 200, run.text
     execution = run.json()
@@ -78,7 +78,7 @@ async def test_input_gemini_gmail_output_end_to_end(client, user):
 
 async def test_run_without_body_uses_input_defaults(client, user):
     wid = await workflow_with_graph(client, user)
-    run = (await client.post(f"/api/workflows/{wid}/run", headers=user.headers)).json()
+    run = (await client.post(f"/api/workflows/{wid}/run?sync=true", headers=user.headers)).json()
     assert run["status"] == "success"
     assert run["node_executions"][0]["output"]["topic"] == "the history of workflow automation"
 
@@ -88,7 +88,7 @@ async def test_invalid_graph_returns_422_and_records_nothing(client, user):
     graph["nodes"][1]["config"].pop("user_prompt")
     wid = await workflow_with_graph(client, user, graph)
 
-    response = await client.post(f"/api/workflows/{wid}/run", headers=user.headers)
+    response = await client.post(f"/api/workflows/{wid}/run?sync=true", headers=user.headers)
 
     assert response.status_code == 422
     detail = response.json()["detail"]
@@ -102,7 +102,7 @@ async def test_failed_node_is_recorded_and_downstream_skipped(client, user):
     graph["variables"] = [{"key": "recipient", "value": "not-an-email"}]
     wid = await workflow_with_graph(client, user, graph)
 
-    execution = (await client.post(f"/api/workflows/{wid}/run", headers=user.headers)).json()
+    execution = (await client.post(f"/api/workflows/{wid}/run?sync=true", headers=user.headers)).json()
 
     assert execution["status"] == "failed"
     assert execution["final_output"] is None
@@ -132,7 +132,7 @@ async def test_condition_branch_not_taken_is_skipped_not_failed(client, user):
         ],
     }
     wid = await workflow_with_graph(client, user, graph)
-    execution = (await client.post(f"/api/workflows/{wid}/run", json={"inputs": {"amount": "250"}}, headers=user.headers)).json()
+    execution = (await client.post(f"/api/workflows/{wid}/run?sync=true", json={"inputs": {"amount": "250"}}, headers=user.headers)).json()
 
     assert execution["status"] == "success"
     by_key = {n["node_key"]: n for n in execution["node_executions"]}
@@ -144,7 +144,7 @@ async def test_condition_branch_not_taken_is_skipped_not_failed(client, user):
 
 async def test_executions_are_listed_newest_first_with_paging(client, user):
     wid = await workflow_with_graph(client, user)
-    ids = [(await client.post(f"/api/workflows/{wid}/run", headers=user.headers)).json()["id"] for _ in range(3)]
+    ids = [(await client.post(f"/api/workflows/{wid}/run?sync=true", headers=user.headers)).json()["id"] for _ in range(3)]
 
     listing = (await client.get(f"/api/workflows/{wid}/executions", headers=user.headers)).json()
     assert [e["id"] for e in listing] == ids[::-1]
@@ -156,7 +156,7 @@ async def test_executions_are_listed_newest_first_with_paging(client, user):
 async def test_executions_are_private(client, user_factory):
     owner, other = await user_factory(), await user_factory()
     wid = await workflow_with_graph(client, owner)
-    execution_id = (await client.post(f"/api/workflows/{wid}/run", headers=owner.headers)).json()["id"]
+    execution_id = (await client.post(f"/api/workflows/{wid}/run?sync=true", headers=owner.headers)).json()["id"]
 
     assert (await client.get(f"/api/executions/{execution_id}", headers=other.headers)).status_code == 404
     assert (await client.get(f"/api/executions/{uuid.uuid4()}", headers=owner.headers)).status_code == 404
@@ -165,6 +165,6 @@ async def test_executions_are_private(client, user_factory):
 
 async def test_deleting_a_workflow_deletes_its_executions(client, user):
     wid = await workflow_with_graph(client, user)
-    execution_id = (await client.post(f"/api/workflows/{wid}/run", headers=user.headers)).json()["id"]
+    execution_id = (await client.post(f"/api/workflows/{wid}/run?sync=true", headers=user.headers)).json()["id"]
     await client.delete(f"/api/workflows/{wid}", headers=user.headers)
     assert (await client.get(f"/api/executions/{execution_id}", headers=user.headers)).status_code == 404

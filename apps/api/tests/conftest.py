@@ -8,8 +8,10 @@ transaction that is rolled back afterwards (route commits become savepoints).
 import asyncio
 import os
 import uuid
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from alembic import command
@@ -38,9 +40,25 @@ settings.DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or _configured.set(
     database=f"{_configured.database}_test"
 ).render_as_string(hide_password=False)
 
+# ...and at Redis database 15 (broker, results, stop flags) before the Celery app is built,
+# so tests never touch the dev worker's queue. Pub/sub channels are per execution id.
+_redis = urlsplit(settings.REDIS_URL)
+settings.REDIS_URL = os.environ.get("TEST_REDIS_URL") or urlunsplit(_redis._replace(path="/15"))
+settings.CELERY_BROKER_URL = settings.CELERY_RESULT_BACKEND = None
+
+# Fast polling; no background heartbeats or WS database checks (tests share one DB session,
+# and those loops would use it concurrently). Tests that need them turn them on.
+settings.EXECUTION_STOP_POLL_SECONDS = 0.02
+settings.EXECUTION_HEARTBEAT_SECONDS = 3600
+settings.EXECUTION_STOP_WAIT_SECONDS = 0
+settings.WS_DB_CHECK_SECONDS = 3600
+settings.WS_AUTH_TIMEOUT_SECONDS = 2
+
 from app.core.rate_limit import limiter  # noqa: E402
-from app.db.session import get_db  # noqa: E402
+from app.core.redis import get_redis  # noqa: E402
+from app.db.session import get_db, get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services.task_queue import EnqueueFailed, get_task_queue  # noqa: E402
 
 API_ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,15 +128,93 @@ async def db_session(db_engine):
             await transaction.rollback()
 
 
+@dataclass
+class FakeTaskQueue:
+    """Records what the API would send to Celery (tests run executions themselves)."""
+
+    enqueued: list[tuple[uuid.UUID, str]] = field(default_factory=list)
+    revoked: list[str] = field(default_factory=list)
+    fail: bool = False
+
+    async def enqueue(self, execution_id: uuid.UUID, queue: str) -> str:
+        if self.fail:
+            raise EnqueueFailed("OperationalError: Error 111 connecting to redis:6379. Connection refused.")
+        self.enqueued.append((execution_id, queue))
+        return str(execution_id)
+
+    async def revoke(self, task_id: str) -> None:
+        self.revoked.append(task_id)
+
+
 @pytest.fixture
-async def client(db_session):
+def task_queue() -> FakeTaskQueue:
+    return FakeTaskQueue()
+
+
+class LockedSession:
+    """The test's session, with async operations serialized.
+
+    In production every request/worker has its own session. Tests share one (it rolls back
+    at the end), and a run executing in a background task can query while a request
+    handler does -- so each awaited operation takes a lock.
+    """
+
+    _ASYNC = frozenset({"execute", "scalar", "scalars", "get", "commit", "rollback", "flush", "refresh", "delete", "merge"})
+
+    def __init__(self, session: AsyncSession):
+        self._session = session
+        self._lock = asyncio.Lock()
+
+    def __getattr__(self, name):
+        attr = getattr(self._session, name)
+        if name not in self._ASYNC:
+            return attr
+
+        async def locked(*args, **kwargs):
+            async with self._lock:
+                return await attr(*args, **kwargs)
+
+        return locked
+
+
+@pytest.fixture
+def shared_session(db_session) -> LockedSession:
+    return LockedSession(db_session)
+
+
+@pytest.fixture
+def session_factory(shared_session):
+    """Opens "sessions" that are all the test's (locked) transaction-scoped session."""
+
+    @asynccontextmanager
+    async def shared():
+        yield shared_session
+
+    return shared
+
+
+@pytest.fixture
+def redis():
+    return get_redis()
+
+
+@pytest.fixture
+async def client(shared_session, session_factory, task_queue):
     async def override_get_db():
-        yield db_session
+        yield shared_session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
+    app.dependency_overrides[get_task_queue] = lambda: task_queue
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         yield http
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def _clean_test_redis():
+    yield
+    await get_redis().flushdb()
 
 
 @pytest.fixture(autouse=True)

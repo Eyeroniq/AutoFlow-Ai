@@ -1,14 +1,19 @@
+import socket
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from flowforge_engine import ExecutionServices, WorkflowGraph, validate_workflow
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from flowforge_engine import ExecutionServices, WorkflowGraph, queue_for_graph, validate_workflow
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, DbSession, SessionFactoryDep, TaskQueueDep
+from app.core.redis import get_redis
+from app.models.enums import ExecutionStatus
 from app.models.execution import WorkflowExecution
 from app.models.workflow import Workflow
-from app.schemas.execution import ExecutionDetail, ExecutionSummary, RunRequest
+from app.schemas.execution import ExecutionAccepted, ExecutionDetail, ExecutionSummary, RunRequest
 from app.schemas.workflow import (
     WorkflowCreate,
     WorkflowRead,
@@ -17,7 +22,15 @@ from app.schemas.workflow import (
     WorkflowValidation,
 )
 from app.services.providers import get_execution_services
-from app.services.runs import InvalidWorkflowGraph, load_execution_detail, run_workflow
+from app.services.runs import (
+    InvalidWorkflowGraph,
+    close_out_nodes,
+    create_execution,
+    finish_execution,
+    load_execution_detail,
+    run_execution,
+)
+from app.services.task_queue import EnqueueFailed
 from app.services.workflows import get_owned_workflow, replace_graph
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -119,26 +132,40 @@ async def validate(
 
 @router.post(
     "/{workflow_id}/run",
-    response_model=ExecutionDetail,
-    summary="Run the workflow now (synchronously)",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ExecutionAccepted,
+    summary="Run the workflow (queued to a worker; `?sync=true` runs it in-request)",
     description=(
-        "Executes the saved graph within this request and returns the full execution, "
-        "including each node's resolved input, output, and duration. A run that fails at "
-        "a node still returns 200 with `status: failed`; an invalid graph returns 422 "
-        "without creating an execution."
+        "Validates the saved graph, records a `pending` execution, queues it for a Celery "
+        "worker, and returns **202** immediately with the `execution_id`. Follow it live on "
+        "`WS /ws/executions/{execution_id}` or poll `GET /api/executions/{execution_id}`.\n\n"
+        "With `?sync=true` the run happens within this request instead and the response is "
+        "**200** with the full execution (each node's resolved input, output, and duration). "
+        "Either way a run that fails at a node ends with `status: failed`, and an invalid "
+        "graph (including `auth_missing`) returns 422 without creating an execution."
     ),
-    responses={**_NOT_FOUND, 422: {"description": "Graph failed validation; `detail.errors` lists why"}},
+    responses={
+        **_NOT_FOUND,
+        200: {"model": ExecutionDetail, "description": "`?sync=true`: the finished execution"},
+        422: {"description": "Graph failed validation; `detail.errors` lists why"},
+        503: {"description": "The task broker (Redis) is unreachable; the execution is marked failed"},
+    },
 )
 async def run(
     workflow_id: uuid.UUID,
     db: DbSession,
     user: CurrentUser,
     services: Services,
+    task_queue: TaskQueueDep,
+    session_factory: SessionFactoryDep,
     body: RunRequest | None = None,
-) -> ExecutionDetail:
+    sync: Annotated[bool, Query(description="Run within this request and return the finished execution (200).")] = False,
+) -> Any:
     workflow = await get_owned_workflow(db, workflow_id, user)
+    inputs = (body or RunRequest()).inputs
+    queue = None if sync else queue_for_graph(WorkflowGraph.model_validate(workflow.graph_json))
     try:
-        execution_id = await run_workflow(db, workflow, user, (body or RunRequest()).inputs, services)
+        execution = await create_execution(db, workflow, user, inputs, services, queue=queue)
     except InvalidWorkflowGraph as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -147,9 +174,27 @@ async def run(
                 "errors": [issue.model_dump(mode="json") for issue in exc.issues],
             },
         ) from None
-    detail = await load_execution_detail(db, execution_id, user)
-    assert detail is not None
-    return detail
+
+    if sync:
+        await run_execution(
+            execution.id, session_factory=session_factory, redis=get_redis(),
+            worker_id=f"api@{socket.gethostname()}", services=services,
+        )
+        detail = await load_execution_detail(db, execution.id, user)
+        assert detail is not None
+        return JSONResponse(status_code=status.HTTP_200_OK, content=jsonable_encoder(detail))
+
+    assert queue is not None
+    try:
+        await task_queue.enqueue(execution.id, queue)
+    except EnqueueFailed as exc:
+        error = f"Could not queue the run: the task broker is unavailable ({exc})"
+        await finish_execution(db, None, execution.id, ExecutionStatus.FAILED, error=error,
+                               from_statuses=(ExecutionStatus.PENDING,))
+        await close_out_nodes(db, None, execution.id, pending_reason="Not run: could not be queued",
+                              running_reason="Not run: could not be queued")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=error) from None
+    return ExecutionAccepted.build(execution.id, workflow.id, ExecutionStatus.PENDING, queue)
 
 
 @router.get(

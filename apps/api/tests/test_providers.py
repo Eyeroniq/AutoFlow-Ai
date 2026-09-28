@@ -132,7 +132,7 @@ async def test_explicit_mock_provider_runs_without_keys(client, user, no_server_
         ],
     }
     wid = await create_workflow(client, user, graph)
-    run = await client.post(f"/api/workflows/{wid}/run", json={"inputs": {"topic": "tides"}}, headers=user.headers)
+    run = await client.post(f"/api/workflows/{wid}/run?sync=true", json={"inputs": {"topic": "tides"}}, headers=user.headers)
     assert run.status_code == 200, run.text
     by_key = {n["node_key"]: n for n in run.json()["node_executions"]}
     assert by_key["gemini"]["output"]["provider_used"] == "mock"

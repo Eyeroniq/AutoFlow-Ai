@@ -46,7 +46,7 @@ async def test_listing_masks_and_reports_sources(client, user):
     listing = by_provider(response.json())
     assert set(listing) == {"gemini", "groq", "openrouter", "ollama", "openai", "anthropic", "gmail"}
     assert listing["groq"]["connected"] is True and listing["groq"]["masked"] == {"api_key": "gsk...cdef"}
-    assert listing["groq"]["default_model"] == "llama-3.3-70b-versatile"
+    assert listing["groq"]["default_model"] == "openai/gpt-oss-20b"
     assert listing["ollama"]["source"] == "server"  # needs no key
     assert listing["openrouter"]["get_key_url"] == "https://openrouter.ai/settings/keys"
     assert all(item["connected"] is False for name, item in listing.items() if name != "groq")

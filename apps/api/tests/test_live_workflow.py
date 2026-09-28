@@ -60,7 +60,7 @@ async def test_input_gemini_gmail_output_delivers_a_real_email(client, user, rea
     assert validation == {"valid": True, "errors": []}
 
     run = await client.post(
-        f"/api/workflows/{wid}/run", json={"inputs": {"topic": "renewable energy"}}, headers=user.headers
+        f"/api/workflows/{wid}/run?sync=true", json={"inputs": {"topic": "renewable energy"}}, headers=user.headers
     )
     assert run.status_code == 200, run.text
     execution = run.json()
@@ -91,7 +91,7 @@ async def test_input_gemini_gmail_output_delivers_a_real_email(client, user, rea
     deadline = asyncio.get_running_loop().time() + DELIVERY_TIMEOUT_SECONDS
     emails = []
     while True:
-        read = (await client.post(f"/api/workflows/{reader}/run", json={}, headers=user.headers)).json()
+        read = (await client.post(f"/api/workflows/{reader}/run?sync=true", json={}, headers=user.headers)).json()
         assert read["status"] == "success", read["error_message"]
         emails = read["final_output"]["result"]
         if emails or asyncio.get_running_loop().time() > deadline:

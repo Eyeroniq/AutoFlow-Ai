@@ -1,3 +1,5 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# In-process WebSocket client for the /ws tests (ASGI transport).
+httpx-ws==0.9.0

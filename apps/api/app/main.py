@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -12,11 +14,14 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.api.router import api_router
+from app.api.routes import ws
 from app.core.config import settings
 from app.core.crypto import get_cipher
 from app.core.logging import register_secret, setup_logging
 from app.core.rate_limit import limiter
-from app.db.session import engine
+from app.core.redis import close_redis, get_redis
+from app.db.session import AsyncSessionLocal, engine
+from app.services.control import recover_stale_executions
 
 setup_logging(settings.LOG_LEVEL)
 for _secret in settings.secret_values():
@@ -29,10 +34,27 @@ request_logger = logging.getLogger("app.request")
 _QUIET_PATHS = frozenset({"/api/health"})
 
 
+async def _recovery_loop() -> None:
+    """Periodically fail executions whose worker died (stale heartbeat) or that no worker
+    picked up. Idempotent, so running it in several API replicas is fine."""
+    while True:
+        await asyncio.sleep(settings.EXECUTION_RECOVERY_INTERVAL_SECONDS)
+        try:
+            async with AsyncSessionLocal() as db:
+                await recover_stale_executions(db, get_redis())
+        except Exception:
+            logger.exception("execution recovery sweep failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("api starting", extra={"environment": settings.ENVIRONMENT})
+    recovery = asyncio.create_task(_recovery_loop())
     yield
+    recovery.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await recovery
+    await close_redis()
     await engine.dispose()
     logger.info("api stopped")
 
@@ -40,7 +62,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="0.1.0",
-    description="FlowForge AI backend: auth, workflows, real LLM/email providers, and encrypted integrations.",
+    description=(
+        "FlowForge AI backend: auth, workflows, real LLM/email providers, encrypted integrations, "
+        "asynchronous runs on Celery workers, and live execution events over "
+        "`WS /ws/executions/{execution_id}` (see the README for the event schema)."
+    ),
     lifespan=lifespan,
 )
 
@@ -119,6 +145,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+app.include_router(ws.router)
 
 
 @app.get("/", include_in_schema=False)

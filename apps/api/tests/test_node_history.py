@@ -13,7 +13,7 @@ from app.schemas.workflow import EXAMPLE_GRAPH
 async def run_example(client, user):
     wid = (await client.post("/api/workflows", json={"name": "History"}, headers=user.headers)).json()["id"]
     await client.put(f"/api/workflows/{wid}", json={"graph": EXAMPLE_GRAPH}, headers=user.headers)
-    execution = (await client.post(f"/api/workflows/{wid}/run", headers=user.headers)).json()
+    execution = (await client.post(f"/api/workflows/{wid}/run?sync=true", headers=user.headers)).json()
     assert execution["status"] == "success"
     return wid, execution
 

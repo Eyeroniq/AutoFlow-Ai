@@ -155,7 +155,7 @@ class TestLLMNodes:
         defaults = {name: info.default_model for name, info in LLM_PROVIDERS.items()}
         assert defaults == {
             "gemini": "gemini-3.5-flash-lite",
-            "groq": "llama-3.3-70b-versatile",
+            "groq": "openai/gpt-oss-20b",
             "openrouter": "openrouter/free",
             "ollama": "llama3.2",
             "openai": "gpt-4.1-mini",
@@ -164,12 +164,12 @@ class TestLLMNodes:
         }
 
     async def test_model_override_and_settings_default(self):
-        settings = ProviderSettings(testing=True).with_account("groq", model="openai/gpt-oss-20b")
+        settings = ProviderSettings(testing=True).with_account("groq", model="openai/gpt-oss-120b")
         services = ExecutionServices(provider_settings=settings)
         default = await run("groq", {"user_prompt": "hi"}, services=services)
-        assert default.output["model"] == "openai/gpt-oss-20b"
-        explicit = await run("groq", {"user_prompt": "hi", "model": "llama-3.1-8b-instant"}, services=services)
-        assert explicit.output["model"] == "llama-3.1-8b-instant"
+        assert default.output["model"] == "openai/gpt-oss-120b"
+        explicit = await run("groq", {"user_prompt": "hi", "model": "qwen/qwen3.8-27b"}, services=services)
+        assert explicit.output["model"] == "qwen/qwen3.8-27b"
 
     async def test_explicit_mock_provider_works_without_testing_mode(self):
         services = ExecutionServices(provider_settings=ProviderSettings())  # no keys, not testing
@@ -383,9 +383,10 @@ class TestDelayNode:
         result = await run("delay", {"seconds": 0.01})
         assert result.output == {"waited_seconds": 0.01}
 
-    def test_capped_at_ten_seconds(self):
+    def test_capped_at_sixty_seconds(self):
         schema = get_node_definition("delay").config_schema
+        assert schema.model_validate({"seconds": 60}).seconds == 60
         with pytest.raises(ValidationError):
-            schema.model_validate({"seconds": 11})
+            schema.model_validate({"seconds": 61})
         with pytest.raises(ValidationError):
             schema.model_validate({"seconds": -1})

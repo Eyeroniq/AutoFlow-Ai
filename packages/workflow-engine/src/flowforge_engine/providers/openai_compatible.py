@@ -228,4 +228,11 @@ class OpenAICompatibleProvider:
                 raise ProviderError(
                     self.name, f"model '{model}' is not pulled on {self.base_url}; run `ollama pull {model}`"
                 )
+            if not available:
+                shown = ", ".join(sorted(ids)[:15]) + (", ..." if len(ids) > 15 else "")
+                raise ProviderError(
+                    self.name,
+                    f"the key works, but model '{model}' isn't available to it; set {self.name.upper()}_MODEL "
+                    f"(or the node's model) to one of: {shown}",
+                )
         return details

@@ -10,7 +10,9 @@ from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
 
 Operator = Literal["equals", "not_equals", "contains", "greater_than", "less_than"]
 
-MAX_DELAY_SECONDS = 10
+# Runs execute on a worker, so a delay no longer holds an HTTP request open; the per-node
+# timeout (WORKFLOW_NODE_TIMEOUT_SECONDS) still applies.
+MAX_DELAY_SECONDS = 60
 
 
 def _as_number(value: Any) -> float | None:
@@ -74,7 +76,7 @@ class ConditionNode(NodeDefinition[ConditionConfig]):
 
 
 class DelayConfig(NodeConfig):
-    seconds: float = Field(ge=0, le=MAX_DELAY_SECONDS, description=f"At most {MAX_DELAY_SECONDS}s in this phase.")
+    seconds: float = Field(ge=0, le=MAX_DELAY_SECONDS, description=f"At most {MAX_DELAY_SECONDS}s.")
 
 
 class DelayResult(BaseModel):

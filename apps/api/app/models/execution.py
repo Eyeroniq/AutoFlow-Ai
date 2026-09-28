@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, UUIDPrimaryKeyMixin
+from app.db.base import Base, CreatedAtMixin, UUIDPrimaryKeyMixin
 from app.models.enums import ExecutionStatus, ExecutionTrigger, NodeExecutionStatus, pg_enum
 
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from app.models.workflow import Workflow, WorkflowNode
 
 
-class WorkflowExecution(UUIDPrimaryKeyMixin, Base):
+class WorkflowExecution(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "workflow_executions"
 
     workflow_id: Mapped[uuid.UUID] = mapped_column(
@@ -38,6 +38,18 @@ class WorkflowExecution(UUIDPrimaryKeyMixin, Base):
     final_output_json: Mapped[dict[str, Any] | None]
     error_message: Mapped[str | None] = mapped_column(Text)
 
+    # What the run was started with, so a worker runs exactly that even if the workflow is
+    # edited while the execution waits in the queue.
+    inputs_json: Mapped[dict[str, Any] | None]
+    graph_json: Mapped[dict[str, Any] | None]
+    # Dispatch bookkeeping: Celery queue + task id (the execution id), which worker claimed
+    # it, its last heartbeat (stale => the worker died), and when a stop was requested.
+    queue: Mapped[str | None] = mapped_column(String(100))
+    celery_task_id: Mapped[str | None] = mapped_column(String(255))
+    worker_hostname: Mapped[str | None] = mapped_column(String(255))
+    heartbeat_at: Mapped[datetime | None]
+    stop_requested_at: Mapped[datetime | None]
+
     workflow: Mapped["Workflow"] = relationship(back_populates="executions")
     triggered_by: Mapped["User | None"] = relationship()
     node_executions: Mapped[list["NodeExecution"]] = relationship(
@@ -57,6 +69,8 @@ class NodeExecution(UUIDPrimaryKeyMixin, Base):
         ForeignKey("workflow_nodes.id", ondelete="SET NULL"), index=True
     )
     node_key: Mapped[str] = mapped_column(String(100))
+    # 0-based execution (topological) order, so not-yet-started nodes list in run order.
+    position: Mapped[int | None] = mapped_column(Integer)
     node_type: Mapped[str] = mapped_column(String(100))
     node_label: Mapped[str] = mapped_column(String(255))
     status: Mapped[NodeExecutionStatus] = mapped_column(

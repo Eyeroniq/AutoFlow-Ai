@@ -47,6 +47,7 @@ class ExecutionSummary(BaseModel):
     status: ExecutionStatus
     trigger: ExecutionTrigger
     triggered_by_user_id: uuid.UUID | None
+    created_at: datetime = Field(description="When the run was requested (queued).")
     started_at: datetime | None
     finished_at: datetime | None
     error_message: str | None
@@ -59,6 +60,10 @@ class ExecutionSummary(BaseModel):
     @property
     def duration_ms(self) -> int | None:
         return _duration_ms(self.started_at, self.finished_at)
+
+
+class ExecutionListItem(ExecutionSummary):
+    workflow_name: str
 
 
 class ExecutionDetail(ExecutionSummary):

@@ -19,6 +19,7 @@ from flowforge_engine.executor import (
     ExecutionControl,
     ExecutionHooks,
     execute_graph,
+    execute_node,
 )
 from flowforge_engine.graph import topological_sort, validate_graph, validate_workflow
 from flowforge_engine.models import (
@@ -85,6 +86,7 @@ __all__ = [
     "WorkflowGraph",
     "default_registry",
     "execute_graph",
+    "execute_node",
     "find_references",
     "get_node_definition",
     "list_node_definitions",

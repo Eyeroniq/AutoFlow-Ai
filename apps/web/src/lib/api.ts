@@ -1,6 +1,27 @@
 import { API_URL } from "./config";
 import { isTokenExpired, tokenStorage } from "./token-storage";
-import type { LoginPayload, RegisterPayload, TokenResponse, User } from "./types";
+import type {
+  ExecutionAccepted,
+  ExecutionDetail,
+  ExecutionListItem,
+  ExecutionStatus,
+  Integration,
+  IntegrationConnect,
+  IntegrationTestResult,
+  LoginPayload,
+  NodeTestRequest,
+  NodeTestResult,
+  NodeType,
+  RegisterPayload,
+  TokenResponse,
+  User,
+  ValidationIssue,
+  Workflow,
+  WorkflowGraph,
+  WorkflowListItem,
+  WorkflowUpdate,
+  WorkflowValidation,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -13,6 +34,14 @@ export class ApiError extends Error {
   }
 }
 
+/** The graph problems a refused run (422 with `detail.errors`) reports; [] for any other error. */
+export function runIssues(error: unknown): ValidationIssue[] {
+  if (!(error instanceof ApiError) || error.status !== 422) return [];
+  const detail = (error.body as { detail?: unknown } | undefined)?.detail;
+  const errors = detail && typeof detail === "object" ? (detail as { errors?: unknown }).errors : undefined;
+  return Array.isArray(errors) ? (errors as ValidationIssue[]) : [];
+}
+
 interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
@@ -21,7 +50,7 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
-interface ValidationIssue {
+interface PydanticIssue {
   loc?: (string | number)[];
   msg?: string;
 }
@@ -30,7 +59,7 @@ interface ValidationIssue {
 function describeDetail(detail: unknown): string | null {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
-    const messages = (detail as ValidationIssue[])
+    const messages = (detail as PydanticIssue[])
       .map((issue) => {
         const field = issue.loc?.filter((part) => part !== "body").join(".");
         const msg = issue.msg?.replace(/^Value error, /, "");
@@ -125,6 +154,32 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return parse<T>(response);
 }
 
+/**
+ * A current access token for places that can't go through request() (the WebSocket's
+ * first-message auth): refreshed first when it has expired. Null when signed out.
+ */
+export async function getFreshAccessToken(): Promise<string | null> {
+  const current = tokenStorage.getAccessToken();
+  if ((!current || isTokenExpired(current)) && tokenStorage.getRefreshToken()) {
+    await refreshSession();
+  }
+  return tokenStorage.getAccessToken();
+}
+
+const authed = <T>(path: string, options: Omit<RequestOptions, "auth"> = {}) =>
+  request<T>(path, { ...options, auth: true });
+
+function query(params: Record<string, string | number | undefined | null>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : "";
+}
+
+const enc = encodeURIComponent;
+
 export const api = {
   auth: {
     login: (payload: LoginPayload) =>
@@ -132,5 +187,45 @@ export const api = {
     register: (payload: RegisterPayload) =>
       request<TokenResponse>("/api/auth/register", { method: "POST", body: payload }),
     me: (signal?: AbortSignal) => request<User>("/api/auth/me", { auth: true, signal }),
+  },
+  nodes: {
+    list: () => authed<NodeType[]>("/api/nodes"),
+  },
+  workflows: {
+    list: () => authed<WorkflowListItem[]>("/api/workflows"),
+    get: (id: string, signal?: AbortSignal) => authed<Workflow>(`/api/workflows/${enc(id)}`, { signal }),
+    create: (body: { name: string; description?: string | null }) =>
+      authed<Workflow>("/api/workflows", { method: "POST", body }),
+    update: (id: string, body: WorkflowUpdate) =>
+      authed<Workflow>(`/api/workflows/${enc(id)}`, { method: "PUT", body }),
+    remove: (id: string) => authed<null>(`/api/workflows/${enc(id)}`, { method: "DELETE" }),
+    duplicate: (id: string) => authed<Workflow>(`/api/workflows/${enc(id)}/duplicate`, { method: "POST" }),
+    /** Validate `graph` (unsaved edits) or, without it, the saved graph. */
+    validate: (id: string, graph?: WorkflowGraph) =>
+      authed<WorkflowValidation>(`/api/workflows/${enc(id)}/validate`, {
+        method: "POST",
+        body: graph ? { graph } : undefined,
+      }),
+    /** Queue a run: resolves with the 202 body. */
+    run: (id: string, inputs: Record<string, unknown> = {}) =>
+      authed<ExecutionAccepted>(`/api/workflows/${enc(id)}/run`, { method: "POST", body: { inputs } }),
+    executions: (id: string, params: { limit?: number; offset?: number } = {}) =>
+      authed<ExecutionListItem[]>(`/api/workflows/${enc(id)}/executions${query(params)}`),
+    testNode: (id: string, nodeKey: string, body: NodeTestRequest) =>
+      authed<NodeTestResult>(`/api/workflows/${enc(id)}/nodes/${enc(nodeKey)}/test`, { method: "POST", body }),
+  },
+  executions: {
+    list: (params: { limit?: number; offset?: number; status?: ExecutionStatus; workflow_id?: string } = {}) =>
+      authed<ExecutionListItem[]>(`/api/executions${query(params)}`),
+    get: (id: string, signal?: AbortSignal) => authed<ExecutionDetail>(`/api/executions/${enc(id)}`, { signal }),
+    stop: (id: string) => authed<ExecutionDetail>(`/api/executions/${enc(id)}/stop`, { method: "POST" }),
+  },
+  integrations: {
+    list: () => authed<Integration[]>("/api/integrations"),
+    connect: (provider: string, body: IntegrationConnect) =>
+      authed<Integration>(`/api/integrations/${enc(provider)}/connect`, { method: "POST", body }),
+    disconnect: (provider: string) => authed<null>(`/api/integrations/${enc(provider)}`, { method: "DELETE" }),
+    test: (provider: string) =>
+      authed<IntegrationTestResult>(`/api/integrations/${enc(provider)}/test`, { method: "POST" }),
   },
 };

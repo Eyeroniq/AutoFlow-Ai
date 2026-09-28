@@ -11,27 +11,32 @@ A visual AI workflow automation builder. This repository is being built in phase
   Anthropic if you add keys), and Gmail over SMTP/IMAP with an App Password. Per-user
   credentials are encrypted at rest, and a provider without credentials is a validation
   error, never a silent mock.
-- **Phase 3 (this state):** asynchronous execution. `POST /run` queues the run on Redis and
+- **Phase 3:** asynchronous execution. `POST /run` queues the run on Redis and
   returns `202` at once; Celery workers execute it, recording every node's state in Postgres
   and publishing live events that `WS /ws/executions/{id}` streams to clients (with a
   database replay for late joiners). Runs can be stopped, crashed workers are detected, and
-  delivery is idempotent. Everything is testable from `/docs` and `scripts/watch_run.py`; the
-  frontend is unchanged.
+  delivery is idempotent. Everything is testable from `/docs` and `scripts/watch_run.py`.
+- **Phase 4 (this state):** the visual editor. A full-screen React Flow canvas at
+  `/pipelines/{id}` wired to the real API: a node library from `GET /api/nodes`, config forms
+  generated from each node's JSON Schema, `{{`-autocomplete for references, autosave with
+  undo/redo, live validation with errors on the nodes, one-node test runs, and runs whose
+  node and edge colors follow the WebSocket live. Plus a dashboard, execution history and
+  detail pages, and an integrations page for connecting provider keys.
 
-The canvas and templates come in later phases.
+Templates come in a later phase.
 
 ## Stack
 
 | Layer    | Tech                                                                        |
 | -------- | --------------------------------------------------------------------------- |
-| Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS v4, React Hook Form + Zod |
+| Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS v4, React Flow (`@xyflow/react` 12), Zustand, TanStack Query, React Hook Form + Zod, lucide-react |
 | Backend  | Python 3.13, FastAPI, SQLAlchemy 2.0 (async, asyncpg), Alembic, Pydantic v2 |
 | Engine   | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs; stdlib smtplib/imaplib |
 | Secrets  | Fernet (`cryptography`) for stored credentials                                |
 | Auth     | JWT (python-jose, HS256), passlib + bcrypt, slowapi rate limiting           |
 | Async    | Celery 5.6 (Redis broker + result backend), Redis pub/sub, WebSockets       |
 | Data     | PostgreSQL 16, Redis 7                                                      |
-| Tests    | pytest + pytest-asyncio, against a real Postgres test database              |
+| Tests    | pytest + pytest-asyncio against a real Postgres test database; Vitest (web units); Playwright (end to end, real stack) |
 | Infra    | Docker Compose                                                              |
 
 ## Prerequisites
@@ -72,7 +77,10 @@ Then open:
 | Postgres (host) | `localhost:5433`, user/pass `flowforge` |
 | Redis (host)    | `localhost:6379`                         |
 
-Log in with **demo@flowforge.ai** / **demo1234**, or register a new account.
+Log in with **demo@flowforge.ai** / **demo1234**, or register a new account. The dashboard
+lists **Demo: Summarize and email** (Input → Gemini → Gmail → Output). Open it, press
+**Validate**, then **Run**: with `GEMINI_API_KEY`, `SMTP_USER`, and `SMTP_PASSWORD` set, the
+nodes turn blue then green as the run progresses and the summary arrives in `SMTP_USER`'s inbox.
 
 ### About `docker compose up`
 
@@ -108,7 +116,65 @@ docker compose up --build -V web       # after changing package.json (renews nod
 docker compose up --build api worker   # after changing requirements.txt or the engine's dependencies
 ```
 
+## The editor
+
+![The editor with the seeded pipeline](docs/screenshots/editor.png)
+
+| Running live (blue = running, green = done) | Validation errors on the nodes |
+| --- | --- |
+| ![A run in progress](docs/screenshots/run-live.png) | ![A cycle and a missing field](docs/screenshots/validation-errors.png) |
+
+![Execution detail](docs/screenshots/execution-detail.png)
+
+Everything in the UI comes from the API; there is no mock data.
+
+- **Canvas** (`/pipelines/{id}`): drag nodes from the library (grouped General / LLM /
+  Integrations, searchable; click to add at the center), move, connect and disconnect edges,
+  select several (Shift-drag a box, or Ctrl/Cmd-click), duplicate (Ctrl/Cmd+D), rename
+  (double-click the title), collapse, and delete (Delete/Backspace or the node's ⋯ menu).
+  Undo/redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl+Y) covers adds, deletes, moves, renames,
+  config and variable edits, with a bounded history (100 steps; typing in one field within a
+  second is one step, and so is a drag). The view fits the graph on load and when a run
+  starts; zoom controls and a minimap sit bottom-right.
+- **Node cards** show the category color, icon, title, a one-line config summary, input and
+  output handles (true/false handles on Condition), a status dot, an issue badge, and streamed
+  LLM text while a node runs. Edges are gray before a run, blue and animated while their
+  target runs, green when both ends succeeded, and red when either failed.
+- **Config panel** (select a node): a form generated from the node's JSON Schema with React
+  Hook Form + Zod (text, textarea, number, select for enums, checkbox, lists, JSON), required
+  markers, and inline errors. LLM nodes get a provider select that shows which credential it
+  would use, a model field, and an ordered fallback chain. LLM and Gmail nodes have a real
+  **Test connection** (`POST /api/integrations/{provider}/test`). **Test node** runs just that
+  node on the server with sample upstream outputs and shows the resolved input, output,
+  duration, and error.
+- **References:** type `{{` in any text field for a keyboard-navigable list of what the node
+  can use: `{{input.<name>}}`, upstream outputs such as `{{gemini.response}}`,
+  `{{vars.<key>}}`, and `{{system.execution_id}}`. The **Variables** panel edits workflow
+  variables, which are saved with the graph.
+- **Saving:** edits autosave one second after you stop (or press Save / Ctrl/Cmd+S). The top
+  bar shows Unsaved changes / Saving… / Saved. A failed save shows **Save failed** with a
+  Retry, plus a toast, and retries with backoff; it is never silent. Only one save is in
+  flight at a time, and responses for a previously loaded workflow are ignored.
+- **Validation:** the unsaved graph is checked by `POST /validate` as you edit. Issues badge
+  their nodes and appear under the fields they concern, in the backend's words. The Validate
+  button opens the list; clicking an issue selects and centers its node.
+- **Running:** Run asks for the Input nodes' values, saves, and calls `POST /run` (`202`). The
+  editor then follows the run over `WS /ws/executions/{id}` (the JWT is sent as the first
+  message): node and edge colors, a run panel with a per-node timeline (status, duration,
+  input, output, error, streamed tokens), and the final output. Stop calls `/stop`. Dropped
+  connections reconnect with backoff, and the server's snapshot replays anything missed; a run
+  already in progress when you open the editor is joined the same way. A `4401` refreshes the
+  session once and then asks you to sign in; a `4404` says the run isn't yours.
+- **Other pages:** `/dashboard` (pipelines with status, last run, and last modified; create,
+  open, run, duplicate, delete; recent executions), `/executions` (history filtered by
+  pipeline and status, refreshing while runs are active), `/executions/{id}` (per-node
+  timeline, live while running, with Stop), and `/integrations` (connect, test, and disconnect
+  Gemini, Groq, OpenRouter, Ollama, OpenAI, Claude, and Gmail; secrets are write-only and
+  shown masked). Errors surface as toasts, and the editor has its own error boundary.
+
 ## Tests
+
+### Backend
 
 One `pytest` run covers the API suite (`apps/api/tests`) and the engine suite
 (`packages/workflow-engine/tests`):
@@ -156,6 +222,54 @@ suite in a loop.
 
 Locally (venv, with the dockerized Postgres and Redis running): `cd apps/api && pytest`.
 
+### Web unit tests (Vitest)
+
+```bash
+cd apps/web
+npm install
+npm test
+```
+
+They cover the editor store (add, delete, duplicate, connect, undo/redo and coalescing; the
+save state machine: debounced revisions, one save in flight, re-saving edits made during a
+save, ignoring stale responses, errors), `{{` reference suggestions and insertion, the JSON
+Schema → form mapping and its Zod rules (checked against the backend's messages), graph
+conversion and placement, the run-state reducer (snapshots, seq de-duplication, token
+streaming), and the WebSocket client (first-message auth, 4401 refresh-once, 4404, reconnect
+backoff).
+
+### End-to-end tests (Playwright)
+
+These drive a real Chromium against the running stack, with nothing mocked:
+
+```bash
+docker compose up -d
+docker compose exec api python -m app.db.seed
+cd apps/web
+npx playwright install chromium     # first time only
+npx playwright test                 # E2E_BASE_URL / E2E_API_URL override the defaults
+```
+
+- `e2e/editor.spec.ts` builds scratch pipelines through the API (deleted afterwards) and
+  checks drag-and-drop from the library, connecting, autosave and reload,
+  duplicate/rename/collapse/multi-select/delete with undo and redo, the schema form, `{{`
+  autocomplete, variables, inline reference errors, Test node, a failed save with Retry, and a
+  deliberately broken graph (a cycle and a missing required field) showing errors on its
+  nodes.
+- `e2e/run.spec.ts` opens the seeded pipeline, edits the prompt and turns on streaming
+  (autosaved), runs it, and watches the nodes turn blue and then green over the WebSocket,
+  asserting that Gemini's tokens reached the browser. It confirms the **real email** arrived by
+  reading the inbox over IMAP with a Gmail Read node, then opens the execution detail page;
+  the seeded graph is restored afterwards. It also stops a running workflow and joins one
+  that's already in progress.
+- `e2e/pages.spec.ts` covers the dashboard, execution history filters and detail, the
+  socket's 4401/4404 closes, and the integrations page: real tests of the server's Gemini and
+  Gmail credentials, and connecting then disconnecting a throwaway key on a provider you
+  haven't stored one for.
+
+The run test calls Gemini and sends one email, so it needs `GEMINI_API_KEY`, `SMTP_USER`, and
+`SMTP_PASSWORD`. Screenshots are written to [`docs/screenshots`](docs/screenshots).
+
 ## Database migrations
 
 Migrations live in [`apps/api/app/alembic/versions`](apps/api/app/alembic/versions). The API
@@ -181,7 +295,11 @@ docker compose exec postgres psql -U flowforge -d flowforge -c "\dt"
 ## Seed data
 
 [`apps/api/app/db/seed.py`](apps/api/app/db/seed.py) creates the demo user
-`demo@flowforge.ai` / `demo1234`. It's idempotent, so it's safe to run more than once.
+`demo@flowforge.ai` / `demo1234` and a ready pipeline, **Demo: Summarize and email**: Input
+(`topic`) → Gemini (streams its answer) → Gmail (to `{{vars.recipient}}`, set to `SMTP_USER`)
+→ Output. It uses the real providers, so it validates and runs from the UI once the keys are
+in `.env`. The seed is idempotent (the pipeline is matched by owner and name), so it's safe to
+run more than once and never overwrites a pipeline you've edited.
 
 ```bash
 docker compose exec api python -m app.db.seed          # while the stack is running
@@ -234,6 +352,10 @@ optional `model` (blank = the provider's default below), `system_prompt`, `user_
 | Ollama       | `ollama`     | OpenAI-compatible        | `llama3.2`                           | none (local)             |
 | OpenAI       | `openai`     | OpenAI-compatible        | `gpt-4.1-mini`                       | `OPENAI_API_KEY` (paid)  |
 | Anthropic    | `anthropic`  | anthropic SDK            | `claude-opus-5`                      | `ANTHROPIC_API_KEY` (paid) |
+
+Keys in `.env` are server-wide defaults. Each user can also store their own on the
+**Integrations** page (`/integrations`), which takes priority for their runs; **Test
+connection** there checks a key with a real, minimal call.
 
 **How to get each free key:**
 
@@ -594,14 +716,18 @@ is a `404`).
 
 | Method | Path                                  | Description                                                        |
 | ------ | ------------------------------------- | ------------------------------------------------------------------ |
-| GET    | `/api/workflows`                      | List your workflows (newest first)                                 |
+| GET    | `/api/nodes`                          | The node catalog: type, category, group, label, description, icon, queue, branches, handles, output keys, and its config's JSON Schema |
+| GET    | `/api/workflows`                      | List your workflows (newest first) with `node_count` and `last_execution` |
 | POST   | `/api/workflows`                      | Create `{name, description}` with an empty graph                   |
 | GET    | `/api/workflows/{id}`                 | One workflow, including its `graph`                                |
 | PUT    | `/api/workflows/{id}`                 | Update `name` / `description` / `status`; `graph` fully replaces nodes, edges, and variables and bumps `version` |
 | DELETE | `/api/workflows/{id}`                 | Delete the workflow and its execution history                      |
-| POST   | `/api/workflows/{id}/validate`        | `{valid, errors: [...]}`; an empty list means the graph can run (includes `auth_missing` checks) |
+| POST   | `/api/workflows/{id}/validate`        | `{valid, errors: [...]}`; an empty list means the graph can run (includes `auth_missing` checks). Send `{graph}` to check unsaved edits |
+| POST   | `/api/workflows/{id}/duplicate`       | Copy the workflow and its graph as "Name (copy)" → `201`           |
+| POST   | `/api/workflows/{id}/nodes/{node_key}/test` | Run one saved node in isolation with `{config?, upstream_outputs, variables, inputs}` → `{status, input, output, error, duration_ms}`. Real providers: an LLM node calls the model and a Gmail node sends |
 | POST   | `/api/workflows/{id}/run`             | Queue a run with `{inputs}` → `202 {execution_id, status: "pending", queue, links}`; `?sync=true` runs it in-request → `200` with the full execution; `503` if the broker is down |
 | GET    | `/api/workflows/{id}/executions`      | Past executions, newest first (`limit`, `offset`)                  |
+| GET    | `/api/executions`                     | All your executions, newest first, with `workflow_name` (`limit`, `offset`, `status`, `workflow_id`) |
 | GET    | `/api/executions/{id}`                | One execution with every node's resolved input, output, and timing |
 | POST   | `/api/executions/{id}/stop`           | Stop a pending/running execution → `200` final state, `202` stop pending; `409` if finished |
 | WS     | `/ws/executions/{id}`                 | Snapshot + live events (see [Real-time events](#real-time-events-websocket)) |
@@ -655,6 +781,29 @@ Notes:
    `final_output.result.email` is the Gmail receipt (`status: "sent"`, a real `Message-ID`).
    The email arrives in the inbox. (Add `?sync=true` to get the finished execution directly.)
 7. `GET /api/workflows/{id}/executions` → the run is listed.
+
+## Frontend architecture
+
+The web app ([`apps/web`](apps/web)) talks to the API directly from the browser
+(`NEXT_PUBLIC_API_URL`) through the Phase 1 auth client, which refreshes the access token
+before it expires and once on any `401`. TanStack Query holds server data; failed queries and
+mutations show a toast unless they opt out with `meta: { silent: true }`.
+
+- **Editor store** (`src/features/editor/store.ts`, Zustand): the graph (React Flow nodes and
+  edges), variables, undo/redo snapshots, the save state machine, validation issues, and the
+  live run state. React Flow is controlled, so every change goes through the store, where
+  history and autosave see it.
+- **Saving:** each edit bumps `revision`. `saveNow()` sends the latest graph and, if more edits
+  landed while it was in flight, sends again. A session token drops responses for a workflow
+  that's no longer loaded. `useAutosave` debounces it and retries with backoff after errors.
+- **Forms:** `schema-form.ts` maps each property of a node's JSON Schema to a field kind and a
+  Zod rule that mirrors Pydantic. A `{{reference}}` is accepted where a number or enum is
+  expected, since it's resolved at run time. Backend issues for a field are merged in.
+- **Runs:** `run-controller.tsx` queues a run and attaches an `ExecutionSocket`
+  (`src/features/runs`). `run-state.ts` is a pure reducer from the snapshot and events
+  (de-duplicated by `seq`) to per-node state; the editor and the execution detail page share it.
+- **Routes:** `/pipelines/[id]` (editor), `/dashboard`, `/executions`, `/executions/[id]`,
+  `/integrations`, `/login`, and `/register`.
 
 ## Workflow engine
 
@@ -783,7 +932,7 @@ dotenv parser accepts trailing `# comments`.
 ├── compose.yaml                  # root entrypoint → includes infrastructure/docker-compose.yml
 ├── .env.example
 ├── infrastructure/
-│   └── docker-compose.yml        # postgres, redis, api, web
+│   └── docker-compose.yml        # postgres, redis, api, worker, web
 ├── apps/
 │   ├── api/                      # FastAPI backend
 │   │   ├── alembic.ini
@@ -803,7 +952,12 @@ dotenv parser accepts trailing `# comments`.
 │   │       ├── api/              # deps (get_current_user) + routes
 │   │       └── alembic/          # env.py + versions/
 │   ├── web/                      # Next.js frontend (see apps/web/README.md)
+│   │   ├── src/app/              # routes: dashboard, pipelines/[id], executions, integrations, auth
+│   │   ├── src/features/         # editor (canvas, store, forms, run panel), runs, dashboard, executions, integrations
+│   │   ├── e2e/                  # Playwright end-to-end tests
+│   │   └── playwright.config.ts
 │   └── worker/                   # README only: the worker's code is apps/api/app/worker
+├── docs/screenshots/             # written by the Playwright tests
 ├── scripts/
 │   ├── watch_run.py              # CLI: run a workflow and print its WebSocket events live
 │   └── examples/                 # graphs for the CLI (gemini_gmail, gemini_output, delay, stream_tokens)
@@ -823,6 +977,8 @@ dotenv parser accepts trailing `# comments`.
   both dev servers poll: `WATCHFILES_FORCE_POLLING` for uvicorn, and `NEXT_DEV_POLL_INTERVAL_MS`
   plus the webpack dev server for Next.js. Turbopack's poll watcher misses changes made through
   bind mounts. `npm run dev` on the host still uses Turbopack.
+- **A new page returns 404 in Docker.** The webpack watcher can miss a new route folder under
+  `src/app/`; run `docker compose restart web`.
 - **`429 Too many requests` while testing.** Wait a minute, or raise `AUTH_RATE_LIMIT` in `.env`
   and restart the API.
 - **`auth_missing` / "Authentication missing for provider ..."** The node's provider has no key

@@ -1,16 +1,52 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
+from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, TaskQueueDep
 from app.core.redis import get_redis
-from app.schemas.execution import ExecutionDetail
+from app.models.enums import ExecutionStatus
+from app.models.execution import WorkflowExecution
+from app.models.workflow import Workflow
+from app.schemas.execution import ExecutionDetail, ExecutionListItem, ExecutionSummary
 from app.services.control import ExecutionAlreadyFinished, stop_execution
 from app.services.runs import load_execution_detail, owned_execution
 
 router = APIRouter(prefix="/executions", tags=["executions"])
 
 _NOT_FOUND = {404: {"description": "Execution not found (or not yours)"}}
+
+
+@router.get(
+    "",
+    response_model=list[ExecutionListItem],
+    summary="Your executions across all workflows (newest first)",
+)
+async def list_executions(
+    db: DbSession,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status_: Annotated[ExecutionStatus | None, Query(alias="status")] = None,
+    workflow_id: uuid.UUID | None = None,
+) -> list[ExecutionListItem]:
+    query = (
+        select(WorkflowExecution, Workflow.name)
+        .join(Workflow, Workflow.id == WorkflowExecution.workflow_id)
+        .where(Workflow.owner_id == user.id)
+    )
+    if status_ is not None:
+        query = query.where(WorkflowExecution.status == status_)
+    if workflow_id is not None:
+        query = query.where(WorkflowExecution.workflow_id == workflow_id)
+    rows = await db.execute(
+        query.order_by(WorkflowExecution.created_at.desc(), WorkflowExecution.id).limit(limit).offset(offset)
+    )
+    return [
+        ExecutionListItem(**ExecutionSummary.model_validate(execution).model_dump(), workflow_name=name)
+        for execution, name in rows
+    ]
 
 
 @router.get(

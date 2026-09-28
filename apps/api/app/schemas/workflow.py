@@ -6,7 +6,7 @@ from flowforge_engine import ValidationIssue, WorkflowGraph
 from flowforge_engine.testing import example_graph
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from app.models.enums import WorkflowStatus
+from app.models.enums import ExecutionStatus, WorkflowStatus
 
 
 def _example_graph() -> dict[str, Any]:
@@ -54,6 +54,23 @@ class WorkflowSummary(BaseModel):
     updated_at: datetime
 
 
+class LastExecution(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: ExecutionStatus
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class WorkflowListItem(WorkflowSummary):
+    """A workflow in the dashboard list: plus its size and most recent run."""
+
+    node_count: int
+    last_execution: LastExecution | None
+
+
 class WorkflowRead(WorkflowSummary):
     graph: WorkflowGraph = Field(validation_alias="graph_json")
 
@@ -61,3 +78,46 @@ class WorkflowRead(WorkflowSummary):
 class WorkflowValidation(BaseModel):
     valid: bool
     errors: list[ValidationIssue]
+
+
+class ValidateRequest(BaseModel):
+    """Optional body for /validate: check this graph instead of the saved one (the editor
+    validates unsaved edits with it; nothing is stored)."""
+
+    graph: WorkflowGraph | None = None
+
+
+class NodeTestRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [{
+                "upstream_outputs": {"input": {"value": "tides", "topic": "tides"}},
+                "variables": {"recipient": "you@example.com"},
+            }]
+        }
+    )
+
+    config: dict[str, Any] | None = Field(
+        default=None, description="Test this config instead of the saved one (e.g. unsaved edits)."
+    )
+    upstream_outputs: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Sample outputs of upstream nodes, keyed by node id, for {{node.key}} references.",
+    )
+    variables: dict[str, Any] = Field(
+        default_factory=dict, description="Workflow variables; merged over the saved graph's variables."
+    )
+    inputs: dict[str, Any] = Field(default_factory=dict, description="Run inputs, for Input nodes.")
+
+
+class NodeTestResult(BaseModel):
+    node_key: str
+    node_type: str
+    label: str
+    status: str = Field(description="success, failed, or skipped")
+    input: dict[str, Any] | None = Field(description="The config after {{...}} resolution.")
+    output: dict[str, Any] | None
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: int | None

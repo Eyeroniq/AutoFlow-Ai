@@ -5,17 +5,30 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from flowforge_engine import ExecutionServices, WorkflowGraph, queue_for_graph, validate_workflow
+from flowforge_engine import (
+    ExecutionServices,
+    NodeContext,
+    WorkflowGraph,
+    execute_node,
+    queue_for_graph,
+    validate_workflow,
+)
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, SessionFactoryDep, TaskQueueDep
+from app.core.config import settings
 from app.core.redis import get_redis
 from app.models.enums import ExecutionStatus
 from app.models.execution import WorkflowExecution
 from app.models.workflow import Workflow
 from app.schemas.execution import ExecutionAccepted, ExecutionDetail, ExecutionSummary, RunRequest
 from app.schemas.workflow import (
+    LastExecution,
+    NodeTestRequest,
+    NodeTestResult,
+    ValidateRequest,
     WorkflowCreate,
+    WorkflowListItem,
     WorkflowRead,
     WorkflowSummary,
     WorkflowUpdate,
@@ -40,12 +53,33 @@ Services = Annotated[ExecutionServices, Depends(get_execution_services)]
 _NOT_FOUND = {404: {"description": "Workflow not found (or not yours)"}}
 
 
-@router.get("", response_model=list[WorkflowSummary], summary="List your workflows")
-async def list_workflows(db: DbSession, user: CurrentUser) -> list[Workflow]:
-    result = await db.scalars(
+@router.get(
+    "",
+    response_model=list[WorkflowListItem],
+    summary="List your workflows",
+    description="Newest-edited first, each with its node count and most recent execution.",
+)
+async def list_workflows(db: DbSession, user: CurrentUser) -> list[WorkflowListItem]:
+    workflows = list(await db.scalars(
         select(Workflow).where(Workflow.owner_id == user.id).order_by(Workflow.updated_at.desc())
-    )
-    return list(result)
+    ))
+    latest: dict[uuid.UUID, WorkflowExecution] = {}
+    if workflows:
+        rows = await db.scalars(
+            select(WorkflowExecution)
+            .where(WorkflowExecution.workflow_id.in_([w.id for w in workflows]))
+            .distinct(WorkflowExecution.workflow_id)
+            .order_by(WorkflowExecution.workflow_id, WorkflowExecution.created_at.desc())
+        )
+        latest = {row.workflow_id: row for row in rows}
+    return [
+        WorkflowListItem(
+            **WorkflowSummary.model_validate(w).model_dump(),
+            node_count=len((w.graph_json or {}).get("nodes", [])),
+            last_execution=LastExecution.model_validate(latest[w.id]) if w.id in latest else None,
+        )
+        for w in workflows
+    ]
 
 
 @router.post(
@@ -114,20 +148,105 @@ async def delete_workflow(workflow_id: uuid.UUID, db: DbSession, user: CurrentUs
 @router.post(
     "/{workflow_id}/validate",
     response_model=WorkflowValidation,
-    summary="Validate the saved graph",
+    summary="Validate the saved graph (or an unsaved one)",
     description=(
         "Returns every problem that would stop the graph from running; an empty `errors` list "
         "means valid. A node whose provider has no credentials (neither yours nor the server's) "
-        "is reported with code `auth_missing` (\"Authentication missing for provider ...\")."
+        "is reported with code `auth_missing` (\"Authentication missing for provider ...\"). "
+        "Send `{\"graph\": {...}}` to validate that graph instead of the saved one (nothing is stored)."
     ),
     responses=_NOT_FOUND,
 )
 async def validate(
-    workflow_id: uuid.UUID, db: DbSession, user: CurrentUser, services: Services
+    workflow_id: uuid.UUID,
+    db: DbSession,
+    user: CurrentUser,
+    services: Services,
+    body: ValidateRequest | None = None,
 ) -> WorkflowValidation:
     workflow = await get_owned_workflow(db, workflow_id, user)
-    errors = validate_workflow(WorkflowGraph.model_validate(workflow.graph_json), services=services)
+    graph = body.graph if body and body.graph is not None else WorkflowGraph.model_validate(workflow.graph_json)
+    errors = validate_workflow(graph, services=services)
     return WorkflowValidation(valid=not errors, errors=errors)
+
+
+@router.post(
+    "/{workflow_id}/duplicate",
+    response_model=WorkflowRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Copy a workflow (graph, variables, and description; not its history)",
+    responses=_NOT_FOUND,
+)
+async def duplicate_workflow(workflow_id: uuid.UUID, db: DbSession, user: CurrentUser) -> Workflow:
+    source = await get_owned_workflow(db, workflow_id, user)
+    copy = Workflow(
+        name=f"{source.name} (copy)"[:255],
+        description=source.description,
+        owner_id=user.id,
+        graph_json=WorkflowGraph().model_dump(mode="json"),
+    )
+    db.add(copy)
+    await db.flush()
+    await replace_graph(db, copy, WorkflowGraph.model_validate(source.graph_json))
+    copy.version = 1
+    await db.commit()
+    await db.refresh(copy)
+    return copy
+
+
+@router.post(
+    "/{workflow_id}/nodes/{node_key}/test",
+    response_model=NodeTestResult,
+    summary="Run one node in isolation with sample data",
+    description=(
+        "Runs just this node, as a real run would (real providers: a Gmail node really sends), "
+        "resolving `{{...}}` references against `upstream_outputs`, `variables`, and `inputs` "
+        "from the body. Pass `config` to test unsaved edits. Returns the resolved input, the "
+        "output, the duration, and the error, if any. Nothing is recorded in the execution history."
+    ),
+    responses={**_NOT_FOUND, 404: {"description": "Workflow or node not found"}},
+)
+async def run_node_test(
+    workflow_id: uuid.UUID,
+    node_key: str,
+    db: DbSession,
+    user: CurrentUser,
+    services: Services,
+    body: NodeTestRequest | None = None,
+) -> NodeTestResult:
+    workflow = await get_owned_workflow(db, workflow_id, user)
+    graph = WorkflowGraph.model_validate(workflow.graph_json)
+    node = next((n for n in graph.nodes if n.id == node_key), None)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Node '{node_key}' is not in the saved graph")
+    body = body or NodeTestRequest()
+    if body.config is not None:
+        node = node.model_copy(update={"config": body.config})
+    context = NodeContext(
+        workflow_id=str(workflow.id),
+        execution_id=f"test-{uuid.uuid4()}",
+        variables={v.key: v.value for v in graph.variables} | body.variables,
+        node_outputs=body.upstream_outputs,
+        inputs=body.inputs,
+        services=services,
+    )
+    try:
+        result = await execute_node(node, context, node_timeout=settings.WORKFLOW_NODE_TIMEOUT_SECONDS)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from None
+    payload = result.model_dump(mode="json", include={"input", "output"})
+    return NodeTestResult(
+        node_key=result.node_id,
+        node_type=result.node_type,
+        label=result.label,
+        status=result.status.value,
+        input=payload["input"],
+        output=payload["output"],
+        error=result.error or result.skip_reason,
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+        duration_ms=result.duration_ms,
+    )
 
 
 @router.post(

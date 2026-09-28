@@ -160,6 +160,28 @@ async def execute_graph(
     )
 
 
+async def execute_node(
+    node: GraphNode,
+    context: NodeContext,
+    *,
+    registry: NodeRegistry | None = None,
+    node_timeout: float = DEFAULT_NODE_TIMEOUT_SECONDS,
+    hooks: ExecutionHooks | None = None,
+) -> NodeRunResult:
+    """Run a single node in isolation, exactly as execute_graph would run it.
+
+    `context.node_outputs` stands in for upstream results and `context.variables` /
+    `context.inputs` for workflow variables and run inputs, so {{...}} references resolve
+    against sample data. Nothing else in the graph runs. Raises ValueError for an unknown
+    node type; every other problem is reported in the result (status failed, `error`).
+    """
+    registry = registry or default_registry
+    definition = registry.get(node.type)
+    if definition is None:
+        raise ValueError(f"Unknown node type '{node.type}'")
+    return await _run_node(node, definition, context, node_timeout, hooks, None)
+
+
 class _Interrupted(Exception):
     """The node was cancelled because a stop was requested while it ran."""
 

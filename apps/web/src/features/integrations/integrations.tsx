@@ -1,0 +1,325 @@
+"use client";
+
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bot, CircleAlert, CircleCheck, ExternalLink, KeyRound, Mail, PlugZap, Unplug } from "lucide-react";
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+
+import { AppShell, Spinner } from "@/components/app-shell";
+import { ErrorAlert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/dialog";
+import { FormField } from "@/components/ui/form-field";
+import { toast } from "@/components/ui/toast";
+import { api } from "@/lib/api";
+import { formatDateTime, formatRelative } from "@/lib/format";
+import type { Integration, IntegrationConnect, IntegrationTestResult } from "@/lib/types";
+
+// Providers whose endpoint can be changed (a local Ollama, an OpenAI-compatible server).
+const CUSTOM_ENDPOINT = new Set(["ollama", "openai"]);
+const KEYLESS = new Set(["ollama"]);
+
+const optional = (schema: z.ZodType) => z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+const port = optional(z.coerce.number().int("Whole number").min(1, "1–65535").max(65535, "1–65535"));
+
+function llmSchema(provider: string) {
+  return z.object({
+    api_key: KEYLESS.has(provider) ? z.string().optional() : z.string().trim().min(1, "Paste your API key"),
+    base_url: optional(z.url("Enter a full URL, e.g. http://localhost:11434")),
+    model: optional(z.string().trim().max(200)),
+  });
+}
+
+const emailSchema = z.object({
+  email: z.email("Enter the Gmail address"),
+  app_password: z.string().trim().min(1, "Paste a Google App Password"),
+  from_name: optional(z.string().trim().max(200)),
+  smtp_host: optional(z.string().trim()),
+  smtp_port: port,
+  smtp_security: optional(z.enum(["auto", "starttls", "ssl"])),
+  imap_host: optional(z.string().trim()),
+  imap_port: port,
+});
+
+type FormValues = Record<string, string | undefined>;
+
+/** Write-only credential form: secrets go to the API and are cleared from the page. */
+function ConnectForm({ integration, onDone }: { integration: Integration; onDone: (saved: boolean) => void }) {
+  const queryClient = useQueryClient();
+  const email = integration.kind === "email";
+  const schema = email ? emailSchema : llmSchema(integration.provider);
+  const form = useForm<FormValues>({ resolver: zodResolver(schema as z.ZodType<FormValues, FormValues>), defaultValues: {} });
+  const connect = useMutation({
+    meta: { silent: true },
+    mutationFn: (body: IntegrationConnect) => api.integrations.connect(integration.provider, body),
+    onSuccess: () => {
+      form.reset({});
+      void queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      toast.success(`${integration.label} connected`, "Your credential is stored encrypted and takes priority over the server's.");
+      onDone(true);
+    },
+  });
+  const submit = form.handleSubmit((values) => {
+    const body = Object.fromEntries(Object.entries(schema.parse(values)).filter(([, v]) => v !== undefined && v !== "")) as IntegrationConnect;
+    connect.mutate(body);
+  });
+  const errors = form.formState.errors;
+  const secret = { type: "password", autoComplete: "new-password", spellCheck: false } as const;
+
+  return (
+    <form onSubmit={(e) => void submit(e)} className="space-y-3 border-t border-slate-100 pt-4" data-testid={`connect-form-${integration.provider}`}>
+      {email ? (
+        <>
+          <FormField label="Gmail address" type="email" autoComplete="off" placeholder="you@gmail.com" registration={form.register("email")} error={errors.email} />
+          <FormField label="App password" {...secret} placeholder="16 characters from myaccount.google.com/apppasswords" registration={form.register("app_password")} error={errors.app_password} />
+          <FormField label="From name (optional)" autoComplete="off" registration={form.register("from_name")} error={errors.from_name} />
+          <details className="rounded-lg border border-slate-200 px-3 py-2">
+            <summary className="cursor-pointer text-xs font-medium text-slate-600">Advanced: SMTP and IMAP servers</summary>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <FormField label="SMTP host" placeholder="smtp.gmail.com" registration={form.register("smtp_host")} error={errors.smtp_host} />
+              <FormField label="SMTP port" inputMode="numeric" placeholder="587" registration={form.register("smtp_port")} error={errors.smtp_port} />
+              <label className="space-y-1.5 text-sm font-medium text-slate-700">
+                SMTP security
+                <select {...form.register("smtp_security")} className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
+                  <option value="">auto</option>
+                  <option value="starttls">starttls</option>
+                  <option value="ssl">ssl</option>
+                </select>
+              </label>
+              <FormField label="IMAP host" placeholder="imap.gmail.com" registration={form.register("imap_host")} error={errors.imap_host} />
+              <FormField label="IMAP port" inputMode="numeric" placeholder="993" registration={form.register("imap_port")} error={errors.imap_port} />
+            </div>
+          </details>
+        </>
+      ) : (
+        <>
+          {!KEYLESS.has(integration.provider) && (
+            <FormField label="API key" {...secret} placeholder="Paste the key" registration={form.register("api_key")} error={errors.api_key} />
+          )}
+          {CUSTOM_ENDPOINT.has(integration.provider) && (
+            <FormField
+              label={KEYLESS.has(integration.provider) ? "Server URL" : "Base URL (optional)"}
+              placeholder={integration.provider === "ollama" ? "http://localhost:11434" : "https://api.openai.com/v1"}
+              registration={form.register("base_url")}
+              error={errors.base_url}
+            />
+          )}
+          <FormField
+            label="Default model (optional)"
+            placeholder={integration.default_model ?? ""}
+            autoComplete="off"
+            registration={form.register("model")}
+            error={errors.model}
+          />
+        </>
+      )}
+      {connect.isError && <ErrorAlert message={connect.error.message} />}
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" size="sm" onClick={() => onDone(false)}>
+          Cancel
+        </Button>
+        <Button type="submit" size="sm" loading={connect.isPending} data-testid={`save-integration-${integration.provider}`}>
+          Save
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function SourceLine({ integration }: { integration: Integration }) {
+  if (integration.source === "user") {
+    return (
+      <p className="flex items-center gap-1.5 text-sm text-emerald-700">
+        <CircleCheck className="size-4" aria-hidden /> Connected with your credential
+        {integration.connected_at && <span className="text-xs text-slate-400">· {formatRelative(integration.connected_at)}</span>}
+      </p>
+    );
+  }
+  if (integration.source === "server") {
+    return (
+      <p className="flex items-center gap-1.5 text-sm text-indigo-700">
+        <KeyRound className="size-4" aria-hidden /> Using the server&apos;s credential (.env)
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-center gap-1.5 text-sm text-slate-500">
+      <Unplug className="size-4" aria-hidden /> Not connected
+    </p>
+  );
+}
+
+function TestResult({ result }: { result: Pick<IntegrationTestResult, "success" | "latency_ms" | "error"> & { tested_at: string } }) {
+  return result.success ? (
+    <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+      <CircleCheck className="size-3.5" aria-hidden /> Works · {result.latency_ms} ms · {formatRelative(result.tested_at)}
+    </p>
+  ) : (
+    <p className="flex items-start gap-1.5 text-xs text-red-700">
+      <CircleAlert className="mt-px size-3.5 shrink-0" aria-hidden /> <span className="break-words">{result.error ?? "The test failed."}</span>
+    </p>
+  );
+}
+
+function IntegrationCard({ integration }: { integration: Integration }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const test = useMutation({
+    meta: { silent: true },
+    mutationFn: () => api.integrations.test(integration.provider),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+  const disconnect = useMutation({
+    mutationFn: () => api.integrations.disconnect(integration.provider),
+    onSuccess: () => {
+      setConfirming(false);
+      test.reset();
+      void queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      toast.success(`${integration.label} disconnected`, "Runs fall back to the server's credential, if there is one.");
+    },
+  });
+  const Icon = integration.kind === "email" ? Mail : Bot;
+  const latest = test.data ?? integration.last_test;
+  const masked = Object.entries(integration.masked ?? {}).filter(([, v]) => v !== null && v !== "");
+
+  return (
+    <article className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4" data-testid={`integration-${integration.provider}`} data-source={integration.source}>
+      <div className="flex items-start gap-3">
+        <span className={`grid size-9 shrink-0 place-items-center rounded-lg ${integration.kind === "email" ? "bg-sky-50 text-sky-600" : "bg-violet-50 text-violet-600"}`}>
+          <Icon className="size-5" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="font-semibold text-slate-900">{integration.label}</h3>
+          <SourceLine integration={integration} />
+        </div>
+        {integration.get_key_url && (
+          <a href={integration.get_key_url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-500">
+            {KEYLESS.has(integration.provider) ? "Set up" : integration.kind === "email" ? "Get an app password" : "Get a key"} <ExternalLink className="size-3" />
+          </a>
+        )}
+      </div>
+
+      <dl className="space-y-1 text-xs">
+        {masked.map(([key, value]) => (
+          <div key={key} className="flex gap-2">
+            <dt className="w-24 shrink-0 text-slate-400">{key.replace(/_/g, " ")}</dt>
+            <dd className="truncate font-mono text-slate-700" data-testid={`masked-${integration.provider}-${key}`}>
+              {String(value)}
+            </dd>
+          </div>
+        ))}
+        {integration.default_model && (
+          <div className="flex gap-2">
+            <dt className="w-24 shrink-0 text-slate-400">default model</dt>
+            <dd className="truncate font-mono text-slate-700">{integration.default_model}</dd>
+          </div>
+        )}
+      </dl>
+
+      <div data-testid={`integration-test-${integration.provider}`} aria-live="polite">
+        {test.isError ? (
+          <p className="text-xs text-red-700">{test.error.message}</p>
+        ) : latest ? (
+          <div title={formatDateTime(latest.tested_at)}>
+            <TestResult result={latest} />
+          </div>
+        ) : null}
+      </div>
+
+      {editing ? (
+        <ConnectForm
+          integration={integration}
+          onDone={(saved) => {
+            setEditing(false);
+            if (saved) test.mutate();
+          }}
+        />
+      ) : (
+        <div className="mt-auto flex flex-wrap gap-2 border-t border-slate-100 pt-3">
+          <Button size="sm" variant={integration.source === "user" ? "secondary" : "primary"} onClick={() => setEditing(true)} data-testid={`connect-${integration.provider}`}>
+            <PlugZap className="size-3.5" aria-hidden /> {integration.source === "user" ? "Replace" : "Connect"}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => test.mutate()}
+            loading={test.isPending}
+            disabled={integration.source === "none" && !KEYLESS.has(integration.provider)}
+            data-testid={`test-${integration.provider}`}
+          >
+            Test connection
+          </Button>
+          {integration.source === "user" && (
+            <Button size="sm" variant="ghost" className="text-red-600 hover:bg-red-50" onClick={() => setConfirming(true)} data-testid={`disconnect-${integration.provider}`}>
+              Disconnect
+            </Button>
+          )}
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirming}
+        title={`Disconnect ${integration.label}?`}
+        message="Your stored credential is deleted. Runs use the server's credential if one is configured; otherwise nodes using this provider fail validation."
+        confirmLabel="Disconnect"
+        onConfirm={() => disconnect.mutate()}
+        onClose={() => setConfirming(false)}
+        busy={disconnect.isPending}
+      />
+    </article>
+  );
+}
+
+export function IntegrationsScreen() {
+  return (
+    <AppShell>
+      <Integrations />
+    </AppShell>
+  );
+}
+
+function Integrations() {
+  const integrations = useQuery({ queryKey: ["integrations"], queryFn: api.integrations.list });
+  if (integrations.isPending) return <Spinner label="Loading integrations…" />;
+  if (integrations.isError) {
+    return (
+      <div className="space-y-3">
+        <ErrorAlert message={integrations.error.message} />
+        <Button variant="secondary" onClick={() => void integrations.refetch()}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
+  const groups: [string, Integration[]][] = [
+    ["LLM providers", integrations.data.filter((i) => i.kind === "llm")],
+    ["Email", integrations.data.filter((i) => i.kind === "email")],
+  ];
+  return (
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-xl font-semibold text-slate-900">Integrations</h1>
+        <p className="mt-1 max-w-2xl text-sm text-slate-500">
+          Your credentials take priority over the server-wide ones in <code className="rounded bg-slate-100 px-1">.env</code>. They&apos;re
+          encrypted at rest and never shown again, only masked. &ldquo;Test connection&rdquo; makes a real, minimal call (no tokens generated,
+          no email sent).
+        </p>
+      </div>
+      {groups.map(([title, items]) =>
+        items.length ? (
+          <section key={title} className="space-y-3">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{title}</h2>
+            <div className="grid gap-4 md:grid-cols-2">
+              {items.map((integration) => (
+                <IntegrationCard key={integration.provider} integration={integration} />
+              ))}
+            </div>
+          </section>
+        ) : null,
+      )}
+    </div>
+  );
+}

@@ -4,23 +4,23 @@ import type { NodeType, Workflow } from "@/lib/types";
 export const catalog: NodeType[] = [
   {
     type: "input", category: "io", group: "General", label: "Input", description: "Entry point", icon: "log-in",
-    queue: "default", interruptible: true, branches: [], has_input: false, produces_final_output: false,
+    queue: "default", portable: true, interruptible: true, branches: [], has_input: false, produces_final_output: false,
     config_schema: { properties: { name: { type: "string" } } }, output_schema: null, output_keys: null,
   },
   {
     type: "gemini", category: "ai", group: "LLM", label: "Gemini", description: "LLM", icon: "sparkles",
-    queue: "default", interruptible: true, branches: [], has_input: true, produces_final_output: false,
+    queue: "llm", portable: false, interruptible: true, branches: [], has_input: true, produces_final_output: false,
     config_schema: { properties: { provider: { enum: ["gemini", "groq"], type: "string", default: "gemini" }, user_prompt: { type: "string", minLength: 1 } }, required: ["user_prompt"] },
     output_schema: null, output_keys: ["fallback_errors", "mock", "model", "provider", "provider_used", "response"],
   },
   {
     type: "gmail", category: "integration", group: "Integrations", label: "Gmail", description: "Email", icon: "mail",
-    queue: "default", interruptible: false, branches: [], has_input: true, produces_final_output: false,
+    queue: "default", portable: false, interruptible: false, branches: [], has_input: true, produces_final_output: false,
     config_schema: { properties: {} }, output_schema: null, output_keys: ["from", "message_id", "status"],
   },
   {
     type: "output", category: "io", group: "General", label: "Output", description: "Result", icon: "log-out",
-    queue: "default", interruptible: true, branches: [], has_input: true, produces_final_output: true,
+    queue: "default", portable: true, interruptible: true, branches: [], has_input: true, produces_final_output: true,
     config_schema: { properties: {} }, output_schema: null, output_keys: ["name", "value"],
   },
 ];

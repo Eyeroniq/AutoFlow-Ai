@@ -19,6 +19,8 @@ gemini = ["google-genai>=2,<3"]
 openai = ["openai>=3,<4"]
 anthropic = ["anthropic>=1,<2"]
 providers = ["flowforge-workflow-engine[gemini,openai,anthropic]"]
+# PDF Extract and OCR. OCR also needs the tesseract binary (apt install tesseract-ocr).
+documents = ["pymupdf>=1.24", "pytesseract>=0.3.10", "pillow>=10"]
 test = ["pytest>=8", "pytest-asyncio>=1.0"]
 
 [tool.hatch.build.targets.wheel]

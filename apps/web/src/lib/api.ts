@@ -14,6 +14,7 @@ import type {
   NodeType,
   RegisterPayload,
   TokenResponse,
+  UploadedFile,
   User,
   ValidationIssue,
   Workflow,
@@ -169,6 +170,55 @@ export async function getFreshAccessToken(): Promise<string | null> {
 const authed = <T>(path: string, options: Omit<RequestOptions, "auth"> = {}) =>
   request<T>(path, { ...options, auth: true });
 
+export interface UploadOptions {
+  /** Called with 0..1 as the bytes go out. */
+  onProgress?: (fraction: number) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * POST /api/files with upload progress (fetch can't report it, so this uses XHR). Same
+ * auth handling as request(): a fresh token first, and one refresh + retry on 401.
+ */
+export async function uploadFile(file: File, { onProgress, signal }: UploadOptions = {}): Promise<UploadedFile> {
+  const attempt = (token: string | null) =>
+    new Promise<{ status: number; data: unknown }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_URL}/api/files`);
+      xhr.setRequestHeader("Accept", "application/json");
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress?.(event.loaded / event.total);
+      };
+      xhr.onload = () => {
+        let data: unknown = null;
+        try {
+          data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch {
+          // not JSON
+        }
+        resolve({ status: xhr.status, data });
+      };
+      xhr.onerror = () => reject(new ApiError(0, `Can't reach the API at ${API_URL}. Is the backend running?`));
+      xhr.onabort = () => reject(new DOMException("The upload was cancelled", "AbortError"));
+      signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+      const form = new FormData();
+      form.append("file", file);
+      xhr.send(form);
+    });
+
+  let result = await attempt(await getFreshAccessToken());
+  if (result.status === 401 && tokenStorage.getRefreshToken() && (await refreshSession())) {
+    onProgress?.(0);
+    result = await attempt(tokenStorage.getAccessToken());
+  }
+  if (result.status < 200 || result.status >= 300) {
+    const detail = (result.data as { detail?: unknown } | null)?.detail;
+    throw new ApiError(result.status, describeDetail(detail) ?? `Upload failed (${result.status})`, result.data);
+  }
+  return result.data as UploadedFile;
+}
+
 function query(params: Record<string, string | number | undefined | null>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -219,6 +269,12 @@ export const api = {
       authed<ExecutionListItem[]>(`/api/executions${query(params)}`),
     get: (id: string, signal?: AbortSignal) => authed<ExecutionDetail>(`/api/executions/${enc(id)}`, { signal }),
     stop: (id: string) => authed<ExecutionDetail>(`/api/executions/${enc(id)}/stop`, { method: "POST" }),
+  },
+  files: {
+    list: () => authed<UploadedFile[]>("/api/files"),
+    get: (id: string) => authed<UploadedFile>(`/api/files/${enc(id)}`),
+    remove: (id: string) => authed<null>(`/api/files/${enc(id)}`, { method: "DELETE" }),
+    upload: uploadFile,
   },
   integrations: {
     list: () => authed<Integration[]>("/api/integrations"),

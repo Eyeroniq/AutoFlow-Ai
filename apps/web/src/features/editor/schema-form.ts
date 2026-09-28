@@ -18,6 +18,8 @@ export type FieldKind =
   | "select"
   | "addresses" // str | list[str]: comma-separated email addresses
   | "string-list" // list[str]
+  | "multiselect" // list of enum values: checkboxes
+  | "file" // a file reference (format "file-ref"): {{input.document}} or an upload's id
   | "object" // dict: edited as JSON
   | "json-array" // list of objects: edited as JSON
   | "any"; // Any: text, or JSON when it parses as an object/array
@@ -75,6 +77,8 @@ function specFor(name: string, raw: JsonSchema, root: JsonSchema, required: bool
     default: raw.default,
   };
 
+  if (raw.format === "file-ref" || schema.format === "file-ref") return { ...base, kind: "file" };
+
   if (variants) {
     const nonNull = variants.filter((v) => v.type !== "null");
     nullable = nonNull.length < variants.length;
@@ -111,11 +115,16 @@ function specFor(name: string, raw: JsonSchema, root: JsonSchema, required: bool
       return { ...withNull, kind: "integer", ...bounds };
     case "boolean":
       return { ...withNull, kind: "boolean" };
-    case "array":
-      if (resolve(schema.items ?? {}, root).type === "string") {
+    case "array": {
+      const items = resolve(schema.items ?? {}, root);
+      if (items.enum) {
+        return { ...withNull, kind: "multiselect", options: items.enum.map(String), maxItems: schema.maxItems };
+      }
+      if (items.type === "string") {
         return { ...withNull, kind: "string-list", maxItems: schema.maxItems };
       }
       return { ...withNull, kind: "json-array", maxItems: schema.maxItems };
+    }
     case "object":
       return { ...withNull, kind: "object" };
     default:
@@ -140,6 +149,19 @@ function numberRule(field: FieldSpec) {
   return rule;
 }
 
+// The engine's IDENTIFIER_PATTERN (names referenced as {{...}}).
+const IDENTIFIER_PATTERNS = new Set(["^[A-Za-z0-9_\\-]+$"]);
+
+/** A server (Python) pattern as a JS RegExp; null if JS can't parse it (the server still checks). */
+function compilePattern(pattern: string | undefined): RegExp | null {
+  if (!pattern) return null;
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
+
 function fieldRule(field: FieldSpec): z.ZodType {
   const reference = z.string().regex(REFERENCE_ONLY, "Enter a value or a {{reference}}");
   let rule: z.ZodType;
@@ -150,9 +172,12 @@ function fieldRule(field: FieldSpec): z.ZodType {
       if (field.minLength) text = text.min(field.minLength, field.minLength === 1 ? "Required" : `At least ${field.minLength} characters`);
       if (field.maxLength) text = text.max(field.maxLength, `At most ${field.maxLength} characters`);
       rule = text;
-      if (field.pattern) {
-        const pattern = new RegExp(field.pattern);
-        rule = text.refine((v) => containsReference(v) || pattern.test(v), "Only letters, digits, _ and - are allowed");
+      const pattern = compilePattern(field.pattern);
+      if (pattern) {
+        const message = IDENTIFIER_PATTERNS.has(field.pattern!)
+          ? "Only letters, digits, _ and - are allowed"
+          : `Doesn't match the expected format (${field.pattern})`;
+        rule = text.refine((v) => containsReference(v) || pattern.test(v), message);
       }
       break;
     }
@@ -170,6 +195,16 @@ function fieldRule(field: FieldSpec): z.ZodType {
     }
     case "addresses":
       rule = z.union([z.string(), z.array(z.string())]);
+      break;
+    case "multiselect": {
+      const options = field.options ?? [];
+      rule = z.array(z.string().refine((v) => options.includes(v), `Choose from: ${options.join(", ")}`));
+      break;
+    }
+    case "file":
+      rule = z.union([z.string().trim().min(1, "Choose a file"), z.record(z.string(), z.unknown())], {
+        error: "Choose a file, or reference one like {{input.document}}",
+      });
       break;
     case "string-list": {
       let list = z.array(z.string());

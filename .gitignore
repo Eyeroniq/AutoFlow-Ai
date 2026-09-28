@@ -3,6 +3,9 @@
 .env.local
 !.env.example
 
+# Local upload storage (FILES_DIR outside Docker)
+apps/api/.data/
+
 # Python
 venv/
 .venv/

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -102,79 +103,135 @@ class LLMResult(BaseModel):
     fallback_errors: list[dict[str, Any]]
 
 
+@dataclass
+class LLMAnswer:
+    text: str
+    provider_used: str
+    model: str
+    mock: bool
+    # One entry per provider that failed before one answered.
+    fallback_errors: list[dict[str, Any]]
+
+
+class LLMChainFailed(Exception):
+    """Every provider in the chain failed."""
+
+    def __init__(self, errors: list[dict[str, Any]]):
+        self.errors = errors
+        if len(errors) == 1:
+            message = errors[0]["error"]
+        else:
+            message = f"All {len(errors)} providers failed: " + "; ".join(e["error"] for e in errors)
+        super().__init__(message)
+
+
+async def generate_with_fallback(
+    context: NodeContext,
+    *,
+    provider: str,
+    model: str | None,
+    fallback: list[str],
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    stream: bool = False,
+) -> LLMAnswer:
+    """Ask `provider` (then each fallback in order) until one answers.
+
+    Streams deltas to `context.on_token` when `stream` is set and someone is watching.
+    Raises LLMChainFailed with every provider's error if none answers.
+    """
+    chain = [(provider, model), *(parse_chain_entry(e) for e in fallback)]
+    errors: list[dict[str, Any]] = []
+    for provider_name, requested_model in chain:
+        chosen = requested_model or context.services.default_model(provider_name)
+        try:
+            llm = context.services.llm(provider_name)
+            request = {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "model": chosen,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if stream and context.on_token is not None:
+                text = await _collect_stream(llm, provider_name, request, context.on_token)
+            else:
+                text = await llm.generate(**request)
+        except ProviderError as exc:
+            errors.append({"provider": provider_name, "model": chosen, "error": str(exc)})
+            if len(chain) > 1:
+                logger.warning(
+                    "LLM provider failed; trying the next one in the chain",
+                    extra={"node_id": context.node_id, "provider": provider_name, "error": str(exc)},
+                )
+            continue
+        logger.info(
+            "LLM node answered",
+            extra={
+                "node_id": context.node_id,
+                "provider_used": provider_name,
+                "model": chosen,
+                "mock": llm.is_mock,
+                "failed_providers": [e["provider"] for e in errors],
+            },
+        )
+        return LLMAnswer(text=text, provider_used=provider_name, model=chosen, mock=llm.is_mock, fallback_errors=errors)
+    raise LLMChainFailed(errors)
+
+
+def llm_required_providers(node: GraphNode, default_provider: str) -> list[tuple[str, str]]:
+    """The providers (and config fields) a node with provider/fallback config calls."""
+    # Templated values can only be checked at run time; unknown names are already
+    # reported as invalid config.
+    candidates = [(node.config.get("provider", default_provider), "provider")]
+    fallback = node.config.get("fallback")
+    if isinstance(fallback, list):
+        candidates += [(entry, "fallback") for entry in fallback]
+    required = []
+    for value, field in candidates:
+        if isinstance(value, str) and not contains_reference(value):
+            name = parse_chain_entry(value)[0] if field == "fallback" else value.lower()
+            if name in LLM_PROVIDER_NAMES:
+                required.append((name, field))
+    return required
+
+
 class LLMNode(NodeDefinition[LLMConfig]):
     category = "ai"
     output_schema = LLMResult
+    queue = "llm"
 
     def _default_provider(self) -> str:
         return str(self.config_schema.model_fields["provider"].default)
 
     def required_providers(self, node: GraphNode) -> list[tuple[str, str]]:
-        # Templated values can only be checked at run time; unknown names are already
-        # reported as invalid config.
-        candidates = [(node.config.get("provider", self._default_provider()), "provider")]
-        fallback = node.config.get("fallback")
-        if isinstance(fallback, list):
-            candidates += [(entry, "fallback") for entry in fallback]
-        required = []
-        for value, field in candidates:
-            if isinstance(value, str) and not contains_reference(value):
-                name = parse_chain_entry(value)[0] if field == "fallback" else value.lower()
-                if name in LLM_PROVIDER_NAMES:
-                    required.append((name, field))
-        return required
+        return llm_required_providers(node, self._default_provider())
 
     async def execute(self, context: NodeContext, config: LLMConfig) -> NodeResult:
-        chain = [(config.provider, config.model), *(parse_chain_entry(e) for e in config.fallback)]
-        errors: list[dict[str, Any]] = []
-
-        for provider_name, requested_model in chain:
-            model = requested_model or context.services.default_model(provider_name)
-            try:
-                provider = context.services.llm(provider_name)
-                request = {
-                    "system_prompt": config.system_prompt,
-                    "user_prompt": config.user_prompt,
-                    "model": model,
-                    "temperature": config.temperature,
-                    "max_tokens": config.max_tokens,
-                }
-                if config.stream and context.on_token is not None:
-                    text = await _collect_stream(provider, provider_name, request, context.on_token)
-                else:
-                    text = await provider.generate(**request)
-            except ProviderError as exc:
-                errors.append({"provider": provider_name, "model": model, "error": str(exc)})
-                if len(chain) > 1:
-                    logger.warning(
-                        "LLM provider failed; trying the next one in the chain",
-                        extra={"node_id": context.node_id, "provider": provider_name, "error": str(exc)},
-                    )
-                continue
-
-            logger.info(
-                "LLM node answered",
-                extra={
-                    "node_id": context.node_id,
-                    "provider_used": provider_name,
-                    "model": model,
-                    "mock": provider.is_mock,
-                    "failed_providers": [e["provider"] for e in errors],
-                },
-            )
-            return NodeResult.ok(
-                response=text,
+        try:
+            answer = await generate_with_fallback(
+                context,
                 provider=config.provider,
-                provider_used=provider_name,
-                model=model,
-                mock=provider.is_mock,
-                fallback_errors=errors,
+                model=config.model,
+                fallback=config.fallback,
+                system_prompt=config.system_prompt,
+                user_prompt=config.user_prompt,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                stream=config.stream,
             )
-
-        if len(errors) == 1:
-            return NodeResult.fail(errors[0]["error"], fallback_errors=errors)
-        summary = "; ".join(e["error"] for e in errors)
-        return NodeResult.fail(f"All {len(errors)} providers failed: {summary}", fallback_errors=errors)
+        except LLMChainFailed as exc:
+            return NodeResult.fail(str(exc), fallback_errors=exc.errors)
+        return NodeResult.ok(
+            response=answer.text,
+            provider=config.provider,
+            provider_used=answer.provider_used,
+            model=answer.model,
+            mock=answer.mock,
+            fallback_errors=answer.fallback_errors,
+        )
 
 
 async def _collect_stream(

@@ -1,4 +1,6 @@
+import logging
 import socket
+import time
 import uuid
 from typing import Annotated, Any
 
@@ -34,6 +36,7 @@ from app.schemas.workflow import (
     WorkflowUpdate,
     WorkflowValidation,
 )
+from app.services.files import file_input_issues
 from app.services.providers import get_execution_services
 from app.services.runs import (
     InvalidWorkflowGraph,
@@ -44,6 +47,8 @@ from app.services.runs import (
     run_execution,
 )
 from app.services.task_queue import EnqueueFailed
+
+logger = logging.getLogger(__name__)
 from app.services.workflows import get_owned_workflow, replace_graph
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -282,7 +287,13 @@ async def run(
 ) -> Any:
     workflow = await get_owned_workflow(db, workflow_id, user)
     inputs = (body or RunRequest()).inputs
-    queue = None if sync else queue_for_graph(WorkflowGraph.model_validate(workflow.graph_json))
+    graph = WorkflowGraph.model_validate(workflow.graph_json)
+    if issues := await file_input_issues(db, user.id, graph, inputs):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"message": "Invalid run inputs", "errors": issues}
+        )
+    queue = None if sync else queue_for_graph(graph)
+    started = time.perf_counter()
     try:
         execution = await create_execution(db, workflow, user, inputs, services, queue=queue)
     except InvalidWorkflowGraph as exc:
@@ -305,7 +316,14 @@ async def run(
 
     assert queue is not None
     try:
+        created = time.perf_counter()
         await task_queue.enqueue(execution.id, queue)
+        sent = time.perf_counter()
+        if sent - started > 1:
+            logger.warning("slow run request", extra={
+                "execution_id": str(execution.id), "create_ms": round((created - started) * 1000),
+                "enqueue_ms": round((sent - created) * 1000),
+            })
     except EnqueueFailed as exc:
         error = f"Could not queue the run: the task broker is unavailable ({exc})"
         await finish_execution(db, None, execution.id, ExecutionStatus.FAILED, error=error,

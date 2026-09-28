@@ -11,6 +11,7 @@ from app.models.enums import (
     WorkflowStatus,
 )
 from app.models.execution import NodeExecution, WorkflowExecution
+from app.models.file import UploadedFile
 from app.models.integration import Integration
 from app.models.template import Template
 from app.models.user import User
@@ -26,6 +27,7 @@ __all__ = [
     "NodeExecution",
     "NodeExecutionStatus",
     "Template",
+    "UploadedFile",
     "User",
     "VariableType",
     "Workflow",

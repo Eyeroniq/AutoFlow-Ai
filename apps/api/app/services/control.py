@@ -45,6 +45,15 @@ async def _status(db: AsyncSession, execution_id: uuid.UUID) -> tuple[ExecutionS
     return row.status, row.heartbeat_at, row.celery_task_id
 
 
+async def _waiting_for_queue(db: AsyncSession, execution_id: uuid.UUID) -> str | None:
+    """The queue a handed-off run is waiting on (no worker holds it), or None."""
+    row = (await db.execute(
+        select(WorkflowExecution.worker_hostname, WorkflowExecution.handoff_at, WorkflowExecution.queue)
+        .where(WorkflowExecution.id == execution_id)
+    )).one()
+    return row.queue if row.worker_hostname is None and row.handoff_at is not None else None
+
+
 async def stop_execution(
     db: AsyncSession,
     execution_id: uuid.UUID,
@@ -98,8 +107,18 @@ async def stop_execution(
         logger.warning("could not set the stop flag", extra={"execution_id": str(execution_id), "error": str(exc)})
 
     status, heartbeat_at, _ = await _status(db, execution_id)
+    # Handed off between queues: no worker holds it, so stop it here. The next segment's
+    # claim then finds it finished and does nothing.
+    waiting_on = await _waiting_for_queue(db, execution_id) if status is ExecutionStatus.RUNNING else None
+    if waiting_on and await finalize_dead(
+        db, publisher, execution_id, ExecutionStatus.STOPPED,
+        f"{STOPPED_BY_USER} while waiting for a '{waiting_on}' worker",
+        running_status=NodeExecutionStatus.SKIPPED, running_reason=f"Interrupted: {STOPPED_BY_USER}",
+        pending_reason=f"Not run: {STOPPED_BY_USER}", unclaimed=True,
+    ):
+        return StopOutcome(finished=True, how=f"stopped while waiting for the '{waiting_on}' queue")
     stale = heartbeat_at is None or heartbeat_at < now - timedelta(seconds=settings.EXECUTION_STALE_AFTER_SECONDS)
-    if status is ExecutionStatus.RUNNING and stale and await finalize_dead(
+    if status is ExecutionStatus.RUNNING and not waiting_on and stale and await finalize_dead(
         db, publisher, execution_id, ExecutionStatus.STOPPED, f"{STOPPED_BY_USER} (its worker was unresponsive)",
         running_status=NodeExecutionStatus.SKIPPED, running_reason=f"Interrupted: {STOPPED_BY_USER}",
         pending_reason=f"Not run: {STOPPED_BY_USER}",
@@ -141,9 +160,11 @@ async def finalize_dead(
     running_status: NodeExecutionStatus,
     running_reason: str,
     pending_reason: str,
+    unclaimed: bool = False,
 ) -> bool:
-    """Finish a running execution whose worker is gone. False if it finished meanwhile."""
-    if not await finish_execution(db, None, execution_id, status, error=error):
+    """Finish a running execution whose worker is gone (or, with `unclaimed`, that is
+    waiting between queues and still unclaimed). False if that changed meanwhile."""
+    if not await finish_execution(db, None, execution_id, status, error=error, unclaimed=unclaimed):
         return False
     await close_out_nodes(
         db, publisher, execution_id,
@@ -211,6 +232,26 @@ async def recover_stale_executions(
             running_status=NodeExecutionStatus.FAILED,
             running_reason="Interrupted: the worker stopped while this node was running",
             pending_reason="Not run: the worker stopped before reaching this node",
+        ):
+            recovered.append(execution_id)
+
+    # Handed off to a queue no worker has taken it from (the same limit as a pending run).
+    waiting = await db.execute(
+        select(WorkflowExecution.id, WorkflowExecution.queue).where(
+            WorkflowExecution.status == ExecutionStatus.RUNNING,
+            WorkflowExecution.worker_hostname.is_(None),
+            WorkflowExecution.handoff_at < pending_cutoff,
+        )
+    )
+    for execution_id, queue in waiting:
+        error = (
+            f"No worker for the '{queue}' queue picked this run up within "
+            f"{settings.EXECUTION_PENDING_TIMEOUT_SECONDS:g}s (is a worker running for that queue?)"
+        )
+        if await finalize_dead(
+            db, publisher, execution_id, ExecutionStatus.FAILED, error,
+            running_status=NodeExecutionStatus.FAILED, running_reason=f"Interrupted: {error}",
+            pending_reason=f"Not run: no '{queue}' worker", unclaimed=True,
         ):
             recovered.append(execution_id)
 

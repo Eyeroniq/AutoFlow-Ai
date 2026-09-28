@@ -25,6 +25,9 @@ export interface NodeRun {
   /** Streamed LLM text so far (node.token events). */
   tokens: string;
   tokenProvider: string | null;
+  /** Where it ran: the queue and the worker (null until it starts). */
+  queue: string | null;
+  worker: string | null;
 }
 
 export interface RunState {
@@ -37,6 +40,10 @@ export interface RunState {
   finishedAt: string | null;
   durationMs: number | null;
   worker: string | null;
+  /** Set while the run waits for a worker of this queue after a hand-off. */
+  waitingForQueue: string | null;
+  /** Hand-offs so far. */
+  segment: number;
   /** Highest event seq applied; older/duplicate events are ignored. */
   seq: number;
 }
@@ -51,6 +58,8 @@ export const idleRun: RunState = {
   finishedAt: null,
   durationMs: null,
   worker: null,
+  waitingForQueue: null,
+  segment: 0,
   seq: 0,
 };
 
@@ -86,6 +95,8 @@ function blankNode(info: NodeInfo, position: number): NodeRun {
     error: null,
     tokens: "",
     tokenProvider: null,
+    queue: null,
+    worker: null,
   };
 }
 
@@ -105,6 +116,8 @@ function fromExecutionNode(row: NodeExecution, index: number, previous?: NodeRun
     // Keep streamed text while the node is still running (the DB has no partial output).
     tokens: row.status === "running" ? (previous?.tokens ?? "") : "",
     tokenProvider: row.status === "running" ? (previous?.tokenProvider ?? null) : null,
+    queue: row.queue ?? null,
+    worker: row.worker_hostname ?? null,
   };
 }
 
@@ -124,6 +137,8 @@ export function fromExecution(execution: ExecutionDetail, previous: RunState = i
     finishedAt: execution.finished_at,
     durationMs: execution.duration_ms,
     worker: execution.worker_hostname,
+    waitingForQueue: execution.status === "running" && execution.handoff_at ? execution.queue : null,
+    segment: execution.segment ?? 0,
     seq: Math.max(seq, previous.executionId === execution.id ? previous.seq : 0),
   };
 }
@@ -144,8 +159,12 @@ export function reduceRun(state: RunState, message: ExecutionEvent): RunState {
   switch (message.type) {
     case "execution.started":
       return { ...state, status: "running", startedAt: message.started_at, worker: message.worker ?? null };
+    case "execution.handoff":
+      return { ...state, waitingForQueue: message.to_queue, segment: message.segment, worker: null };
+    case "execution.resumed":
+      return { ...state, waitingForQueue: null, segment: message.segment, worker: message.worker };
     case "node.started":
-      return patchNode({ ...state, status: "running" }, message.node_key, {
+      return patchNode({ ...state, status: "running", waitingForQueue: null }, message.node_key, {
         status: "running",
         startedAt: message.started_at,
         finishedAt: null,
@@ -153,6 +172,8 @@ export function reduceRun(state: RunState, message: ExecutionEvent): RunState {
         error: null,
         tokens: "",
         tokenProvider: null,
+        queue: message.queue ?? null,
+        worker: message.worker ?? null,
       });
     case "node.token": {
       const node = state.nodes[message.node_key];
@@ -177,6 +198,7 @@ export function reduceRun(state: RunState, message: ExecutionEvent): RunState {
     case "execution.finished":
       return {
         ...state,
+        waitingForQueue: null,
         status: message.status,
         finalOutput: message.final_output,
         error: message.error,

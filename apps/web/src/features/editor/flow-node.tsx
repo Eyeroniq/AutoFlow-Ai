@@ -96,7 +96,14 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
               {data.label}
             </p>
           )}
-          <p className="truncate font-mono text-[10px] text-slate-400">{id}</p>
+          <p className="truncate font-mono text-[10px] text-slate-400">
+            {id}
+            {entry && !entry.portable && entry.queue !== "default" && (
+              <span className="ml-1.5 rounded bg-slate-100 px-1 text-slate-500" title={`Runs on the "${entry.queue}" workers`}>
+                {entry.queue}
+              </span>
+            )}
+          </p>
         </div>
         {issueCount > 0 && (
           <span

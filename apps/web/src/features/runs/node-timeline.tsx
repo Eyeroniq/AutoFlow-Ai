@@ -6,6 +6,7 @@ import { useState } from "react";
 import { StatusDot } from "@/components/ui/status";
 import { formatDuration, formatTime, prettyJson } from "@/lib/format";
 
+import { OutputView } from "./output-view";
 import { type NodeRun, orderedNodes, type RunState } from "./run-state";
 
 function Json({ label, value }: { label: string; value: unknown }) {
@@ -39,6 +40,16 @@ function Row({ node, defaultOpen }: { node: NodeRun; defaultOpen: boolean }) {
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800">
           {node.label} <span className="font-mono text-[11px] font-normal text-slate-400">{node.key}</span>
         </span>
+        {node.queue && (
+          <span
+            className="hidden max-w-44 truncate rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 md:inline"
+            title={node.worker ? `Ran on ${node.worker} (queue "${node.queue}")` : `Queue "${node.queue}"`}
+            data-testid={`ran-on-${node.key}`}
+          >
+            {node.queue}
+            {node.worker ? ` · ${node.worker}` : ""}
+          </span>
+        )}
         <span className="text-[11px] text-slate-500">{node.status}</span>
         <span className="w-16 text-right font-mono text-[11px] text-slate-500">{formatDuration(node.durationMs)}</span>
         <span className="hidden w-20 text-right font-mono text-[11px] text-slate-400 sm:inline">{formatTime(node.startedAt)}</span>
@@ -61,7 +72,7 @@ function Row({ node, defaultOpen }: { node: NodeRun; defaultOpen: boolean }) {
           {open && (
             <div className="grid gap-2 lg:grid-cols-2">
               <Json label="Input" value={node.input} />
-              <Json label="Output" value={node.output} />
+              <OutputView output={node.output} />
             </div>
           )}
         </div>

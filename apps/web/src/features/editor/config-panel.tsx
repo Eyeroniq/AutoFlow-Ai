@@ -7,8 +7,9 @@ import { categoryStyle, NodeIcon } from "@/components/node-icon";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 
-import { SchemaForm } from "./config-form";
+import { type FieldRenderer, SchemaForm } from "./config-form";
 import { ancestorsOf, outputKeysFor } from "./graph";
+import { InputDefaultField } from "./input-default-field";
 import { NodeTester } from "./node-tester";
 import { ConnectionTest, llmRenderers } from "./provider-fields";
 import { getEditorStore, useEditor } from "./store";
@@ -35,10 +36,13 @@ export function ConfigPanel({ nodeId }: { nodeId: string }) {
   const catalog = useEditor((s) => s.catalog);
   const issues = useMemo(() => allIssues.filter((i) => i.node_id === nodeId), [allIssues, nodeId]);
   const upstream = useMemo(() => [...ancestorsOf(nodeId, edges)], [nodeId, edges]);
-  const renderers = useMemo(
-    () => (entry?.category === "ai" ? llmRenderers((entry.config_schema.properties?.provider?.enum ?? []).map(String)) : {}),
-    [entry],
-  );
+  // LLM nodes and the LLM document nodes (Summarize, Entity Extraction) share the provider,
+  // model, and fallback controls.
+  const usesLLM = Boolean(entry?.config_schema.properties?.provider?.enum && entry.config_schema.properties?.fallback);
+  const renderers = useMemo<Record<string, FieldRenderer>>(() => {
+    if (entry?.type === "input") return { default: (props) => <InputDefaultField {...props} /> };
+    return usesLLM && entry ? llmRenderers((entry.config_schema.properties?.provider?.enum ?? []).map(String)) : {};
+  }, [entry, usesLLM]);
 
   if (!node || !entry) return null;
   const store = getEditorStore().getState;
@@ -93,7 +97,7 @@ export function ConfigPanel({ nodeId }: { nodeId: string }) {
           )}
           {/* Remount when the config changes from outside the form (load, undo, redo). */}
           <SchemaForm key={`${nodeId}:${formEpoch}`} nodeId={nodeId} schema={entry.config_schema} config={node.data.config} issues={issues} renderers={renderers} />
-          {entry.category === "ai" && provider !== "mock" && <ConnectionTest provider={provider} label={`${provider} connection`} />}
+          {usesLLM && provider !== "mock" && <ConnectionTest provider={provider} label={`${provider} connection`} />}
           {(node.data.nodeType === "gmail" || node.data.nodeType === "gmail_read") && auth !== "mock" && (
             <ConnectionTest provider="gmail" label="Gmail (SMTP + IMAP) connection" />
           )}

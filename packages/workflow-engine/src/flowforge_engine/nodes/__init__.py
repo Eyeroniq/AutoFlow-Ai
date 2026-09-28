@@ -9,6 +9,7 @@ from flowforge_engine.nodes.ai import (
     OpenAINode,
     OpenRouterNode,
 )
+from flowforge_engine.nodes.documents import EntityExtractionNode, OCRNode, PDFExtractNode, SummarizeNode
 from flowforge_engine.nodes.http import HTTPRequestNode
 from flowforge_engine.nodes.integrations import GmailNode, GmailReadNode
 from flowforge_engine.nodes.io import InputNode, OutputNode, TextNode
@@ -18,6 +19,7 @@ __all__ = [
     "AnthropicNode",
     "ConditionNode",
     "DelayNode",
+    "EntityExtractionNode",
     "GeminiNode",
     "GmailNode",
     "GmailReadNode",
@@ -25,9 +27,12 @@ __all__ = [
     "HTTPRequestNode",
     "InputNode",
     "LLMNode",
+    "OCRNode",
     "OllamaNode",
     "OpenAINode",
     "OpenRouterNode",
     "OutputNode",
+    "PDFExtractNode",
+    "SummarizeNode",
     "TextNode",
 ]

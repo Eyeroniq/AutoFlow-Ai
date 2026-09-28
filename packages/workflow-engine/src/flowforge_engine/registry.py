@@ -35,10 +35,14 @@ class NodeDefinition(ABC, Generic[ConfigT]):
     branches: ClassVar[tuple[str, ...]] = ()
     # Output nodes contribute {name: value} to the execution's final output.
     produces_final_output: ClassVar[bool] = False
-    # Celery queue for runs containing this node (see flowforge_engine.routing). Everything
-    # built in uses "default"; a heavy node type can name its own queue and get dedicated
-    # workers (`celery worker -Q gpu`) without other changes.
+    # Celery queue whose workers run this node (see flowforge_engine.routing): "llm" for
+    # model calls, "ocr" for document processing, "default" for everything else. A run moves
+    # between queues as it reaches nodes of another kind, so each kind scales on its own
+    # workers (`celery worker -Q ocr`).
     queue: ClassVar[str] = "default"
+    # Cheap, pure nodes (Input, Output, Text, Condition) run on whichever worker holds the
+    # run, so they never cause a hand-off to another queue.
+    portable: ClassVar[bool] = False
     # Whether a stop request may cancel the node mid-run. Nodes with side effects that
     # can't be safely interrupted (sending an email) finish first; the run stops after.
     interruptible: ClassVar[bool] = True
@@ -71,6 +75,7 @@ class NodeDefinition(ABC, Generic[ConfigT]):
             "output_schema": cls.output_schema.model_json_schema() if cls.output_schema else None,
             "branches": list(cls.branches),
             "queue": cls.queue,
+            "portable": cls.portable,
             "interruptible": cls.interruptible,
         }
 

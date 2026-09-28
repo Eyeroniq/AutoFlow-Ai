@@ -9,6 +9,14 @@ State machine (workflow_executions.status):
 
 Claiming is a compare-and-set (UPDATE ... WHERE status = 'pending'), so a run executes at
 most once however many times its task is delivered.
+
+Queue hand-off: a worker runs the nodes of the queues it consumes. When the next node
+belongs to another queue (an OCR node reached on worker-llm, say), the worker records the
+hand-off (segment += 1, no worker, handoff_at = now: a compare-and-set on its own
+ownership) and sends a continuation task for that segment to that queue. The worker that
+receives it claims the segment the same way (UPDATE ... WHERE segment = N AND
+worker_hostname IS NULL), rebuilds the finished nodes' results from their rows, and
+carries on. The status stays `running` throughout.
 """
 
 import asyncio
@@ -26,6 +34,7 @@ from flowforge_engine import (
     GraphValidationFailed,
     NodeContext,
     NodeRunResult,
+    NodeStatus,
     RunStatus,
     ValidationIssue,
     WorkflowGraph,
@@ -50,6 +59,7 @@ from app.models.workflow import Workflow, WorkflowNode
 from app.schemas.execution import ExecutionDetail, NodeExecutionRead
 from app.services.credentials import build_execution_services
 from app.services.events import EventPublisher, iso, stop_flag_set
+from app.services.task_queue import EnqueueFailed, TaskQueue
 
 logger = logging.getLogger(__name__)
 
@@ -204,16 +214,21 @@ async def finish_execution(
     error: str | None,
     final_output: dict[str, Any] | None = None,
     from_statuses: tuple[ExecutionStatus, ...] = (ExecutionStatus.RUNNING,),
+    unclaimed: bool = False,
 ) -> bool:
-    """Move the execution to a terminal status if it is still in `from_statuses`.
+    """Move the execution to a terminal status if it is still in `from_statuses` (and, with
+    `unclaimed`, no worker holds it: a run waiting between queues).
 
     Returns False (changing nothing) when someone else already finished it, e.g. the
     run was stopped or recovered while this code was working.
     """
     now = utcnow()
+    conditions = [WorkflowExecution.id == execution_id, WorkflowExecution.status.in_(from_statuses)]
+    if unclaimed:
+        conditions.append(WorkflowExecution.worker_hostname.is_(None))
     result = await db.execute(
         update(WorkflowExecution)
-        .where(WorkflowExecution.id == execution_id, WorkflowExecution.status.in_(from_statuses))
+        .where(*conditions)
         .values(status=status, finished_at=now, error_message=error, final_output_json=final_output)
         .returning(WorkflowExecution.id, WorkflowExecution.started_at)
         .execution_options(synchronize_session=False)
@@ -243,8 +258,18 @@ async def finish_execution(
 class ExecutionRecorder(ExecutionHooks):
     """Writes each node transition to its row, then publishes the matching event."""
 
-    def __init__(self, db: AsyncSession, publisher: EventPublisher, execution_id: uuid.UUID):
+    def __init__(
+        self,
+        db: AsyncSession,
+        publisher: EventPublisher,
+        execution_id: uuid.UUID,
+        *,
+        worker_id: str | None = None,
+        queue: str | None = None,
+    ):
         self.db, self.publisher, self.execution_id = db, publisher, execution_id
+        # Where this segment's nodes run, recorded on each node row.
+        self.worker_id, self.queue = worker_id, queue
 
     def _row(self, node_key: str) -> Any:
         return update(NodeExecution).where(
@@ -252,11 +277,14 @@ class ExecutionRecorder(ExecutionHooks):
         ).execution_options(synchronize_session=False)
 
     async def node_started(self, node: GraphNode, label: str, started_at: datetime) -> None:
-        await self.db.execute(self._row(node.id).values(status=NodeExecutionStatus.RUNNING, started_at=started_at))
+        await self.db.execute(self._row(node.id).values(
+            status=NodeExecutionStatus.RUNNING, started_at=started_at, worker_hostname=self.worker_id, queue=self.queue,
+        ))
         await self.db.commit()
         await self.publisher.publish(
             self.execution_id, "node.started",
             node_key=node.id, node_type=node.type, label=label, status="running", started_at=iso(started_at),
+            worker=self.worker_id, queue=self.queue,
         )
 
     async def node_finished(self, result: NodeRunResult) -> None:
@@ -294,18 +322,111 @@ class ExecutionRecorder(ExecutionHooks):
         await self.publisher.publish(self.execution_id, "node.token", node_key=node_id, text=text, provider=provider)
 
 
-async def claim_execution(db: AsyncSession, execution_id: uuid.UUID, worker_id: str) -> bool:
-    """pending -> running, atomically. False if it isn't pending (already ran, running, stopped)."""
+async def claim_execution(db: AsyncSession, execution_id: uuid.UUID, worker_id: str, segment: int = 0) -> bool:
+    """Take ownership of segment `segment`, atomically.
+
+    Segment 0 is pending -> running. A later segment is a running execution that was
+    handed off to this queue and not claimed yet. False if the run isn't in that state (a
+    duplicate delivery, or it was stopped or recovered meanwhile).
+    """
     now = utcnow()
+    if segment == 0:
+        condition = [WorkflowExecution.status == ExecutionStatus.PENDING]
+        values: dict[str, Any] = {"status": ExecutionStatus.RUNNING, "started_at": now}
+    else:
+        condition = [
+            WorkflowExecution.status == ExecutionStatus.RUNNING,
+            WorkflowExecution.segment == segment,
+            WorkflowExecution.worker_hostname.is_(None),
+        ]
+        values = {"handoff_at": None}
     claimed = await db.scalar(
         update(WorkflowExecution)
-        .where(WorkflowExecution.id == execution_id, WorkflowExecution.status == ExecutionStatus.PENDING)
-        .values(status=ExecutionStatus.RUNNING, started_at=now, heartbeat_at=now, worker_hostname=worker_id)
+        .where(WorkflowExecution.id == execution_id, *condition)
+        .values(heartbeat_at=now, worker_hostname=worker_id, **values)
         .returning(WorkflowExecution.id)
         .execution_options(synchronize_session=False)
     )
     await db.commit()
     return claimed is not None
+
+
+async def hand_off(
+    db: AsyncSession,
+    publisher: EventPublisher,
+    execution_id: uuid.UUID,
+    *,
+    worker_id: str,
+    segment: int,
+    from_queue: str | None,
+    to_queue: str,
+    task_queue: TaskQueue,
+) -> bool:
+    """Release the run to `to_queue`'s workers and queue its next segment.
+
+    A compare-and-set on this worker still owning `segment`: if the run was stopped or
+    recovered meanwhile, nothing is handed off (returns False).
+    """
+    now = utcnow()
+    released = await db.scalar(
+        update(WorkflowExecution)
+        .where(
+            WorkflowExecution.id == execution_id,
+            WorkflowExecution.status == ExecutionStatus.RUNNING,
+            WorkflowExecution.segment == segment,
+            WorkflowExecution.worker_hostname == worker_id,
+        )
+        .values(segment=segment + 1, worker_hostname=None, heartbeat_at=None, handoff_at=now, queue=to_queue)
+        .returning(WorkflowExecution.id)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    if released is None:
+        return False
+    await publisher.publish(
+        execution_id, "execution.handoff",
+        from_queue=from_queue, to_queue=to_queue, segment=segment + 1, worker=worker_id, at=iso(now),
+    )
+    try:
+        await task_queue.enqueue(execution_id, to_queue, segment=segment + 1)
+    except EnqueueFailed as exc:
+        error = f"Could not hand the run off to the '{to_queue}' queue: the task broker is unavailable ({exc})"
+        await _fail(db, publisher, execution_id, error, "Not run: the hand-off to another queue failed")
+        return False
+    logger.info(
+        "run handed off",
+        extra={"execution_id": str(execution_id), "from_queue": from_queue, "to_queue": to_queue, "segment": segment + 1},
+    )
+    return True
+
+
+async def _finished_results(db: AsyncSession, execution_id: uuid.UUID) -> dict[str, NodeRunResult]:
+    """Results of the nodes earlier segments finished, rebuilt from their rows."""
+    rows = await db.scalars(
+        select(NodeExecution)
+        .where(
+            NodeExecution.execution_id == execution_id,
+            NodeExecution.status.in_([NodeExecutionStatus.SUCCESS, NodeExecutionStatus.FAILED, NodeExecutionStatus.SKIPPED]),
+        )
+        .execution_options(populate_existing=True)
+    )
+    results = {}
+    for row in rows:
+        status = NodeStatus(row.status.value)
+        results[row.node_key] = NodeRunResult(
+            node_id=row.node_key,
+            node_type=row.node_type,
+            label=row.node_label,
+            status=status,
+            input=row.input_json,
+            output=row.output_json,
+            error=row.error_message if status is NodeStatus.FAILED else None,
+            skip_reason=row.error_message if status is NodeStatus.SKIPPED else None,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            duration_ms=row.duration_ms,
+        )
+    return results
 
 
 async def _heartbeat(session_factory: SessionFactory, execution_id: uuid.UUID, worker_id: str) -> bool:
@@ -369,23 +490,36 @@ async def run_execution(
     redis: Redis,
     worker_id: str,
     services: ExecutionServices | None = None,
+    segment: int = 0,
+    queues: frozenset[str] | set[str] | None = None,
+    queue: str | None = None,
+    task_queue: TaskQueue | None = None,
 ) -> dict[str, Any]:
-    """Claim and run one execution to completion. Returns a small summary.
+    """Claim segment `segment` of an execution and run it until the run finishes or its
+    next node belongs to a queue outside `queues` (then hand it off). Returns a summary.
+
+    `queues`: the queues this worker consumes; None = any, so everything runs here (as
+    for ?sync=true). `queue`: the queue this task arrived on, recorded on the node rows.
+    `task_queue` sends the continuation task when handing off.
 
     Raises InfrastructureUnavailable only if the database is unreachable *before* the run
     was claimed (the caller may retry). After the claim, every failure is recorded on the
     execution instead, and nothing is retried, so side-effecting nodes never run twice.
     """
+    if queues is not None and task_queue is None:
+        raise ValueError("a worker restricted to some queues needs a task_queue to hand runs off")
     publisher = EventPublisher(redis)
     try:
         async with session_factory() as db:
-            if not await claim_execution(db, execution_id, worker_id):
+            if not await claim_execution(db, execution_id, worker_id, segment):
                 status = await db.scalar(select(WorkflowExecution.status).where(WorkflowExecution.id == execution_id))
                 logger.info(
-                    "execution isn't pending; not running it (duplicate delivery or already stopped)",
-                    extra={"execution_id": str(execution_id), "status": getattr(status, "value", status)},
+                    "execution segment isn't claimable; not running it (duplicate delivery, or stopped/recovered)",
+                    extra={"execution_id": str(execution_id), "segment": segment,
+                           "status": getattr(status, "value", status)},
                 )
-                return {"execution_id": str(execution_id), "ran": False, "status": getattr(status, "value", None)}
+                return {"execution_id": str(execution_id), "ran": False, "segment": segment,
+                        "status": getattr(status, "value", None)}
     except INFRASTRUCTURE_ERRORS as exc:
         raise InfrastructureUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
@@ -400,22 +534,30 @@ async def run_execution(
         owner = await db.get(User, execution.workflow.owner_id)
         assert owner is not None
         graph = WorkflowGraph.model_validate(execution.graph_json or execution.workflow.graph_json)
-        await publisher.publish(
-            execution_id, "execution.started",
-            status="running", workflow_id=str(execution.workflow_id), worker=worker_id, queue=execution.queue,
-            started_at=iso(execution.started_at),
-            nodes=[{"node_key": n.id, "node_type": n.type} for n in graph.nodes],
-        )
+        queue = queue or execution.queue
+        if segment == 0:
+            await publisher.publish(
+                execution_id, "execution.started",
+                status="running", workflow_id=str(execution.workflow_id), worker=worker_id, queue=queue,
+                started_at=iso(execution.started_at),
+                nodes=[{"node_key": n.id, "node_type": n.type} for n in graph.nodes],
+            )
+        else:
+            await publisher.publish(execution_id, "execution.resumed", segment=segment, worker=worker_id, queue=queue)
         control = ExecutionControl()
         loop = asyncio.get_running_loop()
+        # The limit covers the whole run: earlier segments and queue waits count too.
         limit = settings.EXECUTION_TIME_LIMIT_SECONDS
+        elapsed = (utcnow() - execution.started_at).total_seconds() if execution.started_at else 0.0
         limit_handle = loop.call_later(
-            limit, lambda: control.request_stop(f"Execution exceeded the time limit of {limit:g}s", status=RunStatus.FAILED)
+            max(0.0, limit - elapsed),
+            lambda: control.request_stop(f"Execution exceeded the time limit of {limit:g}s", status=RunStatus.FAILED),
         )
         watcher = asyncio.create_task(
             _watch(execution_id, control, session_factory=session_factory, redis=redis, worker_id=worker_id)
         )
         status, error = ExecutionStatus.FAILED, None
+        handed_to: str | None = None
         try:
             if services is None:
                 services = await build_execution_services(db, owner)
@@ -425,15 +567,26 @@ async def run_execution(
                 inputs=execution.inputs_json or {},
                 services=services,
             )
+            completed = await _finished_results(db, execution_id) if segment else None
             result = await execute_graph(
                 graph, context,
                 node_timeout=settings.WORKFLOW_NODE_TIMEOUT_SECONDS,
-                hooks=ExecutionRecorder(db, publisher, execution_id),
+                hooks=ExecutionRecorder(db, publisher, execution_id, worker_id=worker_id, queue=queue),
                 control=control,
+                completed=completed,
+                accepts=None if queues is None else queues.__contains__,
             )
-            status, error = _RUN_STATUS[result.status], result.error
-            final_output = result.model_dump(mode="json", include={"final_output"})["final_output"]
-            await finish_execution(db, publisher, execution_id, status, error=error, final_output=final_output)
+            if result.status is RunStatus.HANDOFF:
+                assert result.next_queue is not None and task_queue is not None
+                status, handed_to = ExecutionStatus.RUNNING, result.next_queue
+                await hand_off(
+                    db, publisher, execution_id, worker_id=worker_id, segment=segment,
+                    from_queue=queue, to_queue=result.next_queue, task_queue=task_queue,
+                )
+            else:
+                status, error = _RUN_STATUS[result.status], result.error
+                final_output = result.model_dump(mode="json", include={"final_output"})["final_output"]
+                await finish_execution(db, publisher, execution_id, status, error=error, final_output=final_output)
         except GraphValidationFailed as exc:
             # E.g. a credential was removed between queueing and running.
             error = str(exc)
@@ -450,11 +603,18 @@ async def run_execution(
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
 
+    if handed_to:
+        logger.info(
+            "run segment done; handed off",
+            extra={"execution_id": str(execution_id), "segment": segment, "worker": worker_id, "to_queue": handed_to},
+        )
+        return {"execution_id": str(execution_id), "ran": True, "segment": segment, "status": "running",
+                "handed_off_to": handed_to}
     logger.info(
         "workflow run finished",
-        extra={"execution_id": str(execution_id), "status": status.value, "worker": worker_id},
+        extra={"execution_id": str(execution_id), "segment": segment, "status": status.value, "worker": worker_id},
     )
-    return {"execution_id": str(execution_id), "ran": True, "status": status.value, "error": error}
+    return {"execution_id": str(execution_id), "ran": True, "segment": segment, "status": status.value, "error": error}
 
 
 async def _fail(db: AsyncSession, publisher: EventPublisher, execution_id: uuid.UUID, error: str, reason: str) -> None:

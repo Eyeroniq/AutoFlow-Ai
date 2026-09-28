@@ -11,6 +11,8 @@ passlib[bcrypt]==1.7.4
 # passlib 1.7.4 is incompatible with bcrypt>=4.1 (version probe) and bcrypt 5 (72-byte check).
 bcrypt==4.0.1
 slowapi==0.1.10
+# Multipart form parsing for file uploads (POST /api/files).
+python-multipart==0.0.32
 # Fernet encryption for stored credentials (app/core/crypto.py).
 cryptography==50.0.1
 # Async execution: Celery workers with Redis as broker + result backend, and Redis pub/sub
@@ -25,3 +27,8 @@ httpx==0.28.1
 google-genai==2.25.0
 openai==3.19.2
 anthropic==1.8.0
+# Document AI nodes: PDF text (PyMuPDF) and OCR (pytesseract -> the tesseract binary,
+# installed in the Dockerfile), with Pillow for images.
+pymupdf==1.28.2
+pytesseract==0.3.13
+pillow==12.3.0

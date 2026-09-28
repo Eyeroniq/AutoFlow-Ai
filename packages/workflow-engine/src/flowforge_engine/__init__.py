@@ -21,6 +21,7 @@ from flowforge_engine.executor import (
     execute_graph,
     execute_node,
 )
+from flowforge_engine.files import FileNotAvailable, FileStore, LocalFileStore, StoredFile, file_id_from
 from flowforge_engine.graph import topological_sort, validate_graph, validate_workflow
 from flowforge_engine.models import (
     ExecutionResult,
@@ -47,14 +48,24 @@ from flowforge_engine.registry import (
     list_node_definitions,
     register_node,
 )
+from flowforge_engine.netguard import BlockedDestination
 from flowforge_engine.providers.settings import ProviderSettings
-from flowforge_engine.routing import DEFAULT_QUEUE, queue_for_graph
+from flowforge_engine.routing import DEFAULT_QUEUE, LLM_QUEUE, OCR_QUEUE, QUEUES, queue_for_graph, queue_for_node
 from flowforge_engine.services import ExecutionServices
 from flowforge_engine.variables import find_references, resolve_string, resolve_value
 
 __all__ = [
+    "BlockedDestination",
+    "FileNotAvailable",
+    "FileStore",
+    "LocalFileStore",
+    "StoredFile",
+    "file_id_from",
     "DEFAULT_NODE_TIMEOUT_SECONDS",
     "DEFAULT_QUEUE",
+    "LLM_QUEUE",
+    "OCR_QUEUE",
+    "QUEUES",
     "CycleError",
     "EngineError",
     "ExecutionControl",
@@ -91,6 +102,7 @@ __all__ = [
     "get_node_definition",
     "list_node_definitions",
     "queue_for_graph",
+    "queue_for_node",
     "register_node",
     "resolve_string",
     "resolve_value",

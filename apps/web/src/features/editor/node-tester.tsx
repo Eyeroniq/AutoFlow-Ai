@@ -9,6 +9,7 @@ import { StatusBadge } from "@/components/ui/status";
 import { api } from "@/lib/api";
 import { formatDuration, prettyJson } from "@/lib/format";
 
+import { OutputView } from "../runs/output-view";
 import { ancestorsOf, outputKeysFor } from "./graph";
 import { getEditorStore, useEditor } from "./store";
 import { useEditorUi } from "./ui-store";
@@ -149,7 +150,7 @@ export function NodeTester({ nodeId }: { nodeId: string }) {
             </div>
             {result.error && <p className="rounded-md bg-red-50 p-2 text-[11px] text-red-700">{result.error}</p>}
             <JsonBlock label="Input (resolved)" value={result.input} />
-            <JsonBlock label="Output" value={result.output} />
+            <OutputView output={result.output} />
           </div>
         )}
       </div>

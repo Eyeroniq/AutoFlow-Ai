@@ -1,0 +1,39 @@
+ Container flowforge-redis-1 Running 
+ Container flowforge-api-1 Running 
+ Container flowforge-postgres-1 Running 
+ Container flowforge-redis-1 Waiting 
+ Container flowforge-postgres-1 Waiting 
+ Container flowforge-postgres-1 Healthy 
+ Container flowforge-redis-1 Healthy 
+ Container flowforge-api-1 Waiting 
+ Container flowforge-api-1 Healthy 
+ Container flowforge-locust-run-12c924109bdd Creating 
+ Container flowforge-locust-run-12c924109bdd Created 
+[2026-09-28 13:54:39,316] bb69526710ec/INFO/locust.main: Starting Locust 2.46.6
+[2026-09-28 13:54:39,332] bb69526710ec/INFO/locust.main: Run time limit set to 120 seconds
+load test: 12 ocr run(s) in flight; pipelines {'Load test: OCR': '8061f031-7551-45b7-98d5-add6770746b1', 'Load test: LLM': '96b552c6-d7b0-44f6-b8b9-425b95fe820a', 'Load test: no-op': 'd8682def-13a6-438a-9e19-8d6121d4653e'}
+[2026-09-28 13:54:39,713] bb69526710ec/INFO/locust.runners: Ramping to 62 users at a rate of 10.00 per second
+[2026-09-28 13:54:45,730] bb69526710ec/INFO/locust.runners: All users spawned: {"ApiUser": 50, "RunDriver": 12} (62 total users)
+[2026-09-28 13:56:39,050] bb69526710ec/INFO/locust.main: --run-time limit reached, shutting down
+[2026-09-28 13:56:39,154] bb69526710ec/INFO/locust.main: Shutting down (exit code 0)
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      GET /api/executions/[id] (driver poll)                                          1509     0(0.00%) |    391      10    1464    340 |   12.60        0.00
+GET      GET /api/workflows                                                              2844     0(0.00%) |    482      22    1601    480 |   23.74        0.00
+POST     POST /api/workflows/[id]/run                                                     916     0(0.00%) |    731      20   55014    620 |    7.65        0.00
+POST     POST run (ocr, driver)                                                           172     0(0.00%) |    440      50    1206    400 |    1.44        0.00
+RUN      ocr run, queued to finished                                                      160     0(0.00%) |   8595    4659   10763   8800 |    1.34        0.00
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                      5601     0(0.00%) |    729      10   55014    480 |   46.76        0.00
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      GET /api/executions/[id] (driver poll)                                                340    500    590    650    820    930   1000   1100   1300   1500   1500   1509
+GET      GET /api/workflows                                                                    480    600    680    730    860    950   1100   1100   1400   1600   1600   2844
+POST     POST /api/workflows/[id]/run                                                          620    760    860    920   1100   1200   1300   1400  55000  55000  55000    916
+POST     POST run (ocr, driver)                                                                400    500    620    690    810    950   1100   1100   1200   1200   1200    172
+RUN      ocr run, queued to finished                                                          8800   9000   9200   9300   9600   9800  10000  11000  11000  11000  11000    160
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                            480    620    710    780    940   1100   8300   9000  10000  55000  55000   5601
+

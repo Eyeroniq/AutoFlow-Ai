@@ -23,6 +23,7 @@ Point it at a different API by creating `apps/web/.env.local` with
 | `src/app/providers.tsx`           | TanStack Query client (errors become toasts unless `meta.silent`)       |
 | `src/features/editor/`            | The editor: `store.ts` (graph, undo/redo, save state machine), `canvas.tsx`, `flow-node.tsx`, `node-library.tsx`, `config-panel.tsx` + `config-form.tsx` (schema forms), `schema-form.ts` (JSON Schema → fields + Zod), `references.ts` + `reference-field.tsx` (`{{` autocomplete), `hooks.ts` (autosave, live validation, shortcuts), `run-controller.tsx` + `run-panel.tsx` |
 | `src/features/runs/`              | `execution-socket.ts` (WebSocket client), `run-state.ts` (event reducer), `use-live-execution.ts`, `node-timeline.tsx` |
+| `src/features/files/`             | `FileChooser`: pick an upload or upload one with a progress bar (run form, Input defaults, document nodes) |
 | `src/features/dashboard/`, `executions/`, `integrations/` | The other pages                               |
 | `src/components/`                 | App shell (auth guard, header, user menu), node icons, UI primitives (button, dialog, menu, toast, status) |
 | `src/lib/api.ts`                  | Typed fetch client for the FastAPI backend, with token refresh          |

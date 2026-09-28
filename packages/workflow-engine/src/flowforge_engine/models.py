@@ -154,6 +154,9 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     # A stop was requested (ExecutionControl.request_stop) before the graph finished.
     STOPPED = "stopped"
+    # Not finished: the next node runs on another queue (ExecutionResult.next_queue). The
+    # caller hands the run off and resumes it there with `completed` results.
+    HANDOFF = "handoff"
 
 
 class NodeRunResult(BaseModel):
@@ -179,6 +182,8 @@ class ExecutionResult(BaseModel):
     node_results: list[NodeRunResult]
     final_output: dict[str, Any] | None = None
     error: str | None = None
+    # Set with status HANDOFF: the queue the run continues on.
+    next_queue: str | None = None
     started_at: datetime
     finished_at: datetime
     duration_ms: int

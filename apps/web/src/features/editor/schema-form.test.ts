@@ -143,3 +143,55 @@ describe("parseNumberInput", () => {
     expect(parseNumberInput("{{vars.t}}", false)).toBe("{{vars.t}}");
   });
 });
+
+describe("document node fields", () => {
+  // Shapes from GET /api/nodes for OCR and Entity Extraction.
+  const ocr: JsonSchema = {
+    type: "object",
+    required: ["file"],
+    properties: {
+      file: { anyOf: [{ type: "string" }, { type: "object", additionalProperties: true }], format: "file-ref", title: "File" },
+      language: { type: "string", default: "eng", pattern: "^[a-z_]{3,}(\\+[a-z_]{3,})*$" },
+    },
+  };
+  const entities: JsonSchema = {
+    type: "object",
+    required: ["text"],
+    properties: {
+      text: { type: "string", minLength: 1 },
+      entity_types: { type: "array", items: { type: "string", enum: ["people", "organizations", "dates", "amounts"] } },
+    },
+  };
+
+  it("maps file references and enum lists to their own controls", () => {
+    const fields = Object.fromEntries(fieldsFromSchema(ocr).map((f) => [f.name, f]));
+    expect(fields.file).toMatchObject({ kind: "file", required: true });
+    const types = fieldsFromSchema(entities).find((f) => f.name === "entity_types")!;
+    expect(types).toMatchObject({ kind: "multiselect", options: ["people", "organizations", "dates", "amounts"] });
+  });
+
+  it("validates them like the server", () => {
+    const ocrRules = zodForFields(fieldsFromSchema(ocr));
+    expect(ocrRules.safeParse({ file: "{{input.document}}" }).success).toBe(true);
+    expect(ocrRules.safeParse({ file: { file_id: "abc" } }).success).toBe(true);
+    expect(ocrRules.safeParse({}).error?.issues[0].message).toBe("Required");
+    const entityRules = zodForFields(fieldsFromSchema(entities));
+    expect(entityRules.safeParse({ text: "x", entity_types: ["people", "dates"] }).success).toBe(true);
+    expect(entityRules.safeParse({ text: "x", entity_types: ["pets"] }).success).toBe(false);
+  });
+});
+
+describe("patterns", () => {
+  it("says what's wrong, and skips patterns JavaScript can't parse", () => {
+    const rules = zodForFields(fieldsFromSchema({
+      type: "object",
+      properties: {
+        language: { type: "string", pattern: String.raw`^[a-z_]{3,}(\+[a-z_]{3,})*$` },
+        python_only: { type: "string", pattern: "(?P<name>x)" },
+      },
+    }));
+    expect(rules.safeParse({ language: "eng+deu", python_only: "anything" }).success).toBe(true);
+    const bad = rules.safeParse({ language: "English" });
+    expect(bad.error?.issues[0].message).toBe(String.raw`Doesn't match the expected format (^[a-z_]{3,}(\+[a-z_]{3,})*$)`);
+  });
+});

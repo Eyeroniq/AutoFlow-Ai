@@ -20,7 +20,8 @@ class NodeTypeRead(BaseModel):
     label: str
     description: str
     icon: str = Field(description="lucide icon name, e.g. 'sparkles'.")
-    queue: str
+    queue: str = Field(description="Celery queue whose workers run it: default, llm, or ocr.")
+    portable: bool = Field(description="Runs on whichever worker holds the run (never causes a queue hand-off).")
     interruptible: bool
     branches: list[str] = Field(description="Named output handles (Condition: true/false); empty = one output.")
     has_input: bool = Field(description="Whether the node takes incoming edges (Input nodes don't).")
@@ -48,6 +49,7 @@ def _describe(node_type: str) -> NodeTypeRead:
         description=info["description"],
         icon=info["icon"],
         queue=definition.queue,
+        portable=definition.portable,
         interruptible=definition.interruptible,
         branches=info["branches"],
         has_input=node_type != "input",

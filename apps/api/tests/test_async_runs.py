@@ -46,18 +46,19 @@ async def test_run_returns_202_immediately_and_queues_the_execution(client, user
     assert response.status_code == 202
     body = response.json()
     execution_id = body["execution_id"]
-    assert body["status"] == "pending" and body["queue"] == "default" and body["workflow_id"] == wid
+    # The Input node is portable, so the run starts where its first real node runs: Gemini, on "llm".
+    assert body["status"] == "pending" and body["queue"] == "llm" and body["workflow_id"] == wid
     assert body["links"] == {
         "execution": f"/api/executions/{execution_id}",
         "events": f"/ws/executions/{execution_id}",
         "stop": f"/api/executions/{execution_id}/stop",
     }
-    assert task_queue.enqueued == [(uuid.UUID(execution_id), "default")]
+    assert task_queue.enqueued == [(uuid.UUID(execution_id), "llm")]
     assert elapsed < 2  # nothing ran in the request
 
     execution = await get_execution(client, user, execution_id)
     assert execution["status"] == "pending" and execution["started_at"] is None
-    assert execution["inputs"] == {"topic": "tides"} and execution["queue"] == "default"
+    assert execution["inputs"] == {"topic": "tides"} and execution["queue"] == "llm"
     assert [(n["node_key"], n["status"]) for n in execution["node_executions"]] == [
         (key, "pending") for key in EXAMPLE_ORDER
     ]
@@ -123,7 +124,7 @@ async def test_worker_records_states_and_publishes_events_in_order(
         summary = await run(execution_id, session_factory, redis)
         events = await collector.drain()
 
-    assert summary == {"execution_id": str(execution_id), "ran": True, "status": "success", "error": None}
+    assert summary == {"execution_id": str(execution_id), "ran": True, "segment": 0, "status": "success", "error": None}
     expected = [("execution.started", None)]
     for key in EXAMPLE_ORDER:
         expected += [("node.started", key), ("node.succeeded", key)]
@@ -135,7 +136,7 @@ async def test_worker_records_states_and_publishes_events_in_order(
     assert await current_seq(redis, execution_id) == len(events)
     assert all(e["execution_id"] == str(execution_id) and e["timestamp"] for e in events)
     started, finished = events[0], events[-1]
-    assert started["status"] == "running" and started["worker"] == "worker@test" and started["queue"] == "default"
+    assert started["status"] == "running" and started["worker"] == "worker@test" and started["queue"] == "llm"
     assert [n["node_key"] for n in started["nodes"]] == EXAMPLE_ORDER
     assert finished["status"] == "success" and finished["error"] is None
     assert finished["final_output"]["result"]["summary"].startswith("[MOCK RESPONSE to: Write a three-sentence")
@@ -180,7 +181,8 @@ async def test_a_second_delivery_does_not_run_it_again(client, user, session_fac
         second = await run(execution_id, session_factory, redis, worker_id="worker@other")
         events = await collector.drain()
 
-    assert first["ran"] is True and second == {"execution_id": str(execution_id), "ran": False, "status": "success"}
+    assert first["ran"] is True
+    assert second == {"execution_id": str(execution_id), "ran": False, "segment": 0, "status": "success"}
     assert [e["type"] for e in events].count("execution.started") == 1
     rows = (await shared_session.scalars(select(NodeExecution).where(NodeExecution.execution_id == execution_id))).all()
     assert len(rows) == len(EXAMPLE_ORDER)

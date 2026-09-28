@@ -49,6 +49,12 @@ class WorkflowExecution(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     worker_hostname: Mapped[str | None] = mapped_column(String(255))
     heartbeat_at: Mapped[datetime | None]
     stop_requested_at: Mapped[datetime | None]
+    # Queue hand-off: a run moves to another queue's workers when it reaches a node of that
+    # kind (flowforge_engine.routing). `segment` counts the hand-offs; while the run waits
+    # for a worker of the next queue it has no worker_hostname/heartbeat and handoff_at is
+    # set. The next task claims segment N+1 with a compare-and-set, so it runs once.
+    segment: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    handoff_at: Mapped[datetime | None]
 
     workflow: Mapped["Workflow"] = relationship(back_populates="executions")
     triggered_by: Mapped["User | None"] = relationship()
@@ -84,6 +90,9 @@ class NodeExecution(UUIDPrimaryKeyMixin, Base):
     finished_at: Mapped[datetime | None]
     error_message: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+    # Which queue and worker ran the node (null for skipped nodes and sync runs' queue).
+    queue: Mapped[str | None] = mapped_column(String(100))
+    worker_hostname: Mapped[str | None] = mapped_column(String(255))
 
     execution: Mapped["WorkflowExecution"] = relationship(back_populates="node_executions")
     node: Mapped["WorkflowNode | None"] = relationship()

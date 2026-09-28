@@ -66,6 +66,7 @@ class ConditionNode(NodeDefinition[ConditionConfig]):
     config_schema = ConditionConfig
     output_schema = ConditionResult
     branches = ("true", "false")
+    portable = True
 
     async def execute(self, context: NodeContext, config: ConditionConfig) -> NodeResult:
         try:

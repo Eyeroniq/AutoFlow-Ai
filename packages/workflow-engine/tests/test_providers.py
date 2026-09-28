@@ -461,6 +461,23 @@ class TestGeminiAdapter:
         assert pieces == ["Hel", "lo"]
         assert "streamGenerateContent" in captured[0].url.path
 
+    async def test_stream_retries_an_overload_before_the_first_token(self):
+        # The SDK sends the request lazily, so the 503 surfaces on the first chunk.
+        busy = {"error": {"code": 503, "status": "UNAVAILABLE", "message": "This model is currently experiencing high demand."}}
+        transport, captured = recorder(
+            json_response(busy, 503),
+            sse_response(["data: " + json.dumps(self.candidate("Back"))]),
+        )
+        pieces = [p async for p in self.provider(transport).stream("", "Hi", "gemini-3.8-flash", 0.4, 64)]
+        assert pieces == ["Back"] and len(captured) == 2
+
+    async def test_stream_gives_up_on_a_persistent_overload(self):
+        busy = {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}}
+        transport, captured = recorder(json_response(busy, 503))
+        with pytest.raises(ProviderError, match="server error"):
+            _ = [p async for p in self.provider(transport).stream("", "Hi", "gemini-3.8-flash", 0.4, 64)]
+        assert len(captured) >= 2  # retried, then gave up
+
     async def test_embed(self):
         transport, captured = recorder(json_response({"embeddings": [{"values": [0.5, 0.25]}]}))
         assert await self.provider(transport).embed("hello") == [0.5, 0.25]

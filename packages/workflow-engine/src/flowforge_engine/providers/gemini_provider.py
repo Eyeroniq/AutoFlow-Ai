@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from flowforge_engine.errors import ProviderError
-from flowforge_engine.providers.retry import RetryPolicy, classify_status, parse_retry_after, redact, with_retries
+from flowforge_engine.providers.retry import (
+    RetryPolicy,
+    backoff_delay,
+    classify_status,
+    parse_retry_after,
+    redact,
+    with_retries,
+)
 from flowforge_engine.providers.settings import LLM_PROVIDERS
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from google.genai import Client
@@ -165,18 +176,32 @@ class GeminiProvider:
             except (errors.APIError, *_transport_errors()) as exc:
                 raise self._error(exc) from exc
 
-        chunks = await with_retries(open_stream, self._retry)
-        produced = False
-        last: Any = None
-        try:
-            async for chunk in chunks:
-                last = chunk
-                if chunk.text:
-                    produced = True
-                    yield chunk.text
-        except (errors.APIError, *_transport_errors()) as exc:
-            # Mid-stream failures aren't retried: text has already been handed out.
-            raise self._error(exc) from exc
+        # The SDK sends the request lazily, so a 429/503 can surface on the first chunk. Until
+        # a chunk with text has been handed out, a retryable failure is retried like any other
+        # call; after that it isn't (the text so far is already out).
+        retries = 0
+        while True:
+            chunks = await with_retries(open_stream, self._retry)
+            produced = False
+            last: Any = None
+            try:
+                async for chunk in chunks:
+                    last = chunk
+                    if chunk.text:
+                        produced = True
+                        yield chunk.text
+                break
+            except (errors.APIError, *_transport_errors()) as exc:
+                error = self._error(exc)
+                retries += 1
+                delay = backoff_delay(retries, self._retry, error.retry_after) if error.retryable else None
+                if produced or delay is None or retries > self._retry.max_retries:
+                    raise error from exc
+                logger.warning(
+                    "provider stream failed before any text; retrying",
+                    extra={"provider": self.name, "attempt": retries, "retry_in_seconds": round(delay, 2), "error": str(error)},
+                )
+                await asyncio.sleep(delay)
         if not produced:
             reason = self._empty_reason(last) if last is not None else "empty stream"
             raise ProviderError(self.name, f"no text in response ({reason})")

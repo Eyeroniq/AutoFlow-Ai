@@ -3,6 +3,7 @@ import {
   Box,
   Brain,
   Cpu,
+  FileText,
   GitBranch,
   Globe,
   Inbox,
@@ -11,7 +12,10 @@ import {
   type LucideIcon,
   Mail,
   Route,
+  ScanText,
   Sparkles,
+  Tags,
+  TextQuote,
   Timer,
   Type,
   Zap,
@@ -33,6 +37,10 @@ const ICONS: Record<string, LucideIcon> = {
   type: Type,
   "git-branch": GitBranch,
   timer: Timer,
+  "file-text": FileText,
+  "scan-text": ScanText,
+  "text-quote": TextQuote,
+  tags: Tags,
 };
 
 export function NodeIcon({ name, className = "size-4" }: { name?: string; className?: string }) {

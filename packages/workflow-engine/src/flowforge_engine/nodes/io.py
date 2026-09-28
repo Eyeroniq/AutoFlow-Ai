@@ -6,10 +6,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from flowforge_engine.files import FileNotAvailable, file_id_from
 from flowforge_engine.models import IDENTIFIER_PATTERN, GraphNode, NodeContext, NodeResult
 from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
 
-InputType = Literal["text", "number", "json"]
+# "file": the value is an uploaded file's id (POST /api/files); the node outputs the file's
+# description ({file_id, filename, content_type, size_bytes}) for document nodes to read.
+InputType = Literal["text", "number", "json", "file"]
 
 
 class InputConfig(NodeConfig):
@@ -19,8 +22,10 @@ class InputConfig(NodeConfig):
         pattern=IDENTIFIER_PATTERN,
         description="Key to read from the run's `inputs`. Defaults to the node id.",
     )
-    input_type: InputType = "text"
-    default: Any = Field(default=None, description="Used when the run doesn't supply this input.")
+    input_type: InputType = Field(default="text", description="'file' takes an uploaded file's id.")
+    default: Any = Field(
+        default=None, description="Used when the run doesn't supply this input (for a file: an uploaded file's id)."
+    )
     required: bool = True
 
 
@@ -48,6 +53,8 @@ def coerce_input(value: Any, input_type: InputType) -> Any:
         if isinstance(number, float) and not math.isfinite(number):
             raise ValueError("expected a finite number")
         return number
+    if input_type == "file":
+        return file_id_from(value)
     # json
     if isinstance(value, str):
         try:
@@ -60,6 +67,7 @@ def coerce_input(value: Any, input_type: InputType) -> Any:
 @register_node("input")
 class InputNode(NodeDefinition[InputConfig]):
     category = "io"
+    portable = True
     label = "Input"
     description = "Entry point that reads a value from the run's inputs and type-checks it."
     icon = "log-in"
@@ -84,6 +92,11 @@ class InputNode(NodeDefinition[InputConfig]):
             value = coerce_input(raw, config.input_type)
         except ValueError as exc:
             return NodeResult.fail(f"Input '{name}': {exc}")
+        if config.input_type == "file":
+            try:
+                value = (await context.services.files.get(value)).describe()
+            except FileNotAvailable as exc:
+                return NodeResult.fail(f"Input '{name}': {exc}")
         # Exposed both as {{node.value}} and {{node.<name>}}.
         return NodeResult(success=True, output={"value": value, name: value})
 
@@ -101,6 +114,7 @@ class OutputResult(BaseModel):
 @register_node("output")
 class OutputNode(NodeDefinition[OutputConfig]):
     category = "io"
+    portable = True
     label = "Output"
     description = "Captures a value into the execution's final output under `name`."
     icon = "log-out"
@@ -123,6 +137,7 @@ class TextResult(BaseModel):
 @register_node("text")
 class TextNode(NodeDefinition[TextConfig]):
     category = "io"
+    portable = True
     label = "Text"
     description = "Static text (with {{...}} references resolved) passed downstream."
     icon = "type"

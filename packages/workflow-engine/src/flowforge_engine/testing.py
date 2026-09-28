@@ -10,14 +10,17 @@ from typing import Any
 
 import httpx
 
+from flowforge_engine.files import FileStore
 from flowforge_engine.models import GraphEdge, GraphNode, GraphVariable, NodeContext, WorkflowGraph
 from flowforge_engine.providers.settings import ProviderSettings
 from flowforge_engine.services import ExecutionServices
 
 
-def mock_services(*, http_transport: httpx.AsyncBaseTransport | None = None) -> ExecutionServices:
+def mock_services(
+    *, http_transport: httpx.AsyncBaseTransport | None = None, files: FileStore | None = None
+) -> ExecutionServices:
     """Services that hand out mock providers for everything, whatever keys are configured."""
-    return ExecutionServices(provider_settings=ProviderSettings(testing=True), http_transport=http_transport)
+    return ExecutionServices(provider_settings=ProviderSettings(testing=True), http_transport=http_transport, files=files)
 
 
 def make_context(

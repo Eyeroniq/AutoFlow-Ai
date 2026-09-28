@@ -180,8 +180,22 @@ export function configSummary(type: string, config: Record<string, unknown>, ent
   const c = config;
   const str = (key: string) => (c[key] === undefined || c[key] === null ? "" : String(c[key]));
   switch (type) {
-    case "input":
-      return `${str("name") || "value"} · ${str("input_type") || "text"}${c.default !== undefined && c.default !== null && c.default !== "" ? ` = ${preview(c.default, 24)}` : ""}`;
+    case "input": {
+      const hasDefault = c.default !== undefined && c.default !== null && c.default !== "";
+      const shown = c.input_type === "file" ? "a default file" : preview(c.default, 24);
+      return `${str("name") || "value"} · ${str("input_type") || "text"}${hasDefault ? ` = ${shown}` : ""}`;
+    }
+    case "pdf_extract":
+      return `${preview(c.file, 28) || "(no file)"} · pages ${str("pages") || "all"}`;
+    case "ocr":
+      return `${preview(c.file, 22) || "(no file)"} · ${str("language") || "eng"} · ${str("dpi") || "300"} dpi`;
+    case "summarize":
+      return `${str("length") || "medium"} · ${str("style") || "paragraph"} · ${str("provider") || "gemini"}`;
+    case "extract_entities": {
+      const types = Array.isArray(c.entity_types) ? c.entity_types.length : 4;
+      const custom = Array.isArray(c.custom_types) && c.custom_types.length ? ` + ${c.custom_types.length} custom` : "";
+      return `${types} types${custom} · ${str("provider") || "gemini"}`;
+    }
     case "output":
       return `${str("name") || "result"} ← ${preview(c.value) || "(empty)"}`;
     case "text":

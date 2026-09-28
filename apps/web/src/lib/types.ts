@@ -53,6 +53,8 @@ export interface JsonSchema {
   maxLength?: number;
   maxItems?: number;
   pattern?: string;
+  /** "file-ref": a file reference; the editor adds an upload/choose-file picker. */
+  format?: string;
 }
 
 export interface NodeType {
@@ -62,7 +64,10 @@ export interface NodeType {
   label: string;
   description: string;
   icon: string;
+  /** The Celery queue whose workers run it: "default", "llm", or "ocr". */
   queue: string;
+  /** Runs wherever the run is (Input, Output, Text, Condition): never a queue hand-off. */
+  portable: boolean;
   interruptible: boolean;
   branches: string[];
   has_input: boolean;
@@ -193,6 +198,10 @@ export interface ExecutionSummary {
   heartbeat_at: string | null;
   stop_requested_at: string | null;
   duration_ms: number | null;
+  /** Times the run moved to another queue's workers. */
+  segment: number;
+  /** Set while the run waits for a worker of `queue` after a hand-off. */
+  handoff_at: string | null;
 }
 
 export interface ExecutionListItem extends ExecutionSummary {
@@ -213,6 +222,9 @@ export interface NodeExecution {
   started_at: string | null;
   finished_at: string | null;
   duration_ms: number | null;
+  /** Where the node ran (null for skipped nodes, and the queue for in-request runs). */
+  queue: string | null;
+  worker_hostname: string | null;
 }
 
 export interface ExecutionDetail extends ExecutionSummary {
@@ -239,7 +251,18 @@ export type ExecutionEvent =
       seq: number;
       node_key: string;
       started_at: string | null;
+      worker?: string | null;
+      queue?: string | null;
     }
+  | {
+      type: "execution.handoff";
+      seq: number;
+      from_queue: string | null;
+      to_queue: string;
+      segment: number;
+      worker: string;
+    }
+  | { type: "execution.resumed"; seq: number; segment: number; worker: string; queue: string | null }
   | { type: "node.token"; seq: number; node_key: string; text: string; provider: string }
   | {
       type: "node.succeeded" | "node.failed" | "node.skipped";
@@ -267,6 +290,25 @@ export type ExecutionEvent =
     }
   | { type: "heartbeat" | "pong"; timestamp: string }
   | { type: "error"; code: number; message: string };
+
+// --- files ---------------------------------------------------------------------------------------
+
+export interface UploadedFile {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+}
+
+/** What an Input node of type file outputs (and document nodes accept as `file`). */
+export interface FileDescription {
+  file_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+}
 
 // --- integrations ------------------------------------------------------------------------------
 

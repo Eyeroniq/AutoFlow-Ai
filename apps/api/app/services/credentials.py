@@ -24,6 +24,7 @@ from app.models.enums import IntegrationStatus
 from app.models.integration import Integration
 from app.models.user import User
 from app.schemas.integration import ConnectRequest, IntegrationRead, IntegrationTestResult
+from app.services.files import DbFileStore
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +188,13 @@ def provider_settings_for(user_credentials: dict[str, dict[str, Any]]) -> Provid
 
 
 async def build_execution_services(db: AsyncSession, user: User) -> ExecutionServices:
+    """Provider credentials, the user's uploaded files, and the SSRF policy for a run."""
     credentials = await load_user_credentials(db, user.id)
-    return ExecutionServices(provider_settings=provider_settings_for(credentials))
+    return ExecutionServices(
+        provider_settings=provider_settings_for(credentials),
+        files=DbFileStore(db, user.id),
+        allow_private_network=settings.HTTP_ALLOW_PRIVATE_NETWORKS,
+    )
 
 
 def credential_source(

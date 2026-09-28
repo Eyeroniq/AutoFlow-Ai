@@ -23,7 +23,10 @@ async def test_node_catalog_comes_from_the_registry(client, user):
 
     gemini = nodes["gemini"]
     assert gemini["group"] == "LLM" and gemini["category"] == "ai" and gemini["icon"] == "sparkles"
-    assert gemini["queue"] == "default" and gemini["interruptible"] is True
+    assert gemini["queue"] == "llm" and gemini["portable"] is False and gemini["interruptible"] is True
+    assert nodes["input"]["portable"] is True and nodes["http_request"]["queue"] == "default"
+    assert nodes["ocr"]["queue"] == "ocr" and nodes["ocr"]["group"] == "Documents"
+    assert {"pdf_extract", "ocr", "summarize", "extract_entities"} <= set(nodes)
     props = gemini["config_schema"]["properties"]
     assert {"provider", "model", "system_prompt", "user_prompt", "temperature", "max_tokens", "fallback", "stream"} <= set(props)
     assert gemini["config_schema"]["required"] == ["user_prompt"]
@@ -37,8 +40,7 @@ async def test_node_catalog_comes_from_the_registry(client, user):
     assert nodes["output"]["produces_final_output"] is True
 
     groups = [n["group"] for n in response.json()]
-    assert groups == sorted(groups, key=["General", "LLM", "Integrations"].index)  # grouped, in order
-    assert "Documents" not in groups  # no such nodes yet
+    assert groups == sorted(groups, key=["General", "LLM", "Integrations", "Documents"].index)  # grouped, in order
 
     assert (await client.get("/api/nodes")).status_code == 401
 

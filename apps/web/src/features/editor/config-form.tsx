@@ -7,8 +7,17 @@ import { Controller, type ControllerRenderProps, type FieldValues, useForm, type
 
 import type { JsonSchema, ValidationIssue } from "@/lib/types";
 
+import { FileChooser } from "../files/file-chooser";
 import { ReferenceField } from "./reference-field";
-import { cleanConfig, type FieldSpec, fieldsFromSchema, isReferenceOnly, parseNumberInput, zodForFields } from "./schema-form";
+import {
+  cleanConfig,
+  containsReference,
+  type FieldSpec,
+  fieldsFromSchema,
+  isReferenceOnly,
+  parseNumberInput,
+  zodForFields,
+} from "./schema-form";
 import { getEditorStore } from "./store";
 
 export interface FieldRendererProps {
@@ -148,7 +157,7 @@ function SchemaField({
   );
 }
 
-function DefaultControl({ spec, field, nodeId, inputId, invalid, describedBy }: FieldRendererProps) {
+export function DefaultControl({ spec, field, nodeId, inputId, invalid, describedBy }: FieldRendererProps) {
   switch (spec.kind) {
     case "textarea":
     case "text":
@@ -216,12 +225,86 @@ function DefaultControl({ spec, field, nodeId, inputId, invalid, describedBy }: 
       );
     case "string-list":
       return <StringList value={Array.isArray(field.value) ? (field.value as string[]) : []} onChange={field.onChange} max={spec.maxItems} />;
+    case "multiselect": {
+      const chosen = Array.isArray(field.value) ? (field.value as string[]) : Array.isArray(spec.default) ? (spec.default as string[]) : [];
+      return (
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5" role="group" aria-describedby={describedBy}>
+          {spec.options?.map((option) => (
+            <label key={option} className="flex items-center gap-1.5 text-xs text-slate-700">
+              <input
+                type="checkbox"
+                checked={chosen.includes(option)}
+                onChange={(e) =>
+                  field.onChange(e.target.checked ? [...chosen, option] : chosen.filter((v) => v !== option))
+                }
+                className="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-200"
+              />
+              {option}
+            </label>
+          ))}
+        </div>
+      );
+    }
+    case "file":
+      return <FileRefField id={inputId} nodeId={nodeId} value={field.value} onChange={field.onChange} invalid={invalid} describedBy={describedBy} />;
     case "object":
     case "json-array":
       return <JsonField id={inputId} nodeId={nodeId} value={field.value} onChange={field.onChange} kind={spec.kind} invalid={invalid} describedBy={describedBy} />;
     default:
       return <AnyField id={inputId} nodeId={nodeId} value={field.value} onChange={field.onChange} invalid={invalid} describedBy={describedBy} />;
   }
+}
+
+/** A document node's `file`: a {{reference}} (usually an Input node of type file) or one of your uploads. */
+function FileRefField({
+  id,
+  nodeId,
+  value,
+  onChange,
+  invalid,
+  describedBy,
+}: {
+  id: string;
+  nodeId: string;
+  value: unknown;
+  onChange: (v: unknown) => void;
+  invalid: boolean;
+  describedBy?: string;
+}) {
+  const isUpload = typeof value === "string" && value.trim() !== "" && !containsReference(value);
+  const [mode, setMode] = useState<"reference" | "upload">(isUpload ? "upload" : "reference");
+  const tab = (key: "reference" | "upload", label: string) => (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={mode === key}
+      onClick={() => setMode(key)}
+      className={`rounded px-2 py-0.5 text-[11px] font-medium ${mode === key ? "bg-indigo-50 text-indigo-700" : "text-slate-500 hover:bg-slate-100"}`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div>
+      <div role="radiogroup" aria-label="File source" className="mb-1 flex gap-1">
+        {tab("reference", "Reference")}
+        {tab("upload", "Uploaded file")}
+      </div>
+      {mode === "reference" ? (
+        <ReferenceField
+          id={id}
+          nodeId={nodeId}
+          value={typeof value === "string" ? value : value ? JSON.stringify(value) : ""}
+          onChange={onChange}
+          invalid={invalid}
+          describedBy={describedBy}
+          placeholder="{{input.document}}"
+        />
+      ) : (
+        <FileChooser id={id} value={isUpload ? (value as string) : undefined} onChange={onChange} invalid={invalid} describedBy={describedBy} />
+      )}
+    </div>
+  );
 }
 
 function StringList({ value, onChange, max }: { value: string[]; onChange: (v: string[]) => void; max?: number }) {

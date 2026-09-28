@@ -133,14 +133,19 @@ class FakeTaskQueue:
     """Records what the API would send to Celery (tests run executions themselves)."""
 
     enqueued: list[tuple[uuid.UUID, str]] = field(default_factory=list)
+    # Continuations of handed-off runs: (execution id, queue, segment).
+    continued: list[tuple[uuid.UUID, str, int]] = field(default_factory=list)
     revoked: list[str] = field(default_factory=list)
     fail: bool = False
 
-    async def enqueue(self, execution_id: uuid.UUID, queue: str) -> str:
+    async def enqueue(self, execution_id: uuid.UUID, queue: str, *, segment: int = 0) -> str:
         if self.fail:
             raise EnqueueFailed("OperationalError: Error 111 connecting to redis:6379. Connection refused.")
-        self.enqueued.append((execution_id, queue))
-        return str(execution_id)
+        if segment:
+            self.continued.append((execution_id, queue, segment))
+        else:
+            self.enqueued.append((execution_id, queue))
+        return str(execution_id) if segment == 0 else f"{execution_id}:{segment}"
 
     async def revoke(self, task_id: str) -> None:
         self.revoked.append(task_id)
@@ -220,6 +225,14 @@ async def _clean_test_redis():
 @pytest.fixture(autouse=True)
 def _clear_mock_outbox():
     MockEmailProvider.clear_outbox()
+
+
+@pytest.fixture(autouse=True)
+def files_dir(tmp_path, monkeypatch):
+    """Uploads go to a per-test directory, never the real upload volume."""
+    path = tmp_path / "files"
+    monkeypatch.setattr(settings, "FILES_DIR", str(path))
+    return path
 
 
 @dataclass

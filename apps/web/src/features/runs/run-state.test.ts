@@ -72,10 +72,10 @@ describe("reduceRun", () => {
     const execution: ExecutionDetail = {
       id: "ex-1", workflow_id: "wf", status: "running", trigger: "manual", triggered_by_user_id: null, created_at: t(0),
       started_at: t(0), finished_at: null, error_message: null, queue: "default", worker_hostname: "worker@a",
-      heartbeat_at: null, stop_requested_at: null, duration_ms: null, inputs: {}, final_output: null,
+      heartbeat_at: null, stop_requested_at: null, duration_ms: null, inputs: {}, final_output: null, segment: 0, handoff_at: null,
       node_executions: [
-        { id: "1", node_id: null, node_key: "input", position: 0, node_type: "input", node_label: "Topic", status: "success", input: null, output: { value: 1 }, error_message: null, started_at: t(0), finished_at: t(1), duration_ms: 1 },
-        { id: "2", node_id: null, node_key: "gemini", position: 1, node_type: "gemini", node_label: "Summarize", status: "running", input: null, output: null, error_message: null, started_at: t(1), finished_at: null, duration_ms: null },
+        { id: "1", node_id: null, node_key: "input", position: 0, node_type: "input", node_label: "Topic", status: "success", input: null, output: { value: 1 }, error_message: null, started_at: t(0), finished_at: t(1), duration_ms: 1, queue: "llm", worker_hostname: "worker-llm@a" },
+        { id: "2", node_id: null, node_key: "gemini", position: 1, node_type: "gemini", node_label: "Summarize", status: "running", input: null, output: null, error_message: null, started_at: t(1), finished_at: null, duration_ms: null, queue: "llm", worker_hostname: "worker-llm@a" },
       ],
     };
     const streaming = apply([{ type: "node.token", seq: 3, node_key: "gemini", text: "so far", provider: "gemini" }]);
@@ -86,6 +86,23 @@ describe("reduceRun", () => {
     expect(state.seq).toBe(4);
     // Later events still apply; older ones don't.
     expect(reduceRun(state, { type: "node.started", seq: 4, node_key: "gemini", started_at: t(9) }).nodes.gemini.startedAt).toBe(t(1));
+  });
+});
+
+describe("queue hand-offs", () => {
+  it("records where each node ran and when the run waits for another queue", () => {
+    const state = apply([
+      { type: "node.started", seq: 1, node_key: "input", started_at: t(0), queue: "ocr", worker: "worker-ocr@1" },
+      { type: "execution.handoff", seq: 2, from_queue: "ocr", to_queue: "llm", segment: 1, worker: "worker-ocr@1" },
+    ]);
+    expect(state.nodes.input).toMatchObject({ queue: "ocr", worker: "worker-ocr@1" });
+    expect(state).toMatchObject({ waitingForQueue: "llm", segment: 1, worker: null });
+
+    const resumed = reduceRun(state, { type: "execution.resumed", seq: 3, segment: 1, worker: "worker-llm@2", queue: "llm" });
+    expect(resumed).toMatchObject({ waitingForQueue: null, worker: "worker-llm@2" });
+    const started = reduceRun(state, { type: "node.started", seq: 3, node_key: "gemini", started_at: t(2), queue: "llm", worker: "worker-llm@2" });
+    expect(started.waitingForQueue).toBeNull();
+    expect(started.nodes.gemini).toMatchObject({ status: "running", queue: "llm", worker: "worker-llm@2" });
   });
 });
 
@@ -113,7 +130,7 @@ describe("helpers", () => {
       id: "e", workflow_id: "w", status: "success", trigger: "manual", triggered_by_user_id: null, created_at: t(0),
       started_at: t(0),
       finished_at: t(1), error_message: null, queue: null, worker_hostname: null, heartbeat_at: null, stop_requested_at: null,
-      duration_ms: 1000, inputs: null, final_output: { result: 1 }, node_executions: [],
+      duration_ms: 1000, inputs: null, final_output: { result: 1 }, node_executions: [], segment: 0, handoff_at: null,
     }, idleRun)).toMatchObject({ executionId: "e", status: "success", finalOutput: { result: 1 }, durationMs: 1000 });
   });
 });

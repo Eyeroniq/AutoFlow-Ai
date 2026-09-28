@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 
 import httpx
 
+from flowforge_engine.files import FileNotAvailable, FileStore
+from flowforge_engine.netguard import ALLOW_ENV
 from flowforge_engine.providers.base import EmailProvider, LLMProvider, MailboxProvider
 from flowforge_engine.providers.factory import get_email_provider, get_llm_provider, get_mailbox_provider
 from flowforge_engine.providers.settings import ProviderSettings, missing_credentials_hint
@@ -26,6 +29,8 @@ class ExecutionServices:
         email_providers: Mapping[str, EmailProvider] | None = None,
         mailbox_providers: Mapping[str, MailboxProvider] | None = None,
         http_transport: httpx.AsyncBaseTransport | None = None,
+        files: FileStore | None = None,
+        allow_private_network: bool | None = None,
     ):
         self.settings = provider_settings if provider_settings is not None else ProviderSettings.from_env()
         self._llm: dict[str, LLMProvider] = dict(llm_providers or {})
@@ -33,6 +38,19 @@ class ExecutionServices:
         self._mailbox: dict[str, MailboxProvider] = dict(mailbox_providers or {})
         self._injected = set(self._llm) | set(self._email) | set(self._mailbox)
         self.http_transport = http_transport
+        self._files = files
+        # The HTTP Request node's SSRF guard (flowforge_engine.netguard) is on unless this is
+        # True; None reads HTTP_ALLOW_PRIVATE_NETWORKS from the environment.
+        if allow_private_network is None:
+            allow_private_network = os.environ.get(ALLOW_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+        self.allow_private_network = allow_private_network
+
+    @property
+    def files(self) -> FileStore:
+        """The run owner's uploaded files. Raises FileNotAvailable when none are configured."""
+        if self._files is None:
+            raise FileNotAvailable("File storage isn't available here (no file store was configured for this run)")
+        return self._files
 
     def llm(self, provider_name: str) -> LLMProvider:
         """Raises MissingCredentialsError if the provider has no credentials."""

@@ -9,6 +9,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/ui/status";
 import { formatDuration, prettyJson } from "@/lib/format";
 
+import { FileChooser } from "../files/file-chooser";
 import { NodeTimeline } from "../runs/node-timeline";
 import { topologicalOrder } from "./graph";
 import { useRun } from "./run-controller";
@@ -82,7 +83,13 @@ export function RunPanel() {
             </div>
           )}
           {(run.status === "pending" || run.status === "running") && !run.error && (
-            <p className="text-xs text-slate-500">{run.status === "pending" ? "Queued: waiting for a worker…" : "Running on a worker. Node colors update live."}</p>
+            <p className="text-xs text-slate-500" data-testid="run-progress">
+              {run.status === "pending"
+                ? "Queued: waiting for a worker…"
+                : run.waitingForQueue
+                  ? `Handed off: waiting for a "${run.waitingForQueue}" worker…`
+                  : "Running on a worker. Node colors update live."}
+            </p>
           )}
         </div>
       </div>
@@ -93,10 +100,15 @@ export function RunPanel() {
 interface InputField {
   node: string;
   name: string;
-  type: "text" | "number" | "json";
+  type: "text" | "number" | "json" | "file";
   required: boolean;
   defaultValue: unknown;
   label: string;
+}
+
+/** A label around ordinary inputs; a plain block around the file chooser (it has buttons). */
+function FieldWrapper({ file, children }: { file: boolean; children: React.ReactNode }) {
+  return file ? <div className="block">{children}</div> : <label className="block">{children}</label>;
 }
 
 /** Values for the workflow's Input nodes, asked for before a run. */
@@ -134,6 +146,8 @@ function InputsForm({ fields, onClose, onRun }: { fields: InputField[]; onClose:
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState<Record<string, boolean>>({});
+  const anyUploading = Object.values(uploading).some(Boolean);
 
   const submit = async () => {
     const inputs: Record<string, unknown> = {};
@@ -144,7 +158,9 @@ function InputsForm({ fields, onClose, onRun }: { fields: InputField[]; onClose:
         if (field.required && (field.defaultValue === undefined || field.defaultValue === null)) problems[field.name] = "Required";
         continue; // empty: the Input node's default applies
       }
-      if (field.type === "number") {
+      if (field.type === "file") {
+        inputs[field.name] = raw;
+      } else if (field.type === "number") {
         if (Number.isNaN(Number(raw))) problems[field.name] = "Enter a number";
         else inputs[field.name] = Number(raw);
       } else if (field.type === "json") {
@@ -175,8 +191,8 @@ function InputsForm({ fields, onClose, onRun }: { fields: InputField[]; onClose:
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} loading={busy} data-testid="confirm-run">
-            Run
+          <Button onClick={() => void submit()} loading={busy} disabled={anyUploading} data-testid="confirm-run">
+            {anyUploading ? "Uploading…" : "Run"}
           </Button>
         </>
       }
@@ -190,13 +206,21 @@ function InputsForm({ fields, onClose, onRun }: { fields: InputField[]; onClose:
       >
         <p className="text-xs text-slate-500">Values for the workflow&apos;s Input nodes. Leave one empty to use its default.</p>
         {fields.map((field) => (
-          <label key={field.node} className="block">
+          <FieldWrapper key={field.node} file={field.type === "file"}>
             <span className="mb-1 flex items-baseline gap-1 text-xs font-medium text-slate-700">
               {field.label} <code className="font-normal text-slate-400">{field.name}</code>
               <span className="font-normal text-slate-400">({field.type})</span>
               {field.required && field.defaultValue == null && <span className="text-red-500">*</span>}
             </span>
-            {field.type === "json" ? (
+            {field.type === "file" ? (
+              <FileChooser
+                value={values[field.name] || undefined}
+                onChange={(fileId) => setValues({ ...values, [field.name]: fileId ?? "" })}
+                emptyLabel="Choose a file"
+                testId={`run-input-${field.name}`}
+                onUploadingChange={(busyUploading) => setUploading((u) => (u[field.name] === busyUploading ? u : { ...u, [field.name]: busyUploading }))}
+              />
+            ) : field.type === "json" ? (
               <textarea
                 value={values[field.name]}
                 onChange={(e) => setValues({ ...values, [field.name]: e.target.value })}
@@ -213,7 +237,7 @@ function InputsForm({ fields, onClose, onRun }: { fields: InputField[]; onClose:
               />
             )}
             {errors[field.name] && <span className="mt-1 block text-[11px] text-red-600">{errors[field.name]}</span>}
-          </label>
+          </FieldWrapper>
         ))}
         <button type="submit" className="hidden" />
       </form>

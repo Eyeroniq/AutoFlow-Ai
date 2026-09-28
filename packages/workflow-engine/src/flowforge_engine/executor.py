@@ -5,6 +5,7 @@ import contextlib
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -83,6 +84,8 @@ async def execute_graph(
     node_timeout: float = DEFAULT_NODE_TIMEOUT_SECONDS,
     hooks: ExecutionHooks | None = None,
     control: ExecutionControl | None = None,
+    completed: Mapping[str, NodeRunResult] | None = None,
+    accepts: Callable[[str], bool] | None = None,
 ) -> ExecutionResult:
     """Run every node in topological order and collect per-node results.
 
@@ -90,6 +93,13 @@ async def execute_graph(
     before it executes. The first failure stops the run and the remaining nodes are
     marked skipped. Nodes behind a Condition branch that wasn't taken are skipped too,
     but that is not a failure. A stop via `control` skips everything not yet finished.
+
+    Queue hand-off (a run spread over workers of different queues): `accepts(queue)` says
+    whether this worker may run a node of that queue. At the first non-portable node it
+    may not run, execution pauses and the result has status HANDOFF and `next_queue`;
+    nodes skipped along the way are reported as usual. To resume, call again with
+    `completed` = the results so far (nodes in it are not run again and fire no hooks;
+    successful ones provide their outputs to later references).
 
     Raises GraphValidationFailed (without running anything) if the graph is invalid,
     including when a node's provider has no credentials ("Authentication missing").
@@ -112,11 +122,21 @@ async def execute_graph(
     results: dict[str, NodeRunResult] = {}
     failed_node: str | None = None
     stopped = False
+    next_queue: str | None = None
+    done = dict(completed or {})
 
     for node_id in topological_sort(workflow.nodes, workflow.edges):
         node = nodes[node_id]
         definition = registry.get(node.type)
         assert definition is not None  # guaranteed by validation
+
+        if node_id in done:  # finished in an earlier segment of this run
+            result = results[node_id] = done[node_id]
+            if result.status is NodeStatus.SUCCESS:
+                context.node_outputs[node_id] = result.output or {}
+            elif result.status is NodeStatus.FAILED:
+                failed_node = node_id
+            continue
 
         if failed_node is not None:
             result = _skipped(node, definition, f"Execution stopped after node '{failed_node}' failed")
@@ -125,6 +145,9 @@ async def execute_graph(
             result = _skipped(node, definition, f"Not run: {control.reason if control else 'stopped'}")
         elif skip_reason := _inactive_reason(incoming[node_id], results, registry, nodes):
             result = _skipped(node, definition, skip_reason)
+        elif accepts is not None and not definition.portable and not accepts(definition.queue):
+            next_queue = definition.queue
+            break
         else:
             result = await _run_node(node, definition, context, node_timeout, hooks, control)
             if result.status is NodeStatus.SUCCESS:
@@ -140,6 +163,17 @@ async def execute_graph(
 
     finished_at = datetime.now(UTC)
     ordered = list(results.values())
+    if next_queue is not None:
+        return ExecutionResult(
+            workflow_id=context.workflow_id,
+            execution_id=context.execution_id,
+            status=RunStatus.HANDOFF,
+            node_results=ordered,
+            next_queue=next_queue,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=round((time.perf_counter() - clock) * 1000),
+        )
     if failed_node:
         status, error = RunStatus.FAILED, f"Node '{failed_node}' failed: {results[failed_node].error}"
     elif stopped:

@@ -11,7 +11,7 @@ import uuid
 import pytest
 from celery import signals
 from celery.contrib.testing.worker import start_worker
-from flowforge_engine import ExecutionServices, ProviderSettings, WorkflowGraph
+from flowforge_engine import QUEUES, ExecutionServices, ProviderSettings, WorkflowGraph
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -39,7 +39,9 @@ def celery_worker(migrated_database):
     try:
         with start_worker(
             celery_app, pool="solo", concurrency=1, perform_ping_check=False,
-            hostname=WORKER, queues=["default"], shutdown_timeout=30,
+            # Every queue: one in-process worker can't stand in for several (they would share
+            # the app's queue selection), so hand-offs are covered in test_queue_handoff.py.
+            hostname=WORKER, queues=list(QUEUES), shutdown_timeout=30,
         ) as worker:
             yield worker
     finally:

@@ -1,0 +1,10 @@
+started (UTC): 20260928T135011Z
+git: c95835a (+ uncommitted changes: 70 files)
+host: 13th Gen Intel(R) Core(TM) i5-13420H, 8 cores / 12 threads, 15.6 GB RAM, Microsoft Windows 11 Home Single Language 10.0.26200
+docker: 29.7.2, VM 12 CPUs, 8140300288 bytes memory, Docker Desktop
+api: 1 uvicorn process (the dev server with --reload); postgres 16, redis 7, all on the same machine
+workers: worker-default x1 (concurrency 4), worker-llm x1 (8), worker-ocr x1/x3 (2 each, OMP_THREAD_LIMIT=1)
+ocr run: samples/scanned-invoice.pdf, 2 pages, 300 dpi, Tesseract eng
+llm run: groq default model, one short prompt
+executions in the database before: 4192
+finished (UTC): 20260928T135922Z

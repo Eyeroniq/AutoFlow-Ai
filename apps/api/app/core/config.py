@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field, SecretStr
@@ -78,6 +79,18 @@ class Settings(BaseSettings):
     # Upper bound for a single node during a workflow run.
     WORKFLOW_NODE_TIMEOUT_SECONDS: float = Field(default=120, gt=0)
 
+    # SSRF guard: the HTTP Request node refuses private/internal addresses unless this is
+    # true. Only for local development (e.g. calling a service on your machine).
+    HTTP_ALLOW_PRIVATE_NETWORKS: bool = False
+
+    # --- Uploaded files (POST /api/files) --------------------------------------------
+    # Where the bytes live. In Docker this is the `files_data` volume shared by the API
+    # and every worker; for a local run it defaults to apps/api/.data/files.
+    FILES_DIR: str = str(Path(__file__).resolve().parents[2] / ".data" / "files")
+    MAX_UPLOAD_MB: float = Field(default=25, gt=0, le=1024)
+    # Sample documents the seed loads (the repo's samples/; /samples in Docker).
+    SAMPLES_DIR: str | None = None
+
     # --- Async execution (Celery) ----------------------------------------------------
     # Broker and result backend default to REDIS_URL.
     CELERY_BROKER_URL: str | None = None
@@ -115,6 +128,17 @@ class Settings(BaseSettings):
     @property
     def celery_result_backend(self) -> str:
         return self.CELERY_RESULT_BACKEND or self.REDIS_URL
+
+    @property
+    def samples_dir(self) -> Path:
+        if self.SAMPLES_DIR:
+            return Path(self.SAMPLES_DIR)
+        parents = Path(__file__).resolve().parents  # apps/api/app/core -> the repo root is 4 up
+        return parents[4] / "samples" if len(parents) > 4 else Path("/samples")
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return int(self.MAX_UPLOAD_MB * 1024 * 1024)
 
     @property
     def cors_origins(self) -> list[str]:

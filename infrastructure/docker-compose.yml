@@ -56,6 +56,8 @@ services:
       # Container-network addresses override the localhost values in .env.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:-flowforge}@postgres:5432/${POSTGRES_DB:-flowforge}
       REDIS_URL: redis://redis:6379/0
+      FILES_DIR: /data/files
+      SAMPLES_DIR: /samples
       # Bind mounts from a Windows/macOS host don't deliver inotify events.
       WATCHFILES_FORCE_POLLING: "true"
     # Lets the API reach services on the host, e.g. Ollama at
@@ -74,6 +76,10 @@ services:
       - ../apps/api:/app
       # Same path the editable install points at, so engine edits hot-reload too.
       - ../packages/workflow-engine:/packages/workflow-engine
+      # Uploaded files (POST /api/files), shared with every worker.
+      - files_data:/data/files
+      # Sample documents for the seed (read-only).
+      - ../samples:/samples:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,11 +92,15 @@ services:
       retries: 10
       start_period: 20s
 
-  # Celery worker: runs queued workflow executions. Same image and code as the API (it uses
-  # the API's models/services and the workflow engine). Scale with
-  #   docker compose up -d --scale worker=3
-  # or add a dedicated service with WORKER_QUEUES=<queue> for node types that set `queue`.
-  worker:
+  # Celery workers, one service per queue, so each kind of work scales on its own:
+  #   worker-default  HTTP, email, delays          (WORKER_DEFAULT_CONCURRENCY, default 4)
+  #   worker-llm      LLM calls: I/O-bound         (WORKER_LLM_CONCURRENCY, default 8)
+  #   worker-ocr      PDF extraction and OCR: CPU  (WORKER_OCR_CONCURRENCY, default 2)
+  # A run hands itself from queue to queue as it reaches each kind of node (see
+  # flowforge_engine.routing). Scale one kind with, e.g.
+  #   docker compose up -d --scale worker-ocr=3
+  # Same image and code as the API (the workers use its models, services, and the engine).
+  worker-default: &worker
     build:
       context: ../apps/api
       additional_contexts:
@@ -98,43 +108,89 @@ services:
     restart: unless-stopped
     env_file:
       - ../.env
-    environment:
+    environment: &worker-env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:-flowforge}@postgres:5432/${POSTGRES_DB:-flowforge}
       REDIS_URL: redis://redis:6379/0
+      FILES_DIR: /data/files
       WATCHFILES_FORCE_POLLING: "true"
+      WORKER_NAME: worker-default
+      WORKER_QUEUES: default
+      WORKER_CONCURRENCY: ${WORKER_DEFAULT_CONCURRENCY:-4}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # watchfiles restarts the worker when app/ or the engine changes (dev hot reload).
-    # The node name worker@<container hostname> is stable across container restarts,
-    # which lets a restarted worker fail the runs it was executing when it died.
+    # The node name <service>@<container hostname> is stable across container restarts,
+    # which lets a restarted worker fail the runs it was executing when it died, and it is
+    # unique per replica when a service is scaled.
     command:
       - sh
       - -c
       - >-
         exec watchfiles --filter python
         "celery -A app.worker.celery_app:celery_app worker --loglevel=INFO
-        --hostname=worker@%h --queues=${WORKER_QUEUES:-default} --concurrency=${WORKER_CONCURRENCY:-4}"
+        --hostname=$${WORKER_NAME}@%h --queues=$${WORKER_QUEUES} --concurrency=$${WORKER_CONCURRENCY}"
         app /packages/workflow-engine/src
     volumes:
       - ../apps/api:/app
       - ../packages/workflow-engine:/packages/workflow-engine
+      - files_data:/data/files
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      # The API applies migrations on start; the worker needs the current schema.
+      # The API applies migrations on start; the workers need the current schema.
       api:
         condition: service_healthy
     # Warm shutdown lets running nodes finish; runs still going after this are killed and
     # marked failed when the worker comes back.
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping --destination worker@$$HOSTNAME --timeout 5 | grep -q pong"]
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping --destination $$WORKER_NAME@$$HOSTNAME --timeout 5 | grep -q pong"]
       interval: 30s
       timeout: 15s
       retries: 3
       start_period: 30s
+
+  worker-llm:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-llm
+      WORKER_QUEUES: llm
+      WORKER_CONCURRENCY: ${WORKER_LLM_CONCURRENCY:-8}
+
+  worker-ocr:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-ocr
+      WORKER_QUEUES: ocr
+      WORKER_CONCURRENCY: ${WORKER_OCR_CONCURRENCY:-2}
+      # One CPU thread per Tesseract process: parallelism comes from concurrency and
+      # replicas instead of OpenMP threads fighting over the same cores.
+      OMP_THREAD_LIMIT: ${OCR_THREADS_PER_TASK:-1}
+
+  # Load testing (loadtest/README.md). Not started by `up`; run it with
+  #   docker compose --profile loadtest run --rm locust --headless -u 7 -r 5 -t 2m
+  locust:
+    image: locustio/locust:2.46.6
+    profiles: ["loadtest"]
+    working_dir: /mnt/loadtest
+    volumes:
+      - ../loadtest:/mnt/loadtest
+      - ../samples:/samples:ro
+    environment:
+      LOADTEST_SAMPLE: /samples/scanned-invoice.pdf
+      LOADTEST_INFLIGHT: ${LOADTEST_INFLIGHT:-2}
+      LOADTEST_MIX: ${LOADTEST_MIX:-ocr}
+      LOADTEST_LLM_PROVIDER: ${LOADTEST_LLM_PROVIDER:-groq}
+    entrypoint: ["locust", "-f", "/mnt/loadtest/locustfile.py", "--host", "http://api:8000"]
+    ports:
+      - "${LOCUST_HOST_PORT:-8089}:8089"
+    depends_on:
+      api:
+        condition: service_healthy
 
   web:
     build:
@@ -163,3 +219,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  files_data:

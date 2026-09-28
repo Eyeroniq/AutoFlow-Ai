@@ -161,7 +161,7 @@ async def test_streaming_without_a_token_observer_still_works():
 
 
 def test_queue_routing():
-    assert queue_for_graph(example_graph()) == "default"
+    assert queue_for_graph(example_graph()) == "llm"  # Input is portable; Gemini runs on "llm"
 
     registry = NodeRegistry()
     registry.add("text", type(get_node_definition("text")))

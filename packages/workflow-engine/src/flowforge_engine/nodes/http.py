@@ -7,6 +7,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from flowforge_engine.models import NodeContext, NodeResult
+from flowforge_engine.netguard import BlockedDestination, check_url, guarded_transport
 from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
 
 # Response bodies are stored in execution history; cap what we keep.
@@ -49,7 +50,7 @@ def _parse_body(response: httpx.Response) -> tuple[Any, bool]:
 class HTTPRequestNode(NodeDefinition[HTTPRequestConfig]):
     category = "integration"
     label = "HTTP Request"
-    description = "Calls an HTTP endpoint and exposes the status, headers, and parsed body."
+    description = "Calls a public HTTP endpoint and exposes the status, headers, and parsed body."
     icon = "globe"
     config_schema = HTTPRequestConfig
     output_schema = HTTPResult
@@ -64,12 +65,21 @@ class HTTPRequestNode(NodeDefinition[HTTPRequestConfig]):
         elif config.body is not None:
             body_kwargs["content"] = str(config.body)
 
+        # SSRF guard: unless private networks are allowed, every connection (redirects
+        # included) must go to a public address. An injected test transport is still
+        # subject to the up-front URL check.
+        transport = context.services.http_transport
+        guarded = not context.services.allow_private_network
         start = time.perf_counter()
         try:
+            if guarded:
+                check_url(config.url)
+                transport = transport or guarded_transport()
             async with httpx.AsyncClient(
                 timeout=config.timeout_seconds,
                 follow_redirects=True,
-                transport=context.services.http_transport,
+                transport=transport,
+                trust_env=not guarded,
             ) as client:
                 response = await client.request(
                     config.method,
@@ -78,6 +88,10 @@ class HTTPRequestNode(NodeDefinition[HTTPRequestConfig]):
                     params=config.query or None,
                     **body_kwargs,
                 )
+        except BlockedDestination as exc:
+            return NodeResult.fail(str(exc))
+        except httpx.InvalidURL as exc:
+            return NodeResult.fail(f"Invalid URL '{config.url}': {exc}")
         except httpx.HTTPError as exc:
             return NodeResult.fail(f"Request to {config.url} failed: {type(exc).__name__}: {exc}")
 

@@ -37,6 +37,8 @@ class NodeExecutionRead(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None
+    queue: str | None = Field(default=None, description="The queue the node ran on (null for in-request runs).")
+    worker_hostname: str | None = Field(default=None, description="The worker that ran the node.")
 
 
 class ExecutionSummary(BaseModel):
@@ -55,6 +57,10 @@ class ExecutionSummary(BaseModel):
     worker_hostname: str | None = Field(default=None, description="Worker that claimed the run.")
     heartbeat_at: datetime | None = Field(default=None, description="Last heartbeat from the worker while running.")
     stop_requested_at: datetime | None = None
+    segment: int = Field(default=0, description="How many times the run was handed to another queue's workers.")
+    handoff_at: datetime | None = Field(
+        default=None, description="Set while the run waits for a worker of `queue` after a hand-off."
+    )
 
     @computed_field
     @property

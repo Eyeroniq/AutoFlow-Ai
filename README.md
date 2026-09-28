@@ -16,12 +16,18 @@ A visual AI workflow automation builder. This repository is being built in phase
   and publishing live events that `WS /ws/executions/{id}` streams to clients (with a
   database replay for late joiners). Runs can be stopped, crashed workers are detected, and
   delivery is idempotent. Everything is testable from `/docs` and `scripts/watch_run.py`.
-- **Phase 4 (this state):** the visual editor. A full-screen React Flow canvas at
+- **Phase 4:** the visual editor. A full-screen React Flow canvas at
   `/pipelines/{id}` wired to the real API: a node library from `GET /api/nodes`, config forms
   generated from each node's JSON Schema, `{{`-autocomplete for references, autosave with
   undo/redo, live validation with errors on the nodes, one-node test runs, and runs whose
   node and edge colors follow the WebSocket live. Plus a dashboard, execution history and
   detail pages, and an integrations page for connecting provider keys.
+- **Phase 3.5 (this state):** document AI and independent scaling. File uploads
+  (`POST /api/files`), Input nodes of type File, and four document nodes: PDF Extract
+  (PyMuPDF), OCR (Tesseract), Summarize, and Entity Extraction (validated JSON). Workers are
+  split per queue (`worker-default`, `worker-llm`, `worker-ocr`), and a run hands itself from
+  queue to queue, so OCR and LLM capacity scale separately. Plus a Locust load test with
+  measured results, and an SSRF guard on the HTTP Request node.
 
 Templates come in a later phase.
 
@@ -34,9 +40,10 @@ Templates come in a later phase.
 | Engine   | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs; stdlib smtplib/imaplib |
 | Secrets  | Fernet (`cryptography`) for stored credentials                                |
 | Auth     | JWT (python-jose, HS256), passlib + bcrypt, slowapi rate limiting           |
-| Async    | Celery 5.6 (Redis broker + result backend), Redis pub/sub, WebSockets       |
+| Async    | Celery 5.6 (Redis broker + result backend), Redis pub/sub, WebSockets; one worker service per queue |
+| Documents | PyMuPDF (PDF text, page rendering), Tesseract 5 via pytesseract (OCR), Pillow |
 | Data     | PostgreSQL 16, Redis 7                                                      |
-| Tests    | pytest + pytest-asyncio against a real Postgres test database; Vitest (web units); Playwright (end to end, real stack) |
+| Tests    | pytest + pytest-asyncio against a real Postgres test database; Vitest (web units); Playwright (end to end, real stack); Locust (load) |
 | Infra    | Docker Compose                                                              |
 
 ## Prerequisites
@@ -81,6 +88,9 @@ Log in with **demo@flowforge.ai** / **demo1234**, or register a new account. The
 lists **Demo: Summarize and email** (Input → Gemini → Gmail → Output). Open it, press
 **Validate**, then **Run**: with `GEMINI_API_KEY`, `SMTP_USER`, and `SMTP_PASSWORD` set, the
 nodes turn blue then green as the run progresses and the summary arrives in `SMTP_USER`'s inbox.
+**Demo: Scanned invoice to entities** (Input(File) → OCR → Summarize → Entity Extraction →
+Output) runs on the bundled sample scan: OCR on `worker-ocr`, the two LLM nodes on
+`worker-llm`. See [Document AI](#document-ai).
 
 ### About `docker compose up`
 
@@ -97,23 +107,26 @@ What happens on `up`:
 
 1. `postgres` and `redis` start and wait until healthy.
 2. `api` runs `alembic upgrade head`, then starts uvicorn with `--reload`.
-3. `worker` (Celery) and `web` (`next dev`) start once the API healthcheck passes.
+3. The workers, `worker-default`, `worker-llm`, and `worker-ocr` (Celery, one per queue; see
+   [Workers: queues and scaling](#workers-queues-and-scaling)), and `web` (`next dev`) start
+   once the API healthcheck passes.
 
-`api`, `worker`, and `web` bind-mount their source directories, so edits hot-reload (the
-worker is restarted by `watchfiles`). The API and worker also mount `packages/workflow-engine`
-(installed editable), so engine edits reload them too.
+`api`, the workers, and `web` bind-mount their source directories, so edits hot-reload (the
+workers are restarted by `watchfiles`). The API and workers also mount `packages/workflow-engine`
+(installed editable), so engine edits reload them too, and they share the `files_data` volume
+(uploads) at `/data/files`.
 
 Useful commands:
 
 ```bash
 docker compose up -d                   # run in the background
 docker compose logs -f api             # follow API logs (structured JSON)
-docker compose logs -f worker          # follow the Celery worker
+docker compose logs -f worker-ocr      # follow one worker service (worker-default / -llm / -ocr)
 docker compose ps                      # service status and health
 docker compose down                    # stop (keeps the database volume)
 docker compose down -v                 # stop and delete all data
 docker compose up --build -V web       # after changing package.json (renews node_modules volume)
-docker compose up --build api worker   # after changing requirements.txt or the engine's dependencies
+docker compose up --build api worker-default worker-llm worker-ocr   # after changing requirements.txt, the engine's dependencies, or the Dockerfile
 ```
 
 ## The editor
@@ -172,6 +185,84 @@ Everything in the UI comes from the API; there is no mock data.
   Gemini, Groq, OpenRouter, Ollama, OpenAI, Claude, and Gmail; secrets are write-only and
   shown masked). Errors surface as toasts, and the editor has its own error boundary.
 
+## Document AI
+
+Four node types read uploaded documents. They are in the editor's **Documents** group, with
+config forms generated from their schemas like every other node:
+
+| Node | Type | Queue | What it does |
+| ---- | ---- | ----- | ------------ |
+| PDF Extract | `pdf_extract` | `ocr` | The PDF's text layer (PyMuPDF), for a page range such as `"1-3,5"` or `"2-"`. `needs_ocr` flags scans (almost no text per page). Output: `text`, `pages[]` (text per page), `page_count`, `char_count`, `truncated`. |
+| OCR | `ocr` | `ocr` | Tesseract 5 on images (PNG, JPEG, TIFF including multi-page, WebP, BMP, GIF) and scanned PDFs (each page rendered at `dpi`, default 300), in `language`: `eng`, `deu`, `fra`, `spa`, `ita`, `por`, or combinations like `eng+deu` (missing language data is a clear error that lists what's installed). Output: `text` with lines and paragraphs kept, `pages[]` with each page's `confidence`, `mean_confidence`, `engine`. |
+| Summarize | `summarize` | `llm` | An LLM summary: `length` (short, medium, long), `style` (paragraph, bullets, executive), optional `focus` and `language`. It uses the provider abstraction with the same `provider` / `model` / `fallback` chain as the LLM nodes. Long input is cut to `max_input_chars` and reported as `truncated`. |
+| Entity Extraction | `extract_entities` | `llm` | Structured JSON: `people`, `organizations`, `dates` (with an ISO date), `amounts` (numeric `value` and ISO `currency`), and custom types (`"invoice_number: the invoice or reference number"`). The reply is parsed and validated against a Pydantic schema. If it isn't valid JSON or doesn't match, the model is asked once more with the problem spelled out; a second bad reply fails the node with that problem. Output: `entities`, `counts`, `attempts`. |
+
+PDF Extract and OCR do their CPU work in a thread, so the worker keeps heartbeating and
+checking for stops, and a stopped run stops at the next page.
+
+**Files.** `POST /api/files` takes the multipart field `file`:
+
+- **Type** comes from the file's first bytes, never from the client's `Content-Type` or the
+  extension: PDF, PNG, JPEG, TIFF, WebP, BMP, GIF, or UTF-8 text. Anything else is `415`.
+- **Size:** up to `MAX_UPLOAD_MB` (25). A request declaring more is refused before the body
+  is read, and the body is counted while it streams to disk (`413`). A request without
+  `Content-Length` is `411`, and an empty file `400`.
+- **Storage:** `FILES_DIR/<owner id>/<file id>` on the `files_data` volume, which the API and
+  every worker mount at `/data/files` (the OCR worker reads what the API stored). The path
+  never includes the uploaded name, so `../../x.pdf` can't escape. The name is kept only
+  for display, sanitized (no directories or control characters).
+- **Access:** every read goes through the owner. Another user's file is a `404` from
+  `GET /api/files/{id}`, `/content`, and `DELETE`. It's also refused as a run input (`422`
+  before anything is queued), and a node can't open it at run time either.
+- **Input nodes of type File** take an upload's id, from the run's `inputs` or the node's
+  default, and output `{file_id, filename, content_type, size_bytes}`. So `file:
+  "{{input.document}}"` wires a document node to it. In the editor, the run form offers
+  your uploads or a new upload with a progress bar, and so does the Input node's default.
+  Extracted text, summaries, and entities show up readably in the run panel and on the
+  execution page (raw JSON is a click away).
+
+**Sample and demo.** [`samples/scanned-invoice.pdf`](samples/scanned-invoice.pdf) is a
+two-page invoice and cover letter, made by
+[`samples/make_scanned_sample.py`](samples/make_scanned_sample.py): typeset, then degraded
+the way a flatbed scan is (slight skew, uneven exposure, sensor noise, softness, JPEG
+compression) and saved as images only. It has no text layer, so PDF Extract returns nothing
+(`needs_ocr: true`) and only OCR can read it. It is synthetic (no paper went through a
+scanner), so upload your own scans to try real ones. The seed stores it as one of the demo
+user's uploads and creates **Demo: Scanned invoice to entities**: Input(File) → OCR →
+Summarize → Entity Extraction → Output, with Gemini and, when the server has `GROQ_API_KEY`,
+Groq as the fallback.
+
+```bash
+python scripts/run_document_demo.py                      # the sample, through the real workers
+python scripts/run_document_demo.py --file my-scan.pdf   # upload and use your own file
+```
+
+A run of it, as printed by that script (Gemini was answering `503 high demand` at the time,
+so both LLM nodes fell back to Groq's `openai/gpt-oss-20b`):
+
+```
+queued 2f409b19-6967-46a9-b034-9443af84e819 on 'ocr'
+success in 88.0s (1 hand-off(s))
+
+node       status   queue    worker                        duration
+input      success  ocr      worker-ocr@e2dfac4b81ac       0.02s
+ocr        success  ocr      worker-ocr@e2dfac4b81ac       1.54s
+summarize  success  llm      worker-llm@cfb509005a1d       12.31s
+entities   success  llm      worker-llm@cfb509005a1d       73.11s
+output     success  llm      worker-llm@cfb509005a1d       0.00s
+
+pages: 2, OCR confidence: 95.4
+```
+
+OCR read both pages with a mean word confidence of 95.4. The entities had all three people
+(Maria Schneider, Thomas Becker, James O'Connor), the three organizations (one of them the
+ship, MV Severn Star, which the model filed as an organization), the invoice and purchase
+order numbers (`HF-2026-0417`, `PO-88213`), all six dates with correct ISO values, and the
+seven amounts with correct numeric values. The model mislabeled some amounts' `meaning`
+(for example, it called 3,200.00 the subtotal); that's the model's reading, which the schema
+can't check. Most of Summarize's and Entity Extraction's time was Gemini's retries with
+backoff before the fallback.
+
 ## Tests
 
 ### Backend
@@ -220,7 +311,32 @@ suite in a loop.
   committed rows, and checks a queued run, a double enqueue running once, and a stop through
   the worker.
 
-Locally (venv, with the dockerized Postgres and Redis running): `cd apps/api && pytest`.
+**Phase 3.5 tests:**
+
+- `packages/workflow-engine/tests/test_documents.py`: PDF Extract and OCR on real files made
+  in the test (a text PDF, an image-only "scan", PNGs) with real PyMuPDF and Tesseract,
+  including page ranges, wrong types, missing files, and missing language data. Summarize
+  and Entity Extraction run against scripted providers: prompts, truncation, the fallback
+  chain, schema validation and normalization (`"4,389.20"` → `4389.2`), the one retry on
+  invalid JSON, and failure after two bad replies. Also Input nodes of type File, and a whole
+  document pipeline.
+- `test_queue_handoff.py` (engine and API): every node type's queue, where runs start, a run
+  paused at a node its worker doesn't serve and resumed elsewhere, skipped nodes never
+  causing a hand-off, and, against the database, a run moving from a "worker-llm" to a
+  "worker-default". That covers the rows and events on each side, each segment running
+  once, stopping and recovering a run that's waiting between queues, and a hand-off that
+  can't be queued.
+- `test_files_api.py`: type sniffing (including a ZIP renamed `.pdf`), size limits (declared
+  and streamed), `411`, empty files, name sanitizing and path tricks, owner-only access to
+  metadata, content, and delete, and file inputs on runs (someone else's file is refused).
+- `test_netguard.py`: the SSRF guard. Blocked and allowed addresses and names, and the
+  node refusing internal URLs. With fake DNS answers, it refuses a public-looking name that
+  resolves inside (DNS rebinding), and a mixed answer. A real local HTTP server shows that
+  a redirect to an internal host is refused, that the socket goes to the checked address,
+  and that `HTTP_ALLOW_PRIVATE_NETWORKS` turns the guard off.
+
+Locally (venv, with the dockerized Postgres and Redis running): `cd apps/api && pytest`. The
+document tests need Tesseract installed (they skip without it); the Docker image has it.
 
 ### Web unit tests (Vitest)
 
@@ -262,6 +378,12 @@ npx playwright test                 # E2E_BASE_URL / E2E_API_URL override the de
   reading the inbox over IMAP with a Gmail Read node, then opens the execution detail page;
   the seeded graph is restored afterwards. It also stops a running workflow and joins one
   that's already in progress.
+- `e2e/documents.spec.ts` opens the seeded document pipeline and checks that the library
+  has the Documents group and that the node cards show their queues. It uploads the sample
+  scan through the run form, runs it, and watches OCR go blue and then green before the run
+  moves to the LLM workers. The run panel must show OCR on `worker-ocr@...` and Summarize and
+  Entity Extraction on `worker-llm@...`, the OCR text as readable text, and the entities
+  (people, the invoice number, the total) as lists. The uploaded copy is deleted afterwards.
 - `e2e/pages.spec.ts` covers the dashboard, execution history filters and detail, the
   socket's 4401/4404 closes, and the integrations page: real tests of the server's Gemini and
   Gmail credentials, and connecting then disconnecting a throwaway key on a provider you
@@ -298,8 +420,11 @@ docker compose exec postgres psql -U flowforge -d flowforge -c "\dt"
 `demo@flowforge.ai` / `demo1234` and a ready pipeline, **Demo: Summarize and email**: Input
 (`topic`) → Gemini (streams its answer) → Gmail (to `{{vars.recipient}}`, set to `SMTP_USER`)
 → Output. It uses the real providers, so it validates and runs from the UI once the keys are
-in `.env`. The seed is idempotent (the pipeline is matched by owner and name), so it's safe to
-run more than once and never overwrites a pipeline you've edited.
+in `.env`. It also stores `samples/scanned-invoice.pdf` as one of the demo user's uploads and
+creates **Demo: Scanned invoice to entities** (Input(File) → OCR → Summarize → Entity
+Extraction → Output; see [Document AI](#document-ai)), whose file input defaults to it. The
+seed is idempotent (pipelines are matched by owner and name, the sample by its checksum), so
+it's safe to run more than once and never overwrites a pipeline you've edited.
 
 ```bash
 docker compose exec api python -m app.db.seed          # while the stack is running
@@ -326,7 +451,13 @@ pip install -r requirements-dev.txt   # runtime deps + the engine + pytest
 alembic upgrade head
 python -m app.db.seed
 uvicorn app.main:app --reload --port 8000
+# and a worker for every queue (add --pool=threads on Windows):
+celery -A app.worker.celery_app:celery_app worker -Q default,llm,ocr
 ```
+
+OCR needs the `tesseract` binary on your PATH (for example `apt install tesseract-ocr`,
+`brew install tesseract`, or the UB Mannheim installer on Windows). Uploads go to
+`apps/api/.data/files` unless you set `FILES_DIR`.
 
 **Web:**
 
@@ -496,7 +627,23 @@ the graph (later edits don't affect a queued run), and sends a Celery task named
 3. heartbeats `heartbeat_at` every `EXECUTION_HEARTBEAT_SECONDS` and polls a Redis stop flag
    every `EXECUTION_STOP_POLL_SECONDS`;
 4. finishes the execution as `success`, `failed`, or `stopped` (again compare-and-set, so it
-   never overwrites a stop or a recovery that happened meanwhile).
+   never overwrites a stop or a recovery that happened meanwhile), **or hands it off** when
+   the next node belongs to a queue it doesn't consume (below).
+
+**Queue hand-off.** Every node type declares a queue: `llm` for model calls (the LLM nodes,
+Summarize, Entity Extraction), `ocr` for document processing (OCR, PDF Extract), and
+`default` for the rest (HTTP, Gmail, Delay). Input, Output, Text, and Condition are
+*portable*: they run wherever the run is. A run is queued on the queue of its first
+non-portable node. Its worker runs nodes as long as they're portable or on a queue it
+consumes. At the first node it can't run, it records the hand-off and sends a continuation
+task, `flowforge.run_execution(execution_id, segment)`, to that node's queue. The hand-off is
+a compare-and-set on its own ownership that sets `segment += 1`, no worker, no heartbeat,
+`handoff_at = now`, and `queue = next`. The next worker claims that segment with another
+compare-and-set (`WHERE segment = N AND worker_hostname IS NULL`), so each segment runs once
+however often its task is delivered. It rebuilds the finished nodes' results from their
+rows, then carries on. The execution stays `running` throughout. Each node row records the
+`queue` and `worker_hostname` that ran it, and the events `execution.handoff` and
+`execution.resumed` mark the move. A worker that consumes every queue never hands off.
 
 `?sync=true` runs the same code inside the request (and still publishes events) and returns
 `200` with the finished execution, which is handy in Swagger and scripts.
@@ -532,10 +679,14 @@ the graph (later edits don't affect a queued run), and sends a Celery task named
   under a second), `202` if the worker hasn't confirmed yet, or finalizes the run itself if
   the worker's heartbeat is stale. Only the owner can stop a run (others get `404`); a
   finished run gives `409`.
-- *Queues.* Every node type has a `queue` attribute (default `"default"`). A run is routed to
-  the first non-default queue its nodes need, else `default`
-  (`flowforge_engine.queue_for_graph`), so a future GPU or long-running node type only needs
-  `queue = "gpu"` plus a worker started with `-Q gpu`.
+- *Between queues.* A run waiting for the next queue's worker has no heartbeat, so crash
+  detection leaves it alone. Stopping it finishes it at once ("Stopped by user while waiting
+  for a 'default' worker"), and a late continuation then finds nothing to claim. One that no
+  worker takes within `EXECUTION_PENDING_TIMEOUT_SECONDS` is failed ("No worker for the
+  'ocr' queue picked this run up ..."). The time limit counts the whole run, waits included.
+  If the continuation can't be sent (the broker is down), the run fails with that reason.
+- *Queues for new node types.* A heavy node type (GPU, say) sets `queue = "gpu"` and gets its
+  own workers (`celery ... worker -Q gpu`) without other changes.
 
 ### Real-time events (WebSocket)
 
@@ -579,11 +730,13 @@ Redis channel `flowforge:execution:<id>:events`, so other consumers can subscrib
 | `type`               | Extra fields                                                                  |
 | -------------------- | ----------------------------------------------------------------------------- |
 | `execution.started`  | `status: "running"`, `workflow_id`, `worker`, `queue`, `started_at`, `nodes: [{node_key, node_type}]` |
-| `node.started`       | `node_key`, `node_type`, `label`, `status: "running"`, `started_at`           |
+| `node.started`       | `node_key`, `node_type`, `label`, `status: "running"`, `started_at`, `worker`, `queue` |
 | `node.token`         | `node_key`, `text` (a streamed delta), `provider`; only for LLM nodes with `"stream": true` |
 | `node.succeeded`     | `node_key`, `node_type`, `label`, `status`, `input` (resolved config), `output`, `started_at`, `finished_at`, `duration_ms` |
 | `node.failed`        | same as `node.succeeded`, plus `error`                                          |
 | `node.skipped`       | `node_key`, `node_type`, `label`, `status`, `reason`, timing when it was interrupted mid-run |
+| `execution.handoff`  | `from_queue`, `to_queue`, `segment`, `worker` (the one letting go): the run waits for a `to_queue` worker |
+| `execution.resumed`  | `segment`, `worker`, `queue`: the next worker picked it up                    |
 | `execution.finished` | `status` (`success` / `failed` / `stopped`), `final_output`, `error`, `started_at`, `finished_at`, `duration_ms` |
 
 ```json
@@ -600,32 +753,55 @@ is used and each text delta is forwarded as `node.token`. The node's output, and
 event, is the same as without streaming. If the fallback chain moves to another provider
 mid-stream, later tokens carry that provider's name.
 
-### Workers: running and scaling
+### Workers: queues and scaling
 
-The Compose `worker` service runs:
+Compose runs one worker service per queue, from the API image (the models, credentials, and
+engine are shared), with the prefork pool (one run segment per process at a time) and a
+healthcheck based on `celery inspect ping`:
+
+| Service          | Consumes  | Runs                                      | Processes per container (env)    |
+| ---------------- | --------- | ----------------------------------------- | -------------------------------- |
+| `worker-default` | `default` | HTTP Request, Gmail, Gmail Read, Delay    | `WORKER_DEFAULT_CONCURRENCY` = 4 |
+| `worker-llm`     | `llm`     | LLM nodes, Summarize, Entity Extraction   | `WORKER_LLM_CONCURRENCY` = 8 (I/O-bound) |
+| `worker-ocr`     | `ocr`     | OCR, PDF Extract                          | `WORKER_OCR_CONCURRENCY` = 2 (CPU-bound; `OMP_THREAD_LIMIT=1`) |
 
 ```bash
-celery -A app.worker.celery_app:celery_app worker --hostname=worker@%h --queues=${WORKER_QUEUES:-default} --concurrency=${WORKER_CONCURRENCY:-4}
+docker compose up -d --scale worker-ocr=3          # three OCR containers, 6 OCR processes
+docker compose up -d --scale worker-llm=2          # more LLM capacity, independently
+docker compose logs -f worker-ocr                  # structured JSON logs, one line per event
+docker compose exec worker-ocr celery -A app.worker.celery_app:celery_app inspect active   # what's running
 ```
 
-It uses the API image and code (the models, credentials, and engine are shared), the prefork
-pool (one run per process at a time), and a healthcheck based on `celery inspect ping`. It
-depends on Postgres, Redis, and a healthy API, since the API applies migrations.
+Each container's node name is `<service>@<container id>`, unique per replica. It stays stable
+across restarts, so a restarted worker fails the runs it died with. A service scaled to 0
+simply leaves its queue's runs waiting; they fail after `EXECUTION_PENDING_TIMEOUT_SECONDS`.
 
-```bash
-docker compose up -d --scale worker=3              # more workers on the default queue
-docker compose logs -f worker                      # structured JSON logs, one line per event
-docker compose exec worker celery -A app.worker.celery_app:celery_app inspect active   # what's running
+**Seen working.** The document demo above ran with one container of each. From the
+workers' own logs for that execution (filtered by its id; the timestamps are UTC):
+
+```
+worker-default: 0 log lines for this execution
+worker-ocr:     13:16:03.872 task flowforge.run_execution[2f409b19-...] received
+                13:16:04.281 node finished  input     success   21 ms
+                13:16:05.875 node finished  ocr       success 1537 ms
+                13:16:05.954 run handed off -> llm (segment 1)
+worker-llm:     13:16:05.955 task flowforge.run_execution[2f409b19-...:1] received
+                13:16:18.410 node finished  summarize success 12308 ms
+                13:17:31.605 node finished  entities  success 73110 ms
+                13:17:31.724 node finished  output    success    0 ms
+                13:17:31.808 workflow run finished: success (segment 1)
 ```
 
-- **Dedicated queues:** add a service like `worker` with `WORKER_QUEUES=gpu` (or run
-  `celery ... worker -Q gpu`) for node types that declare `queue = "gpu"`.
-- **Shutdown:** `docker compose stop worker` sends SIGTERM. Celery stops taking tasks and
-  waits up to `stop_grace_period` (30 s) for running ones; anything still running is killed
-  and marked failed when the worker comes back (or by the API's sweep).
-- **Outside Docker:** from `apps/api` with the venv active and Redis/Postgres up:
-  `celery -A app.worker.celery_app:celery_app worker -Q default` (on Windows add
-  `--pool=threads`, since prefork needs fork).
+Only `worker-ocr` touched the OCR node, and only `worker-llm` the LLM nodes, of the same run,
+with 1 ms between the hand-off and the pickup. The same split is asserted by the document E2E
+test and shows in each node row's `queue` and `worker_hostname`.
+
+- **Shutdown:** `docker compose stop worker-ocr` sends SIGTERM. Celery stops taking tasks
+  and waits up to `stop_grace_period` (30 s) for running ones; anything still running is
+  killed and marked failed when the worker comes back (or by the API's sweep).
+- **Outside Docker:** from `apps/api` with the venv active and Redis/Postgres up, run
+  `celery -A app.worker.celery_app:celery_app worker -Q default,llm,ocr`. One worker on every
+  queue never hands off. On Windows add `--pool=threads`, since prefork needs fork.
 
 ### Watching a run from the command line
 
@@ -663,6 +839,119 @@ Sample output (Input → Gemini → Gmail → Output on the real stack):
 +    6337 ms  [seq  10] execution.finished  status=success duration_ms=6169 final_output={"result": {...}}
 +    6338 ms  WS closed by server: code=1000 reason=''
 ```
+
+## Load test
+
+[`loadtest/`](loadtest) measures API latency while heavy runs are in flight, and how run
+throughput changes as `worker-ocr` scales. See [loadtest/README.md](loadtest/README.md) for
+the scripts. Everything below is measured, from the raw files in
+[`loadtest/results/20260928T135011Z/`](loadtest/results/20260928T135011Z) (Locust CSVs,
+`throughput.jsonl`, `conditions.txt`), produced by `bash loadtest/run_suite.sh`.
+
+**Conditions.**
+
+- **Machine:** one laptop (13th Gen Intel Core i5-13420H, 8 cores / 12 threads, 15.6 GB
+  RAM, Windows 11 Home 10.0.26200, on AC power), running the whole stack in Docker Desktop
+  29.7.2 (a WSL2 VM with 12 CPUs and 7.6 GiB).
+- **Stack:** the dev Compose stack. The API is a single uvicorn process (`--reload`), with
+  Postgres 16 and Redis 7 on the same machine. `worker-default` ×1 (4 processes),
+  `worker-llm` ×1 (8), `worker-ocr` ×1 or ×3 (2 processes each, one Tesseract thread each).
+- **Load generator:** Locust 2.46.6 in a container on the Compose network (straight to
+  `http://api:8000`), sharing the machine too.
+- **Traffic:** "API users" each wait 0.5–1.5 s between requests. 3 in 4 requests are
+  `GET /api/workflows`; 1 in 4 is `POST /api/workflows/{id}/run` of a no-op pipeline (one
+  short task on `worker-default`). "In flight" drivers each keep one heavy run queued or
+  running at all times. An OCR run is Input(File) → OCR → Output on the two-page sample scan
+  at 300 dpi (about 1.7 s of Tesseract when uncontended). An LLM run is one short prompt to
+  Groq.
+- **Duration:** 2 minutes per scenario (the LLM one 1 minute), 10 users/s ramp. The
+  database already held 4,192 executions from earlier runs.
+
+**API latency** (milliseconds; driver polling excluded):
+
+| Scenario | Users (API + in flight) | worker-ocr | `GET /api/workflows` p50 / p95 / p99 (requests) | `POST .../run` p50 / p95 / p99 (requests) | Failures (requests + runs) | Throughput (req/s) |
+| --- | --- | --- | --- | --- | --- | --- |
+| A: low, OCR | 5 + 2 OCR | ×1 | 17 / 26 / 42 (431) | 16 / 26 / 170 (162) | 0 of 1,284 (0 %) | 10.7 |
+| B: high, OCR | 50 + 12 OCR | ×1 | 180 / 530 / 650 (3,456) | 280 / 720 / 870 (1,212) | 0 of 6,898 (0 %) | 57.8 |
+| B: high, OCR | 50 + 12 OCR | ×3 | 480 / 950 / 1,100 (2,821) | 620 / 1,200 / 1,400 (910; max 55,015) | 0 of 5,557 (0 %) | 46.7 |
+| C: low, LLM | 5 + 2 LLM | ×1 | 42 / 54 / 100 (208) | 20 / 33 / 200 (74) | 0 of 597 (0 %) | 10.1 |
+
+**Heavy runs during those scenarios**, queued to finished as the drivers saw them (a 0.5 s
+poll, so ±0.5 s):
+
+| Scenario | worker-ocr | Runs finished | p50 | p95 |
+| --- | --- | --- | --- | --- |
+| A: 2 OCR in flight | ×1 | 113 | 2.1 s | 2.6 s |
+| B: 12 OCR in flight | ×1 | 80 (0.67/s) | 18 s | 19 s |
+| B: 12 OCR in flight | ×3 | 159 (1.34/s) | 8.8 s | 9.8 s |
+| C: 2 LLM in flight | ×1 | 43 | 1.6 s | 5.8 s |
+
+**Run throughput vs. `worker-ocr` replicas** (`loadtest/throughput.py`: 36 OCR runs queued
+at once, no other load; timings from the API's own timestamps):
+
+| worker-ocr | OCR processes | Batch time | Runs / minute | Queue wait p50 / p95 | Run time p50 / p95 | Failed |
+| --- | --- | --- | --- | --- | --- | --- |
+| ×1 | 2 | 32.2 s | 67.2 | 15.2 s / 28.3 s | 1.71 s / 1.82 s | 0 of 36 |
+| ×3 | 6 | 17.1 s | 126.7 (×1.89) | 7.0 s / 13.6 s | 2.65 s / 3.10 s | 0 of 36 |
+
+**Reading the numbers.**
+
+- **Scaling OCR works, but on one machine it's bounded by the cores.** Three
+  `worker-ocr` containers (6 Tesseract processes instead of 2) nearly doubled OCR throughput
+  (×1.89), both in isolation and under API load (0.67 → 1.34 runs/s). It wasn't ×3 because
+  each run got slower (1.71 s → 2.65 s): six Tesseract processes share this laptop's 8 cores
+  (4 performance + 4 efficiency) with Postgres, Redis, the API, and Locust. On separate
+  machines, replicas add capacity instead of sharing it.
+- **The API is the bottleneck under high load, and OCR competes with it for CPU.** At
+  high concurrency the single dev uvicorn process serves about 50–58 req/s, with `GET` p95
+  around 0.5 s (×1) and 0.95 s (×3). With more OCR running at once, API latency rose about
+  2.7× at p50. That's CPU contention: an earlier exploratory round of the same scenarios
+  (its raw files were lost to a Git Bash path mix-up, so it isn't reported above) included
+  a control, B with ×1 again right after ×3. It came back to ×1's numbers (`GET` p50 120 ms,
+  p95 520 ms), so a growing executions table isn't the cause. For production: several API
+  processes (`uvicorn --workers N`, no `--reload`) on a machine separate from `worker-ocr`.
+- **No failures**: 0 among 13,941 API requests and 395 heavy runs in the Locust scenarios, and 72
+  runs in the throughput batches.
+- **Tail outliers, not explained:** 6 `POST /run` requests over the two rounds took 15–55 s,
+  all with three OCR containers running. One of them, 55,015 ms, is in the table as that
+  scenario's max. A [rerun of that scenario](loadtest/results/20260928T140053Z-rerun-b-high-ocr3) (983 POSTs, max 1.65 s) didn't reproduce it. The
+  API logged no errors, and a timing log added to the run endpoint since then ("slow run
+  request", when validation, the insert, and the enqueue take over 1 s) didn't fire. Postgres
+  was in the middle of a slow time-based checkpoint (135 s of writes) during one of the two
+  episodes, so the laptop's disk is a suspect, but that's unproven.
+- **LLM numbers are the provider's, not ours.** Groq's free tier allows 30 requests per
+  minute for `openai/gpt-oss-20b`. Two runs in flight made 45 calls in that minute, so 28 of
+  them got `429 Rate limit reached` and were retried with backoff. That's why LLM run time
+  jumps from 1.6 s (p50) to 5.8 s (p95). Gemini was answering `503 high demand` the same
+  afternoon. Because free-tier limits, not the system, decide these results, the scaling
+  comparison uses OCR-only runs.
+
+## Security: outbound requests (SSRF guard)
+
+A workflow author controls the HTTP Request node's URL, so by default it may only reach
+public addresses (`flowforge_engine/netguard.py`):
+
+- **Blocked:** loopback (`127.0.0.0/8`, `::1`), private networks (`10/8`, `172.16/12`,
+  `192.168/16`, `fc00::/7`), link-local (`169.254/16`, which includes cloud metadata at
+  `169.254.169.254`, and `fe80::/10`), carrier-grade NAT, multicast, reserved and unspecified
+  addresses, and the IPv4-mapped IPv6 forms of all of these. Internal-looking names are
+  refused before DNS: `localhost`, `*.internal`, `*.local`, and single-label names such as
+  the Docker service names `postgres`, `redis`, or `api`.
+- **Where:** in the connection pool's network backend, for every connection. The host name
+  is resolved, every address it resolves to must be public, and the socket is opened to the
+  address that was checked (TLS still verifies the name). So names that resolve inside are
+  caught, including DNS rebinding, since there's no second lookup to race, and so is every
+  redirect hop. Environment proxies are ignored, since a proxy would make the connection
+  for us.
+- **The error** says what happened: *"Blocked request to 'db.example.com' (resolves to
+  10.1.2.3): it is a private network address. Set HTTP_ALLOW_PRIVATE_NETWORKS=true to allow
+  internal addresses (local development only)."*
+- `HTTP_ALLOW_PRIVATE_NETWORKS=true` turns it off, for calling services on your own machine
+  during development.
+
+Still to do before a public deployment: the per-user `base_url` of Ollama and OpenAI
+credentials isn't guarded this way (the server's own `OLLAMA_BASE_URL` is expected to be
+internal).
 
 ## API
 
@@ -747,6 +1036,20 @@ Notes:
   history rows remain, with `node_id: null` and the `node_key`/`node_type`/`node_label`
   snapshot taken at run time.
 
+### Files
+
+| Method | Path                     | Description                                                          |
+| ------ | ------------------------ | -------------------------------------------------------------------- |
+| POST   | `/api/files`             | Upload (multipart field `file`) → `201 {id, filename, content_type, size_bytes, sha256, created_at}`; `413` over `MAX_UPLOAD_MB`, `415` not an allowed type, `411` no `Content-Length`, `400` empty |
+| GET    | `/api/files`             | Your uploads, newest first                                           |
+| GET    | `/api/files/{id}`        | One file's metadata                                                  |
+| GET    | `/api/files/{id}/content`| The bytes, as an attachment with the detected type (`X-Content-Type-Options: nosniff`) |
+| DELETE | `/api/files/{id}`        | Delete the file and its bytes                                        |
+
+Owner-only (others get `404`). Use the `id` as the value of an Input node of type `file`.
+Execution rows now also carry `segment` and `handoff_at`, node rows their `queue` and
+`worker_hostname`, and node types in `GET /api/nodes` their `queue` and `portable`.
+
 ### Integrations (credentials)
 
 | Method | Path                                   | Description                                                        |
@@ -802,6 +1105,11 @@ mutations show a toast unless they opt out with `meta: { silent: true }`.
 - **Runs:** `run-controller.tsx` queues a run and attaches an `ExecutionSocket`
   (`src/features/runs`). `run-state.ts` is a pure reducer from the snapshot and events
   (de-duplicated by `seq`) to per-node state; the editor and the execution detail page share it.
+- **Files:** `src/features/files/file-chooser.tsx` picks one of your uploads or uploads a new
+  one with a progress bar (`uploadFile` in `lib/api.ts` uses XHR, since fetch can't report
+  upload progress). The run form, the Input node's default, and the document nodes' `file`
+  field use it. `runs/output-view.tsx` shows node output readably (text blocks, entity
+  lists, fact chips) with raw JSON on request.
 - **Routes:** `/pipelines/[id]` (editor), `/dashboard`, `/executions`, `/executions/[id]`,
   `/integrations`, `/login`, and `/register`.
 
@@ -818,10 +1126,17 @@ every node's config. In short:
   indexes), `{{input.topic}}` (an Input node's value), `{{vars.recipient}}` (a workflow
   variable), and `{{system.execution_id}}`. A config value that is exactly one reference keeps
   its type.
-- **Nodes:** `input`, `output`, `text`, `condition` (routes via `true`/`false` edge handles),
-  `delay` (≤ 10 s), `gemini`, `groq`, `openrouter`, `ollama`, `openai`, `anthropic`, `gmail`,
-  `gmail_read`, `http_request`. `default_registry.describe()` lists them with their JSON config
-  schemas.
+- **Nodes:** `input` (text, number, JSON, or file), `output`, `text`, `condition` (routes via
+  `true`/`false` edge handles), `delay`, `gemini`, `groq`, `openrouter`, `ollama`, `openai`,
+  `anthropic`, `gmail`, `gmail_read`, `http_request`, and the document nodes `pdf_extract`,
+  `ocr`, `summarize`, `extract_entities`. `default_registry.describe()` lists them with their
+  JSON config schemas, `queue`, and `portable`.
+- **Queues:** each node type's `queue` (`default`, `llm`, `ocr`) says which workers run it, and
+  `portable` nodes run anywhere. `execute_graph(..., accepts=..., completed=...)` pauses at
+  the first node its caller can't run (result status `handoff`, `next_queue`) and resumes
+  from the results so far (`flowforge_engine.routing`).
+- **Files:** nodes read uploads through `ExecutionServices.files`, a `FileStore` the API scopes
+  to the run's owner; `LocalFileStore` serves tests and standalone use.
 - **Validation** catches unknown node types, missing or invalid config, broken edges, cycles
   (all cycles are rejected for now), unresolvable references (unknown nodes or variables,
   nodes that aren't upstream, and output keys a node doesn't produce), and, when given the
@@ -841,7 +1156,9 @@ missing ..."). Adapter details:
 
 - **Gemini:** google-genai against Google AI Studio; defaults to `gemini-3.5-flash-lite`,
   embeddings `gemini-embedding-2`. A `404` for a retired model (for example `gemini-2.5-flash`,
-  which is no longer offered to new users) is passed through as-is.
+  which is no longer offered to new users) is passed through as-is. The SDK sends a streaming
+  request lazily, so a `429`/`503` can surface on the first chunk; until any text has been
+  handed out, that's retried with the same backoff as other calls.
 - **OpenAI-compatible** (`OpenAICompatibleProvider`): one adapter with presets for Groq
   (`https://api.groq.com/openai/v1`), OpenRouter (`https://openrouter.ai/api/v1`, sends
   `max_tokens` and an `X-Title` header), Ollama (no key; `/test` checks that the model is
@@ -864,9 +1181,10 @@ All tables use UUID primary keys, `timestamptz` timestamps, and JSONB for JSON c
 | `workflow_nodes`      | `node_key` (the graph id, unique per workflow), `node_type`, `label`, position, `config_json` |
 | `workflow_edges`      | source/target node FKs, optional handles                                          |
 | `workflow_variables`  | `key`, `value`, `var_type` enum                                                   |
-| `workflow_executions` | `status` and `trigger` enums, `created_at`, timings, `final_output_json`, `error_message`; for async runs `inputs_json` + `graph_json` (what was queued), `queue`, `celery_task_id`, `worker_hostname`, `heartbeat_at`, `stop_requested_at` |
-| `node_executions`     | per-node status, `position` (execution order), input/output JSON, timings, `duration_ms`; `node_id` is nullable, plus a `node_key`/`node_type`/`node_label` snapshot |
+| `workflow_executions` | `status` and `trigger` enums, `created_at`, timings, `final_output_json`, `error_message`; for async runs `inputs_json` + `graph_json` (what was queued), `queue`, `celery_task_id`, `worker_hostname`, `heartbeat_at`, `stop_requested_at`; for queue hand-offs `segment` and `handoff_at` |
+| `node_executions`     | per-node status, `position` (execution order), input/output JSON, timings, `duration_ms`, the `queue` and `worker_hostname` that ran it; `node_id` is nullable, plus a `node_key`/`node_type`/`node_label` snapshot |
 | `credentials`         | per-user provider secrets: Fernet-encrypted JSON in `encrypted_value`; unique per (user, provider) |
+| `files`               | uploads: `owner_id`, sanitized `filename`, detected `content_type`, `size_bytes`, `sha256`, `storage_key` (`<owner>/<id>` under `FILES_DIR`) |
 | `integrations`        | per-user connection `status` enum and non-secret metadata (masked values, last test); unique per (user, provider) |
 | `templates`           | `name`, `category`, starter `graph_json`                                          |
 
@@ -876,7 +1194,8 @@ is `ON DELETE SET NULL`, and the snapshot columns keep the row readable.
 `workflow_executions.triggered_by_user_id` is set to NULL if that user is deleted.
 
 Migrations: `initial schema` → `preserve node execution history` (node_id SET NULL +
-snapshot) → `graph node keys` → `unique credential per provider` → `async execution columns`. The downgrade of the second one deletes history rows whose
+snapshot) → `graph node keys` → `unique credential per provider` → `async execution columns` →
+`files and queue handoff`. The downgrade of the second one deletes history rows whose
 node is gone, since those can't satisfy the old NOT NULL constraint.
 
 ## Environment variables
@@ -913,7 +1232,14 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `EXECUTION_RECOVERY_INTERVAL_SECONDS` | `15`                       | API: stale-execution sweep |
 | `EXECUTION_PENDING_TIMEOUT_SECONDS` | `3600`                       | pending runs no worker picked up |
 | `EXECUTION_STOP_WAIT_SECONDS`, `EXECUTION_STOP_POLL_SECONDS` | `5`, `0.25` | stop endpoint wait; worker's stop-flag poll |
-| `WORKER_QUEUES`, `WORKER_CONCURRENCY` | `default`, `4`             | Compose `worker` service |
+| `WORKER_DEFAULT_CONCURRENCY`, `WORKER_LLM_CONCURRENCY`, `WORKER_OCR_CONCURRENCY` | `4`, `8`, `2` | Compose: processes per worker container |
+| `OCR_THREADS_PER_TASK`          | `1`                              | Compose `worker-ocr`: `OMP_THREAD_LIMIT` for Tesseract |
+| `FILES_DIR`                     | `apps/api/.data/files` (Docker: `/data/files`, the `files_data` volume) | API + workers: uploads |
+| `MAX_UPLOAD_MB`                 | `25`                             | API: upload limit    |
+| `SAMPLES_DIR`                   | the repo's `samples/` (Docker: `/samples`) | seed: the sample scan |
+| `HTTP_ALLOW_PRIVATE_NETWORKS`   | `false`                          | HTTP Request node: turn the SSRF guard off (development only) |
+| `TESSERACT_LANGS` (build arg)   | `deu fra spa ita por` (plus `eng`) | image: OCR language data |
+| `LOADTEST_INFLIGHT`, `LOADTEST_MIX`, `LOADTEST_LLM_PROVIDER` | `2`, `ocr`, `groq` | Compose `locust` (load test) |
 | `WS_HEARTBEAT_SECONDS`, `WS_AUTH_TIMEOUT_SECONDS`, `WS_DB_CHECK_SECONDS` | `15`, `10`, `10` | WebSocket |
 | `TESTING`                       | unset                            | set by the test suite only: all providers become mocks |
 | `POSTGRES_USER/PASSWORD/DB`     | `flowforge`                      | Compose              |
@@ -932,7 +1258,7 @@ dotenv parser accepts trailing `# comments`.
 ├── compose.yaml                  # root entrypoint → includes infrastructure/docker-compose.yml
 ├── .env.example
 ├── infrastructure/
-│   └── docker-compose.yml        # postgres, redis, api, worker, web
+│   └── docker-compose.yml        # postgres, redis, api, worker-default/-llm/-ocr, web; locust (profile)
 ├── apps/
 │   ├── api/                      # FastAPI backend
 │   │   ├── alembic.ini
@@ -958,8 +1284,11 @@ dotenv parser accepts trailing `# comments`.
 │   │   └── playwright.config.ts
 │   └── worker/                   # README only: the worker's code is apps/api/app/worker
 ├── docs/screenshots/             # written by the Playwright tests
+├── loadtest/                     # Locust file, throughput script, suite runner, raw results
+├── samples/                      # scanned-invoice.pdf (image-only) and the script that makes it
 ├── scripts/
 │   ├── watch_run.py              # CLI: run a workflow and print its WebSocket events live
+│   ├── run_document_demo.py      # CLI: run the document demo and show which worker ran each node
 │   └── examples/                 # graphs for the CLI (gemini_gmail, gemini_output, delay, stream_tokens)
 └── packages/
     ├── workflow-engine/          # flowforge_engine: registry, nodes, resolver, validator, executor, providers
@@ -990,8 +1319,15 @@ dotenv parser accepts trailing `# comments`.
 - **Gemini `429 ... quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier=N`.** The
   free daily quota for that model is used up. Wait for the reset, switch `GEMINI_MODEL` to a
   model with more free quota, or add a `fallback` chain.
-- **Runs stay `pending`.** No worker consumes that queue: `docker compose ps worker`, then
-  `docker compose logs worker`. After `EXECUTION_PENDING_TIMEOUT_SECONDS` they're marked failed.
+- **Runs stay `pending`, or `running` with "Handed off: waiting for a ... worker".** No worker
+  consumes that queue: `docker compose ps` (is `worker-ocr` / `worker-llm` / `worker-default`
+  up and healthy?), then `docker compose logs worker-ocr`. After
+  `EXECUTION_PENDING_TIMEOUT_SECONDS` they're marked failed.
+- **OCR fails with "Tesseract language data not installed".** Rebuild with the language:
+  `docker compose build --build-arg TESSERACT_LANGS="deu fra hin" api worker-ocr`.
+- **An HTTP Request node fails with "Blocked request to ...".** That's the
+  [SSRF guard](#security-outbound-requests-ssrf-guard). For a service on your own machine
+  during development, set `HTTP_ALLOW_PRIVATE_NETWORKS=true` and restart the workers.
 - **A run was marked failed with "No heartbeat from worker ..." or "... restarted while this
   execution was running".** The worker was killed, crashed, or was restarted (including a
   `watchfiles` reload after a code change) mid-run; that's crash recovery doing its job.
@@ -1007,7 +1343,7 @@ dotenv parser accepts trailing `# comments`.
 - **Containers exit with code 255 after the machine sleeps.** Docker Desktop's file sharing can
   drop bind mounts (`EIO` errors in the logs). `api` and `web` use `restart: unless-stopped` and
   come back on their own; if not, run `docker compose up -d`.
-- **Security note: HTTP Request node.** It can call any URL the API container can reach,
-  including internal addresses like `http://postgres:5432`. That's fine for local development,
-  but add an allow/deny list before exposing the API to untrusted users. The same applies to
-  the per-user `base_url` accepted for Ollama and OpenAI credentials.
+- **Security note: per-user LLM endpoints.** The HTTP Request node is guarded (see
+  [SSRF guard](#security-outbound-requests-ssrf-guard)), but the per-user `base_url` accepted
+  for Ollama and OpenAI credentials isn't yet: add the same check before exposing the API to
+  untrusted users.

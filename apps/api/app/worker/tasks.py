@@ -26,6 +26,7 @@ from app.models.enums import ExecutionStatus, NodeExecutionStatus
 from app.services.control import finalize_dead, recover_stale_executions
 from app.services.events import EventPublisher
 from app.services.runs import InfrastructureUnavailable, run_execution, utcnow
+from app.services.task_queue import CeleryTaskQueue
 from app.worker.celery_app import RUN_EXECUTION_TASK, celery_app
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,18 @@ async def worker_resources() -> AsyncIterator[tuple[SessionFactory, Redis]]:
         await engine.dispose()
 
 
-async def _run(execution_id: uuid.UUID, worker_id: str) -> dict[str, Any]:
+def consumed_queues() -> frozenset[str]:
+    """The queues this worker consumes (`-Q`), as selected on the app before the pool forked."""
+    names = frozenset(celery_app.amqp.queues.consume_from or {})
+    return names or frozenset({celery_app.conf.task_default_queue})
+
+
+async def _run(execution_id: uuid.UUID, worker_id: str, segment: int, queue: str | None) -> dict[str, Any]:
     async with worker_resources() as (session_factory, redis):
-        return await run_execution(execution_id, session_factory=session_factory, redis=redis, worker_id=worker_id)
+        return await run_execution(
+            execution_id, session_factory=session_factory, redis=redis, worker_id=worker_id,
+            segment=segment, queues=consumed_queues(), queue=queue, task_queue=CeleryTaskQueue(),
+        )
 
 
 async def _fail(execution_id: uuid.UUID, error: str) -> None:
@@ -64,11 +74,13 @@ async def _fail(execution_id: uuid.UUID, error: str) -> None:
 
 
 @celery_app.task(name=RUN_EXECUTION_TASK, bind=True, acks_late=True)
-def run_execution_task(self: Any, execution_id: str) -> dict[str, Any]:
+def run_execution_task(self: Any, execution_id: str, segment: int = 0) -> dict[str, Any]:
+    """Run one segment of an execution: the nodes this worker's queues cover, then hand off."""
     # request.hostname is the machine name under some pools; prefer the node name.
     worker_id = _nodename or self.request.hostname or f"celery@{socket.gethostname()}"
+    queue = (self.request.delivery_info or {}).get("routing_key")
     try:
-        return asyncio.run(_run(uuid.UUID(execution_id), worker_id))
+        return asyncio.run(_run(uuid.UUID(execution_id), worker_id, segment, queue))
     except InfrastructureUnavailable as exc:
         # Only raised before the run was claimed, so retrying can't repeat any node.
         retries = self.request.retries
@@ -110,4 +122,6 @@ def _recover_on_start(sender: Any = None, **_: object) -> None:
     except Exception:
         logger.exception("startup recovery failed")
         return
-    logger.info("worker ready", extra={"worker": hostname, "recovered_executions": [str(i) for i in recovered]})
+    logger.info("worker ready", extra={
+        "worker": hostname, "queues": sorted(consumed_queues()), "recovered_executions": [str(i) for i in recovered],
+    })

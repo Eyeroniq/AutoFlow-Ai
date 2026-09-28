@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+}
+
+/* Light-only for Phase 1; the full theme arrives with the dashboard UI. */
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-slate-50 font-sans text-slate-900;
+}

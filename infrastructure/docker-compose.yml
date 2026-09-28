@@ -1,0 +1,110 @@
+# FlowForge AI — local development stack.
+#
+# Run from the repo root with `docker compose up` (the root compose.yaml includes this
+# file and feeds it the root .env), or directly:
+#   docker compose -f infrastructure/docker-compose.yml --env-file .env up
+name: flowforge
+
+x-db-env: &db-env
+  POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flowforge}
+  POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Provisioned for the Phase 2+ task queue; nothing connects to it yet.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ../apps/api
+      # The engine package sits outside apps/api; the Dockerfile COPYs it --from here.
+      additional_contexts:
+        workflow_engine: ../packages/workflow-engine
+    # Bind mounts can drop out (e.g. after the host sleeps); come back on our own.
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # Container-network addresses override the localhost values in .env.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:-flowforge}@postgres:5432/${POSTGRES_DB:-flowforge}
+      REDIS_URL: redis://redis:6379/0
+      # Bind mounts from a Windows/macOS host don't deliver inotify events.
+      WATCHFILES_FORCE_POLLING: "true"
+    # Apply migrations, then hand PID over to uvicorn (exec) so it receives SIGTERM.
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir /packages/workflow-engine/src --no-access-log
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    volumes:
+      - ../apps/api:/app
+      # Same path the editable install points at, so engine edits hot-reload too.
+      - ../packages/workflow-engine:/packages/workflow-engine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  web:
+    build:
+      context: ../apps/web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # See apps/web/next.config.ts — bind mounts need polling for hot reload.
+      NEXT_DEV_POLL_INTERVAL_MS: "1000"
+      NEXT_TELEMETRY_DISABLED: "1"
+    # Webpack rather than the default Turbopack: Turbopack's poll watcher misses edits
+    # made through Docker Desktop bind mounts, webpack's picks them up reliably.
+    command: ["npm", "run", "dev", "--", "--webpack", "--hostname", "0.0.0.0", "--port", "3000"]
+    ports:
+      - "${WEB_HOST_PORT:-3000}:3000"
+    volumes:
+      - ../apps/web:/app
+      # Keep the container's Linux node_modules and build cache out of the host mount.
+      # After changing dependencies: docker compose up --build -V web
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

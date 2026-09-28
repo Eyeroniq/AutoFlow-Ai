@@ -1,0 +1,24 @@
+# Secrets — commit .env.example, never .env
+.env
+.env.local
+!.env.example
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js (apps/web/.gitignore has the full list)
+node_modules/
+.next/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,8 @@
+# Lets `docker compose up` run from the repo root. The stack itself is defined in
+# infrastructure/docker-compose.yml; this file only points at it and supplies the
+# root .env for ${VAR} interpolation (Compose otherwise looks for infrastructure/.env).
+name: flowforge
+
+include:
+  - path: infrastructure/docker-compose.yml
+    env_file: .env

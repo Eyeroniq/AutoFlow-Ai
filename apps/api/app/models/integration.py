@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, UUIDPrimaryKeyMixin
@@ -13,7 +13,11 @@ if TYPE_CHECKING:
 
 
 class Integration(UUIDPrimaryKeyMixin, Base):
+    """Connection status for a user's provider credential, plus non-secret metadata
+    (masked key, last connection test)."""
+
     __tablename__ = "integrations"
+    __table_args__ = (UniqueConstraint("user_id", "provider"),)
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True

@@ -25,7 +25,7 @@ async def test_example_workflow_end_to_end():
 
     gmail = result.result_for("gmail")
     assert gmail.input["body"] == gemini.output["response"]
-    assert gmail.input["to"] == "demo@flowforge.ai"
+    assert gmail.input["to"] == "you@example.com"
     assert gmail.output["status"] == "sent"
 
     final = result.final_output["result"]
@@ -183,3 +183,13 @@ async def test_variables_and_system_values():
     context = make_context()
     result = await execute_graph(graph, context)
     assert result.result_for("t").output["text"] == f"hello from {context.workflow_id}"
+
+
+async def test_missing_credentials_fail_the_run_before_any_node_runs():
+    from flowforge_engine import ExecutionServices, ProviderSettings
+
+    context = make_context(services=ExecutionServices(provider_settings=ProviderSettings()))
+    with pytest.raises(GraphValidationFailed, match="Authentication missing for provider 'gemini'") as info:
+        await execute_graph(example_graph(), context)
+    assert {issue.code for issue in info.value.issues} == {"auth_missing"}
+    assert MockEmailProvider.outbox() == []

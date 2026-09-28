@@ -9,7 +9,9 @@ from flowforge_engine.errors import (
     EngineError,
     GraphError,
     GraphValidationFailed,
+    MissingCredentialsError,
     ProviderError,
+    ProviderNotSupportedError,
     VariableResolutionError,
 )
 from flowforge_engine.executor import DEFAULT_NODE_TIMEOUT_SECONDS, execute_graph
@@ -39,6 +41,7 @@ from flowforge_engine.registry import (
     list_node_definitions,
     register_node,
 )
+from flowforge_engine.providers.settings import ProviderSettings
 from flowforge_engine.services import ExecutionServices
 from flowforge_engine.variables import find_references, resolve_string, resolve_value
 
@@ -54,6 +57,7 @@ __all__ = [
     "GraphValidationFailed",
     "GraphVariable",
     "IssueCode",
+    "MissingCredentialsError",
     "NodeConfig",
     "NodeContext",
     "NodeDefinition",
@@ -63,6 +67,8 @@ __all__ = [
     "NodeStatus",
     "Position",
     "ProviderError",
+    "ProviderNotSupportedError",
+    "ProviderSettings",
     "RunStatus",
     "ValidationIssue",
     "VariableResolutionError",

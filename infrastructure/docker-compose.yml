@@ -58,6 +58,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       # Bind mounts from a Windows/macOS host don't deliver inotify events.
       WATCHFILES_FORCE_POLLING: "true"
+    # Lets the API reach services on the host, e.g. Ollama at
+    # http://host.docker.internal:11434/v1. Docker Desktop provides the name already;
+    # on Linux this maps it to the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Apply migrations, then hand PID over to uvicorn (exec) so it receives SIGTERM.
     command:
       - sh

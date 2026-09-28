@@ -143,7 +143,7 @@ class TestReferenceValidation:
             ("{{nobody.value}}", "'nobody' is not a node in this graph"),
             ("{{side.text}}", "node 'side' is not upstream of 'mail'"),
             ("{{mail.message_id}}", "cannot reference its own output"),
-            ("{{gemini.respnse}}", "has no output 'respnse' (outputs: mock, model, provider, response)"),
+            ("{{gemini.respnse}}", "has no output 'respnse' (outputs: fallback_errors, mock, model, provider, provider_used, response)"),
             ("{{input.topik}}", "has no output 'topik'"),
             ("{{vars.missing}}", "no workflow variable 'missing'"),
             ("{{vars}}", "name a variable"),
@@ -162,3 +162,60 @@ class TestReferenceValidation:
         nodes = [node("out", "output", value={"items": ["ok", "{{ghost.value}}"]})]
         issues = validate_graph(nodes, [])
         assert issues[0].field == "value.items[1]"
+
+
+class TestCredentialValidation:
+    """With services, a provider lacking credentials is a validation error, never a silent mock."""
+
+    @staticmethod
+    def services(settings):
+        from flowforge_engine import ExecutionServices
+
+        return ExecutionServices(provider_settings=settings)
+
+    def test_missing_keys_are_reported_per_provider(self):
+        from flowforge_engine import ProviderSettings
+
+        issues = validate_workflow(example_graph(), services=self.services(ProviderSettings()))
+        assert codes(issues) == [IssueCode.AUTH_MISSING, IssueCode.AUTH_MISSING]
+        gemini, gmail = issues
+        assert (gemini.node_id, gemini.field) == ("gemini", "provider")
+        assert "Authentication missing for provider 'gemini'" in gemini.message
+        assert "GEMINI_API_KEY" in gemini.message
+        assert gmail.node_id == "gmail" and "Authentication missing for provider 'gmail'" in gmail.message
+
+    def test_configured_keys_validate(self):
+        from flowforge_engine import ProviderSettings
+
+        settings = (
+            ProviderSettings()
+            .with_account("gemini", api_key="k" * 20)
+            .with_account("gmail", username="me@gmail.com", password="app-password")
+        )
+        assert validate_workflow(example_graph(), services=self.services(settings)) == []
+
+    def test_fallback_providers_are_checked_too(self):
+        from flowforge_engine import ProviderSettings
+
+        graph = example_graph()
+        graph.nodes[1].config["fallback"] = ["groq", "ollama"]
+        settings = (
+            ProviderSettings()
+            .with_account("gemini", api_key="k" * 20)
+            .with_account("gmail", username="me@gmail.com", password="app-password")
+        )
+        [issue] = validate_workflow(graph, services=self.services(settings))
+        assert issue.code is IssueCode.AUTH_MISSING and issue.field == "fallback"
+        assert "provider 'groq'" in issue.message  # ollama needs no key
+
+    def test_explicit_mock_and_testing_mode_need_no_credentials(self):
+        from flowforge_engine import ProviderSettings
+
+        graph = example_graph()
+        graph.nodes[1].config["provider"] = "mock"
+        graph.nodes[2].config["auth"] = "mock"
+        assert validate_workflow(graph, services=self.services(ProviderSettings())) == []
+        assert validate_workflow(example_graph(), services=self.services(ProviderSettings(testing=True))) == []
+
+    def test_without_services_credentials_are_not_checked(self):
+        assert validate_workflow(example_graph()) == []

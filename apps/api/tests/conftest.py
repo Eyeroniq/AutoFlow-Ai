@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from cryptography.fernet import Fernet
 from flowforge_engine.providers import MockEmailProvider
+from flowforge_engine.testing import live_tests_enabled
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
@@ -23,9 +25,10 @@ from sqlalchemy.pool import NullPool
 
 # --- Environment, before any app module reads Settings ---------------------------------
 os.environ["JWT_SECRET"] = "test-jwt-secret-" + "x" * 32
-# Environment beats .env: blank keys force every LLM provider into mock mode.
-for _key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-    os.environ[_key] = ""
+os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+# Unit tests use mocks: with TESTING=true the provider factory hands out mock providers even
+# though real keys may be configured. Live tests (-m live) switch this off per test.
+os.environ["TESTING"] = "true"
 
 from app.core.config import settings  # noqa: E402
 
@@ -42,6 +45,17 @@ from app.main import app  # noqa: E402
 API_ROOT = Path(__file__).resolve().parents[1]
 
 limiter.enabled = False
+
+HERE = Path(__file__).resolve().parent
+
+
+def pytest_collection_modifyitems(config, items):
+    if live_tests_enabled(config.option.markexpr):
+        return
+    skip = pytest.mark.skip(reason="live test: calls real APIs and sends a real email; run with `pytest -m live`")
+    for item in items:
+        if "live" in item.keywords and item.path.is_relative_to(HERE):
+            item.add_marker(skip)
 
 
 async def recreate_database(url: URL) -> None:

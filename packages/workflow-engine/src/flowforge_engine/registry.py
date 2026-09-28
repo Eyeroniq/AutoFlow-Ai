@@ -39,6 +39,13 @@ class NodeDefinition(ABC, Generic[ConfigT]):
     @abstractmethod
     async def execute(self, context: NodeContext, config: ConfigT) -> NodeResult: ...
 
+    def required_providers(self, node: GraphNode) -> list[tuple[str, str]]:
+        """(provider, config field) pairs whose credentials this node needs to run.
+
+        Validation reports "Authentication missing" for any that aren't configured.
+        """
+        return []
+
     def output_keys(self, node: GraphNode) -> set[str] | None:
         """Top-level output keys this node will produce, or None if they can't be known."""
         if self.output_schema is None:

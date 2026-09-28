@@ -48,7 +48,8 @@ async def run_workflow(
     Raises InvalidWorkflowGraph (and records nothing) if the graph doesn't validate.
     """
     graph = WorkflowGraph.model_validate(workflow.graph_json)
-    issues = validate_workflow(graph)
+    # With services, providers lacking credentials are reported ("Authentication missing").
+    issues = validate_workflow(graph, services=services)
     if issues:
         raise InvalidWorkflowGraph(issues)
 

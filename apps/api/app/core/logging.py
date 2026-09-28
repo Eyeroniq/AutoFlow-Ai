@@ -14,8 +14,30 @@ _RESERVED_ATTRS = set(vars(logging.makeLogRecord({}))) | {
 }
 
 
+# Secret values (API keys, SMTP password, decrypted user credentials) that must never
+# reach the logs. Anything in here is replaced in every formatted line.
+_SECRETS: set[str] = set()
+_MIN_SECRET_LENGTH = 6
+
+
+def register_secret(value: str | None) -> None:
+    if value and len(value.strip()) >= _MIN_SECRET_LENGTH:
+        _SECRETS.add(value.strip())
+
+
+def redact_secrets(text: str) -> str:
+    # Longest first, so a secret containing another is fully replaced.
+    for secret in sorted(_SECRETS, key=len, reverse=True):
+        if secret in text:
+            text = text.replace(secret, "[REDACTED]")
+    return text
+
+
 class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(self._format(record))
+
+    def _format(self, record: logging.LogRecord) -> str:
         log: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,

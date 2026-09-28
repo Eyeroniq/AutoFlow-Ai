@@ -102,12 +102,18 @@ async def delete_workflow(workflow_id: uuid.UUID, db: DbSession, user: CurrentUs
     "/{workflow_id}/validate",
     response_model=WorkflowValidation,
     summary="Validate the saved graph",
-    description="Returns every problem that would stop the graph from running; an empty `errors` list means valid.",
+    description=(
+        "Returns every problem that would stop the graph from running; an empty `errors` list "
+        "means valid. A node whose provider has no credentials (neither yours nor the server's) "
+        "is reported with code `auth_missing` (\"Authentication missing for provider ...\")."
+    ),
     responses=_NOT_FOUND,
 )
-async def validate(workflow_id: uuid.UUID, db: DbSession, user: CurrentUser) -> WorkflowValidation:
+async def validate(
+    workflow_id: uuid.UUID, db: DbSession, user: CurrentUser, services: Services
+) -> WorkflowValidation:
     workflow = await get_owned_workflow(db, workflow_id, user)
-    errors = validate_workflow(WorkflowGraph.model_validate(workflow.graph_json))
+    errors = validate_workflow(WorkflowGraph.model_validate(workflow.graph_json), services=services)
     return WorkflowValidation(valid=not errors, errors=errors)
 
 

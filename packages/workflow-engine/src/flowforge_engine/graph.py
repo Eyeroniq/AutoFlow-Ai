@@ -3,7 +3,7 @@ from __future__ import annotations
 import heapq
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pydantic
 
@@ -24,6 +24,9 @@ from flowforge_engine.variables import (
     iter_references,
     parse_reference,
 )
+
+if TYPE_CHECKING:
+    from flowforge_engine.services import ExecutionServices
 
 # --- Ordering ---------------------------------------------------------------------------
 
@@ -108,8 +111,13 @@ def _ancestors(node_ids: Iterable[str], edges: Iterable[GraphEdge]) -> dict[str,
 # --- Validation -------------------------------------------------------------------------
 
 
-def validate_workflow(graph: WorkflowGraph, *, registry: NodeRegistry | None = None) -> list[ValidationIssue]:
-    return validate_graph(graph.nodes, graph.edges, graph.variables, registry=registry)
+def validate_workflow(
+    graph: WorkflowGraph,
+    *,
+    registry: NodeRegistry | None = None,
+    services: ExecutionServices | None = None,
+) -> list[ValidationIssue]:
+    return validate_graph(graph.nodes, graph.edges, graph.variables, registry=registry, services=services)
 
 
 def validate_graph(
@@ -118,8 +126,13 @@ def validate_graph(
     variables: Sequence[GraphVariable] = (),
     *,
     registry: NodeRegistry | None = None,
+    services: ExecutionServices | None = None,
 ) -> list[ValidationIssue]:
-    """Every problem that would stop the graph from running. Empty list = valid."""
+    """Every problem that would stop the graph from running. Empty list = valid.
+
+    With `services`, nodes whose provider has no credentials get an AUTH_MISSING issue
+    ("Authentication missing for provider 'groq': ...") instead of running as a mock.
+    """
     registry = registry or default_registry
     issues: list[ValidationIssue] = []
 
@@ -151,6 +164,8 @@ def validate_graph(
             continue
         definitions[node.id] = definition
         issues.extend(_config_issues(node, definition))
+        if services is not None:
+            issues.extend(_credential_issues(node, definition, services))
 
     # Variables
     variable_keys: set[str] = set()
@@ -236,6 +251,23 @@ def _config_issues(node: GraphNode, definition: NodeDefinition[Any]) -> list[Val
             ))
         return issues
     return []
+
+
+def _credential_issues(
+    node: GraphNode, definition: NodeDefinition[Any], services: ExecutionServices
+) -> list[ValidationIssue]:
+    issues = []
+    seen: set[str] = set()
+    for provider, field in definition.required_providers(node):
+        if provider in seen:
+            continue
+        seen.add(provider)
+        if not services.has_credentials(provider):
+            issues.append(ValidationIssue(
+                code=IssueCode.AUTH_MISSING, node_id=node.id, field=field,
+                message=f"Node '{node.id}': {services.missing_credentials_message(provider)}",
+            ))
+    return issues
 
 
 def _reference_problem(

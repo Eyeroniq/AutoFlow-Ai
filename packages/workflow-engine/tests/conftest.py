@@ -1,6 +1,20 @@
+from pathlib import Path
+
 import pytest
 
 from flowforge_engine.providers import MockEmailProvider
+from flowforge_engine.testing import live_tests_enabled
+
+HERE = Path(__file__).resolve().parent
+
+
+def pytest_collection_modifyitems(config, items):
+    if live_tests_enabled(config.option.markexpr):
+        return
+    skip = pytest.mark.skip(reason="live test: calls real APIs; run with `pytest -m live`")
+    for item in items:
+        if "live" in item.keywords and item.path.is_relative_to(HERE):
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
@@ -11,7 +25,7 @@ def _clear_mock_outbox():
 
 
 @pytest.fixture(autouse=True)
-def _no_real_provider_keys(monkeypatch):
-    # Keep provider selection deterministic whatever the developer's shell exports.
-    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(key, raising=False)
+def _testing_mode(monkeypatch):
+    # Unit tests use mocks: TESTING=true makes the provider factory hand out mocks even
+    # when real keys are present in the environment. Live tests build their own settings.
+    monkeypatch.setenv("TESTING", "true")

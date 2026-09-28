@@ -5,17 +5,24 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.api.router import api_router
 from app.core.config import settings
-from app.core.logging import setup_logging
+from app.core.crypto import get_cipher
+from app.core.logging import register_secret, setup_logging
 from app.core.rate_limit import limiter
 from app.db.session import engine
 
 setup_logging(settings.LOG_LEVEL)
+for _secret in settings.secret_values():
+    register_secret(_secret)
+# Fail at startup (not on the first connect) if ENCRYPTION_KEY isn't a valid Fernet key.
+get_cipher()
 logger = logging.getLogger("app")
 request_logger = logging.getLogger("app.request")
 
@@ -33,7 +40,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="0.1.0",
-    description="FlowForge AI backend — Phase 1: authentication and core schema.",
+    description="FlowForge AI backend: auth, workflows, real LLM/email providers, and encrypted integrations.",
     lifespan=lifespan,
 )
 
@@ -46,6 +53,19 @@ async def rate_limit_handler(_: Request, exc: RateLimitExceeded) -> JSONResponse
         status_code=429,
         content={"detail": f"Too many requests: limit is {exc.detail}. Try again shortly."},
     )
+
+
+# Request bodies on these paths carry API keys and passwords.
+_SECRET_BODY_PREFIXES = ("/api/integrations",)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    if request.url.path.startswith(_SECRET_BODY_PREFIXES):
+        # FastAPI echoes the offending input by default; never send secrets back.
+        errors = [{k: v for k, v in error.items() if k not in ("input", "ctx")} for error in errors]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 @app.middleware("http")

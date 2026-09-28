@@ -30,4 +30,7 @@ addopts = "--import-mode=importlib -ra"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-markers = ["network: makes real outbound HTTP requests (deselect with -m 'not network')"]
+markers = [
+    "network: makes real outbound HTTP requests (deselect with -m 'not network')",
+    "live: calls real provider APIs with real keys; skipped unless selected with -m live",
+]

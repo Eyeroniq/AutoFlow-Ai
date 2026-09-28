@@ -33,7 +33,9 @@ def test_listing_includes_json_config_schemas():
     assert gemini["icon"] == "sparkles"
     assert gemini["config_schema"]["required"] == ["user_prompt"]
     assert gemini["config_schema"]["properties"]["temperature"]["maximum"] == 2
-    assert gemini["output_schema"]["required"] == ["response", "provider", "model", "mock"]
+    assert gemini["output_schema"]["required"] == [
+        "response", "provider", "provider_used", "model", "mock", "fallback_errors"
+    ]
     assert catalog["condition"]["branches"] == ["true", "false"]
     for entry in catalog.values():
         assert {"type", "label", "description", "icon", "config_schema"} <= entry.keys()

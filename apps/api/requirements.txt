@@ -11,6 +11,8 @@ passlib[bcrypt]==1.7.4
 # passlib 1.7.4 is incompatible with bcrypt>=4.1 (version probe) and bcrypt 5 (72-byte check).
 bcrypt==4.0.1
 slowapi==0.1.10
+# Fernet encryption for stored credentials (app/core/crypto.py).
+cryptography==50.0.1
 
 # Workflow engine (packages/workflow-engine), installed editable. pip resolves the path
 # from the working directory, so run pip from apps/api (in Docker that's /app -> /packages).

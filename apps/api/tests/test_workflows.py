@@ -110,7 +110,7 @@ class TestGraphSync:
         assert sorted((by_id[e.source_node_id], by_id[e.target_node_id]) for e in edges) == [
             ("gemini", "gmail"), ("gmail", "output"), ("input", "gemini"),
         ]
-        assert [(v.key, v.value, v.var_type.value) for v in variables] == [("recipient", "demo@flowforge.ai", "workflow")]
+        assert [(v.key, v.value, v.var_type.value) for v in variables] == [("recipient", "you@example.com", "workflow")]
 
     async def test_resave_keeps_surviving_node_rows(self, client, user, db_session):
         wid = (await create_workflow(client, user))["id"]

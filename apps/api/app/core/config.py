@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Any
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,11 +12,15 @@ class Settings(BaseSettings):
         env_file=("../../.env", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        # `GROQ_API_KEY=` (blank) means "not set", including for typed fields like SMTP_PORT.
+        env_ignore_empty=True,
     )
 
     PROJECT_NAME: str = "FlowForge AI"
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
+    # Set by the pytest suite: providers become mocks. Never set it in a real deployment.
+    TESTING: bool = False
 
     DATABASE_URL: str = "postgresql+asyncpg://flowforge:flowforge@localhost:5433/flowforge"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -27,16 +32,48 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # Required: Fernet key(s) that encrypt stored credentials. Comma-separate several to
+    # rotate: the first encrypts, all of them decrypt.
+    ENCRYPTION_KEY: SecretStr
+
     # Comma-separated list of allowed browser origins.
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # slowapi limit string applied to /auth/login, /auth/register, and /auth/refresh.
     AUTH_RATE_LIMIT: str = "10/minute"
 
-    # LLM provider keys. Unset or blank -> that provider runs in mock mode.
+    # --- Providers: server-wide defaults. A user's own stored credential wins. ---------
+    # Unset values fall back to the engine's defaults (see flowforge_engine.providers).
     GEMINI_API_KEY: SecretStr | None = None
+    GEMINI_MODEL: str | None = None
+    GEMINI_EMBEDDING_MODEL: str | None = None
+    GROQ_API_KEY: SecretStr | None = None
+    GROQ_MODEL: str | None = None
+    OPENROUTER_API_KEY: SecretStr | None = None
+    OPENROUTER_MODEL: str | None = None
+    OLLAMA_BASE_URL: str | None = None
+    OLLAMA_MODEL: str | None = None
+    OLLAMA_EMBEDDING_MODEL: str | None = None
     OPENAI_API_KEY: SecretStr | None = None
+    OPENAI_MODEL: str | None = None
     ANTHROPIC_API_KEY: SecretStr | None = None
+    ANTHROPIC_MODEL: str | None = None
+
+    # Gmail over SMTP/IMAP with an App Password (the same account sends and reads).
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int | None = None
+    SMTP_SECURITY: str | None = None
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: SecretStr | None = None
+    SMTP_FROM_NAME: str | None = None
+    IMAP_HOST: str | None = None
+    IMAP_PORT: int | None = None
+
+    # Backoff for 429/5xx/network errors; free-tier limits change, so nothing is hardcoded.
+    LLM_MAX_RETRIES: int | None = Field(default=None, ge=0, le=10)
+    LLM_RETRY_BASE_DELAY_SECONDS: float | None = Field(default=None, ge=0)
+    LLM_RETRY_MAX_DELAY_SECONDS: float | None = Field(default=None, ge=0)
+    LLM_REQUEST_TIMEOUT_SECONDS: float | None = Field(default=None, gt=0)
 
     # Upper bound for a single node during a (synchronous) workflow run.
     WORKFLOW_NODE_TIMEOUT_SECONDS: float = Field(default=120, gt=0)
@@ -44,6 +81,36 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    def provider_env(self) -> dict[str, Any]:
+        """The provider-related settings as environment-style keys, secrets unwrapped.
+
+        Feeds flowforge_engine's ProviderSettings.from_mapping; never log or return it.
+        """
+        names = (
+            "TESTING", "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_EMBEDDING_MODEL", "GROQ_API_KEY",
+            "GROQ_MODEL", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
+            "OLLAMA_EMBEDDING_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USER", "SMTP_PASSWORD",
+            "SMTP_FROM_NAME", "IMAP_HOST", "IMAP_PORT", "LLM_MAX_RETRIES", "LLM_RETRY_BASE_DELAY_SECONDS",
+            "LLM_RETRY_MAX_DELAY_SECONDS", "LLM_REQUEST_TIMEOUT_SECONDS",
+        )
+        env: dict[str, Any] = {}
+        for name in names:
+            value = getattr(self, name)
+            env[name] = value.get_secret_value() if isinstance(value, SecretStr) else value
+        env["TESTING"] = "true" if self.TESTING else ""
+        return env
+
+    def secret_values(self) -> list[str]:
+        """Server secrets the log formatter redacts wherever they appear."""
+        secrets = [self.JWT_SECRET, *self.ENCRYPTION_KEY.get_secret_value().split(",")]
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+                     "ANTHROPIC_API_KEY", "SMTP_PASSWORD"):
+            value = getattr(self, name)
+            if value is not None:
+                secrets.append(value.get_secret_value())
+        return [s.strip() for s in secrets if s and s.strip()]
 
 
 @lru_cache

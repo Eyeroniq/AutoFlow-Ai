@@ -47,13 +47,16 @@ async def test_input_gemini_gmail_output_end_to_end(client, user):
     gemini = by_key["gemini"]
     assert gemini["node_type"] == "gemini" and gemini["node_label"] == "Summarize"
     assert gemini["input"]["user_prompt"] == "Write a three-sentence summary of solar power."
-    assert gemini["output"] == {"response": expected_response, "provider": "gemini", "model": "gemini-2.5-flash", "mock": True}
+    assert gemini["output"] == {
+        "response": expected_response, "provider": "gemini", "provider_used": "gemini",
+        "model": "gemini-3.5-flash-lite", "mock": True, "fallback_errors": [],
+    }
 
     gmail = by_key["gmail"]
     assert gmail["input"]["body"] == expected_response
     assert gmail["output"]["status"] == "sent"
     assert gmail["output"]["message_id"].startswith("mock-")
-    assert gmail["output"]["to"] == ["demo@flowforge.ai"]
+    assert gmail["output"]["to"] == ["you@example.com"]
 
     final = execution["final_output"]["result"]
     assert final["summary"] == expected_response

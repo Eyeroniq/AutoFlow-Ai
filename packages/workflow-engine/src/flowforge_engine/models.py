@@ -125,6 +125,7 @@ class IssueCode(StrEnum):
     RESERVED_NODE_ID = "reserved_node_id"
     DUPLICATE_VARIABLE = "duplicate_variable"
     DUPLICATE_NAME = "duplicate_name"
+    AUTH_MISSING = "auth_missing"
 
 
 class ValidationIssue(BaseModel):

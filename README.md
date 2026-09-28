@@ -4,12 +4,15 @@ A visual AI workflow automation builder. This repository is being built in phase
 
 - **Phase 1:** monorepo skeleton, Docker Compose stack, the full database schema, JWT
   authentication (with refresh), and a minimal Next.js frontend that proves auth end to end.
-- **Phase 2 (this state):** the workflow engine package (node registry, `{{...}}` variable
-  resolution, graph validation, execution), LLM/email provider abstractions with mock
-  fallbacks, and workflow CRUD + synchronous execution APIs. Everything is testable from
-  `/docs`; the frontend is unchanged apart from automatic token refresh.
+- **Phase 2:** the workflow engine package (node registry, `{{...}}` variable resolution,
+  graph validation, execution) and workflow CRUD + synchronous execution APIs.
+- **Phase 2.5 (this state):** real, free-tier-friendly providers instead of mocks: Google
+  Gemini, Groq, OpenRouter (`:free` models), and local Ollama for LLMs (plus OpenAI and
+  Anthropic if you add keys), and Gmail over SMTP/IMAP with an App Password. Per-user
+  credentials are encrypted at rest, and a provider without credentials is a validation
+  error, never a silent mock. Everything is testable from `/docs`; the frontend is unchanged.
 
-The canvas, Celery worker, WebSockets, templates, and real integrations come in later phases.
+The canvas, Celery worker, WebSockets, and templates come in later phases.
 
 ## Stack
 
@@ -17,7 +20,8 @@ The canvas, Celery worker, WebSockets, templates, and real integrations come in 
 | -------- | --------------------------------------------------------------------------- |
 | Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS v4, React Hook Form + Zod |
 | Backend  | Python 3.13, FastAPI, SQLAlchemy 2.0 (async, asyncpg), Alembic, Pydantic v2 |
-| Engine   | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs |
+| Engine   | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs; stdlib smtplib/imaplib |
+| Secrets  | Fernet (`cryptography`) for stored credentials                                |
 | Auth     | JWT (python-jose, HS256), passlib + bcrypt, slowapi rate limiting           |
 | Data     | PostgreSQL 16, Redis 7 (provisioned but not used yet)                       |
 | Tests    | pytest + pytest-asyncio, against a real Postgres test database              |
@@ -34,13 +38,19 @@ The canvas, Celery worker, WebSockets, templates, and real integrations come in 
 # 1. Create your env file
 cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
 
-# 2. Set a real JWT secret in .env (any long random string), e.g.:
+# 2. Set the two required secrets in .env:
+#    JWT_SECRET      any long random string
 python -c "import secrets; print(secrets.token_urlsafe(64))"
+#    ENCRYPTION_KEY  a Fernet key (encrypts stored credentials)
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
-# 3. Boot everything (first run builds the images)
+# 3. Add at least one LLM key (e.g. GEMINI_API_KEY) and, for email, SMTP_USER +
+#    SMTP_PASSWORD (a Gmail App Password). See "Providers and free API keys" below.
+
+# 4. Boot everything (first run builds the images)
 docker compose up --build
 
-# 4. In another terminal, create the demo user
+# 5. In another terminal, create the demo user
 docker compose exec api python -m app.db.seed
 ```
 
@@ -98,13 +108,27 @@ One `pytest` run covers the API suite (`apps/api/tests`) and the engine suite
 ```bash
 docker compose exec api pytest                     # inside the running stack
 docker compose exec api pytest -m "not network"    # skip the one test that calls httpbin.org
+docker compose exec api pytest -m live -s          # real providers (see below)
 ```
 
 API tests run against a real Postgres: a `flowforge_test` database is dropped, recreated, and
 migrated with Alembic at the start of each run, and every test is rolled back afterwards. The
-dev database is never touched. Provider API keys are blanked for the run, so every LLM call
-uses the mock provider. `test_migrations.py` also round-trips every migration
-(upgrade → downgrade → upgrade) on a scratch database and checks it matches the models.
+dev database is never touched. The suite sets `TESTING=true`, which is the only thing (besides
+a node explicitly choosing provider `mock`) that makes the provider factory hand out mocks, so
+unit tests never call real APIs even when real keys are in `.env`. `test_migrations.py` also
+round-trips every migration (upgrade → downgrade → upgrade) on a scratch database and checks it
+matches the models.
+
+**Live tests** (`@pytest.mark.live`) call the real services with the keys in `.env` and are
+skipped unless you select them with `-m live`. Each one skips with a message naming the
+missing variable when its key is blank (and the Ollama test skips when Ollama isn't
+reachable). They cover: Gemini generate/stream/embed and a Gemini node in a graph; Groq and
+OpenRouter generation; Ollama generation; a fallback chain reporting `provider_used`; SMTP +
+IMAP login and an inbox read; the `/api/integrations/{provider}/test` endpoint; and the full
+**Input → Gemini → Gmail → Output** run through the API, which sends a real email from
+`SMTP_USER` to `SMTP_USER` and then confirms it arrived by reading the inbox with a Gmail Read
+workflow. Keys are never printed. Free tiers have small daily quotas, so don't run the live
+suite in a loop.
 
 Locally (venv, with the dockerized Postgres running): `cd apps/api && pytest`.
 
@@ -172,6 +196,121 @@ npm run dev                     # http://localhost:3000
 
 Stop the matching Docker service first (`docker compose stop api web`) so the ports are free.
 
+## Providers and free API keys
+
+Every LLM node has a `provider` (its type's default, e.g. a `groq` node uses `groq`), an
+optional `model` (blank = the provider's default below), `system_prompt`, `user_prompt`,
+`temperature`, `max_tokens`, and an optional `fallback` chain.
+
+| Provider     | Node type    | Adapter                  | Default model (`*_MODEL` to change)  | Key                      |
+| ------------ | ------------ | ------------------------ | ------------------------------------ | ------------------------ |
+| Gemini       | `gemini`     | google-genai (AI Studio) | `gemini-3.5-flash-lite`              | `GEMINI_API_KEY` (free)  |
+| Groq         | `groq`       | OpenAI-compatible        | `llama-3.3-70b-versatile`            | `GROQ_API_KEY` (free)    |
+| OpenRouter   | `openrouter` | OpenAI-compatible        | `openrouter/free` (any `…:free` model works) | `OPENROUTER_API_KEY` (free) |
+| Ollama       | `ollama`     | OpenAI-compatible        | `llama3.2`                           | none (local)             |
+| OpenAI       | `openai`     | OpenAI-compatible        | `gpt-4.1-mini`                       | `OPENAI_API_KEY` (paid)  |
+| Anthropic    | `anthropic`  | anthropic SDK            | `claude-opus-5`                      | `ANTHROPIC_API_KEY` (paid) |
+
+**How to get each free key:**
+
+- **Google AI Studio (Gemini):** sign in at <https://aistudio.google.com/apikey>, click
+  **Create API key**, and put it in `GEMINI_API_KEY`. Free-tier quotas are per model and per
+  day and they change: when this was written, `gemini-3.5-flash-lite` allowed about 500 free
+  requests/day and `gemini-3.8-flash` only 20, hence the default. Check yours at
+  <https://aistudio.google.com/rate-limit>.
+- **Groq:** create an account at <https://console.groq.com>, open **API Keys**
+  (<https://console.groq.com/keys>), create one, and set `GROQ_API_KEY`. Current models:
+  <https://console.groq.com/docs/models>.
+- **OpenRouter:** sign up at <https://openrouter.ai>, create a key at
+  <https://openrouter.ai/settings/keys>, and set `OPENROUTER_API_KEY`. Free models end in
+  `:free` (for example `google/gemma-4-31b-it:free`). The default `openrouter/free` picks one of
+  whichever free models are available. The list: <https://openrouter.ai/models?max_price=0>.
+- **Ollama (no key):** install it from <https://ollama.com/download>, then pull a model and
+  make sure the server is running:
+
+  ```bash
+  ollama pull llama3.2           # the default OLLAMA_MODEL
+  ollama pull nomic-embed-text   # optional, for embeddings
+  ollama serve                   # if it isn't already running as a service
+  ```
+
+  From the API container Ollama is reached at `http://host.docker.internal:11434/v1` (the
+  default `OLLAMA_BASE_URL` in `.env.example`; Compose maps the name with `extra_hosts`, so it
+  works on Linux as well). For a venv run of the API, set `OLLAMA_BASE_URL=http://localhost:11434/v1`.
+
+**Credentials and the no-mock policy.** A run uses your own stored credential for a provider
+if you've connected one (`/api/integrations`, below), otherwise the server-wide key from `.env`.
+If neither exists, `/validate` reports an `auth_missing` error, and `/run` returns `422` with
+that message without running anything:
+
+```json
+{"code": "auth_missing", "node_id": "groq", "field": "provider",
+ "message": "Node 'groq': Authentication missing for provider 'groq': no API key configured. Set GROQ_API_KEY on the server, or connect a groq credential under Integrations"}
+```
+
+Mocks are used only by the test suite (`TESTING=true`) or when a node explicitly sets
+`"provider": "mock"` (email nodes: `"auth": "mock"`).
+
+**Fallback chains.** `"fallback": ["groq", "openrouter:google/gemma-4-31b-it:free", "ollama"]`
+tries each provider (optionally `provider:model`) in order when the one before it fails. The
+node output reports `provider` (configured), `provider_used` (who answered), `model`, `mock`,
+and `fallback_errors` (what failed on the way), and the API logs which provider answered.
+Providers in the chain are credential-checked at validation time too.
+
+**Rate limits and errors.** HTTP 429, 408, 5xx, and network errors are retried with
+exponential backoff and jitter (`LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECONDS`,
+`LLM_RETRY_MAX_DELAY_SECONDS`). A provider's `Retry-After` / Gemini `RetryInfo` is honoured.
+If it asks for longer than the max delay, the call fails right away rather than stalling the
+workflow, so a fallback provider can answer. Nothing hardcodes free-tier limits. The final
+error lands in the node result, for example `gemini: rate limited (HTTP 429): You exceeded your
+current quota ... [quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier=20]
+(gave up after 1 attempt; provider asked to wait 48s, longer than the 30s retry limit)`.
+Auth errors (401/403) and bad requests are not retried.
+
+**Streaming and embeddings.** Every adapter implements `generate()` and `stream()` (token
+deltas). `embed()` works for Gemini (`gemini-embedding-2`), Ollama (`nomic-embed-text`), and
+OpenAI; Groq, OpenRouter, and Anthropic raise a clear `ProviderNotSupportedError`. Streaming
+is available at the provider level; it isn't pushed to clients yet (that arrives with
+WebSockets).
+
+## Gmail: create an App Password
+
+The Gmail nodes log in to `smtp.gmail.com` (send) and `imap.gmail.com` (read) with your Gmail
+address and a **Google App Password**. Your normal Google password won't work: Gmail answers
+`534 5.7.9 Application-specific password required`.
+
+1. Turn on **2-Step Verification**: <https://myaccount.google.com/signinoptions/two-step-verification>.
+   App Passwords only exist for accounts with it enabled.
+2. Open **App passwords**: <https://myaccount.google.com/apppasswords>. If the page says the
+   setting isn't available, 2-Step Verification is off, or your Workspace admin has disabled
+   App Passwords.
+3. Enter a name (e.g. "FlowForge") and click **Create**. Google shows a 16-letter password like
+   `abcd efgh ijkl mnop`. Copy it; it's shown once. The spaces are optional (FlowForge
+   strips them).
+4. Put your address in `SMTP_USER` and the App Password in `SMTP_PASSWORD` (server-wide), or
+   connect it per user with `POST /api/integrations/gmail/connect`
+   `{"email": "you@gmail.com", "app_password": "abcd efgh ijkl mnop"}`.
+5. Check it with `POST /api/integrations/gmail/test`, which logs in to SMTP and IMAP without
+   sending anything.
+
+IMAP is always on for personal Gmail accounts. Revoking the App Password at the same page
+cuts FlowForge off immediately. SMTP defaults to port 587 with STARTTLS (`SMTP_PORT=465` uses
+implicit TLS), and the SMTP/IMAP calls run in a worker thread so they never block the server.
+Other providers work too: set `SMTP_HOST`/`SMTP_PORT`/`IMAP_HOST`/`IMAP_PORT`.
+
+**Gmail node** (`gmail`): `auth` (`gmail` = your stored credential, else the server's; `mock`
+= send nothing), `to`, `cc`, `bcc` (lists or comma-separated), `subject`, `body` (plain text),
+optional `html_body`, and `attachments`: `[{filename, content, encoding: "text"|"base64",
+content_type}]`, usually filled from references like `{{http.body}}`. Output: `message_id`,
+`status`, `from`, `to`, `cc`, `bcc`, `subject`, `attachments`, `sent_at`, `mock`.
+
+**Gmail Read node** (`gmail_read`): `auth`, `folder` (default `INBOX`), `from_address`,
+`subject`, `unread_only` (default true), `since_days`, `max_results` (default 10, max 50),
+`mark_as_read` (default false: messages are read with `BODY.PEEK`), `include_body`,
+`max_body_chars`. Output: `{{gmail_read.emails}}`, a newest-first list of `{uid, message_id,
+from, from_address, to, cc, subject, date, unread, snippet, body_text, body_truncated,
+attachments: [{filename, content_type, size}], size}`, plus `count` and `folder`.
+
 ## API
 
 ### Auth
@@ -229,7 +368,7 @@ is a `404`).
 | GET    | `/api/workflows/{id}`                 | One workflow, including its `graph`                                |
 | PUT    | `/api/workflows/{id}`                 | Update `name` / `description` / `status`; `graph` fully replaces nodes, edges, and variables and bumps `version` |
 | DELETE | `/api/workflows/{id}`                 | Delete the workflow and its execution history                      |
-| POST   | `/api/workflows/{id}/validate`        | `{valid, errors: [...]}`; an empty list means the graph can run    |
+| POST   | `/api/workflows/{id}/validate`        | `{valid, errors: [...]}`; an empty list means the graph can run (includes `auth_missing` checks) |
 | POST   | `/api/workflows/{id}/run`             | Run synchronously with `{inputs}`; returns the full execution      |
 | GET    | `/api/workflows/{id}/executions`      | Past executions, newest first (`limit`, `offset`)                  |
 | GET    | `/api/executions/{id}`                | One execution with every node's resolved input, output, and timing |
@@ -248,16 +387,38 @@ Notes:
   history rows remain, with `node_id: null` and the `node_key`/`node_type`/`node_label`
   snapshot taken at run time.
 
+### Integrations (credentials)
+
+| Method | Path                                   | Description                                                        |
+| ------ | -------------------------------------- | ------------------------------------------------------------------ |
+| GET    | `/api/integrations`                    | Every provider: `connected` (you stored a credential), `source` (`user` / `server` / `none`: what a run would use), `status`, masked values, `last_test`, default model, where to get a key |
+| POST   | `/api/integrations/{provider}/connect` | Store or replace your credential: `{api_key, model?}` for gemini/groq/openrouter/anthropic, `{api_key, base_url?, model?}` for openai, `{base_url?, model?}` for ollama, `{email, app_password, smtp_*?, imap_*?}` for gmail |
+| DELETE | `/api/integrations/{provider}`         | Remove your credential (runs fall back to the server key, if any)  |
+| POST   | `/api/integrations/{provider}/test`    | A real, minimal call with the credential a run would use: model metadata / list-models for LLMs (no tokens generated), SMTP + IMAP login for gmail. Returns `{success, source, latency_ms, error, details}` |
+
+- **Encryption at rest:** credential values are stored as Fernet ciphertext
+  (`credentials.encrypted_value`) using `ENCRYPTION_KEY`. It may hold several comma-separated
+  keys: the first encrypts, all decrypt, so you can rotate by prepending a new one.
+- **Priority:** your credential beats the server-wide `.env` key; another user never sees or
+  uses yours.
+- **Never returned:** responses only show masked values (`"api_key": "AIz...9xQk"`,
+  `"app_password": "********"`); validation errors on these routes don't echo the request body;
+  and the JSON log formatter redacts every configured or decrypted secret.
+
 **Try it in Swagger** (`/docs`): the request bodies are pre-filled.
 
 1. `POST /api/auth/login` (demo user) → **Authorize** with the `access_token`.
-2. `POST /api/workflows` → copy the `id`.
-3. `PUT /api/workflows/{id}` with the pre-filled Input → Gemini → Gmail → Output graph.
-4. `POST /api/workflows/{id}/validate` → `{"valid": true, "errors": []}`.
-5. `POST /api/workflows/{id}/run` with `{"inputs": {"topic": "..."}}` → `status: "success"`,
-   `final_output.result.summary` is the mock Gemini text, and `final_output.result.email` is
-   the mock Gmail receipt (`status: "sent"`, `message_id: "mock-…"`).
-6. `GET /api/workflows/{id}/executions` → the run is listed.
+2. `GET /api/integrations` → see which providers have a key (`source`). Optionally
+   `POST /api/integrations/gemini/test` to check the key.
+3. `POST /api/workflows` → copy the `id`.
+4. `PUT /api/workflows/{id}` with the pre-filled Input → Gemini → Gmail → Output graph, and
+   change the `recipient` variable to your own address.
+5. `POST /api/workflows/{id}/validate` → `{"valid": true, "errors": []}`, or `auth_missing`
+   errors naming what isn't configured.
+6. `POST /api/workflows/{id}/run` with `{"inputs": {"topic": "..."}}` → `status: "success"`,
+   `final_output.result.summary` is Gemini's real text, and `final_output.result.email` is the
+   Gmail receipt (`status: "sent"`, a real `Message-ID`). The email arrives in the inbox.
+7. `GET /api/workflows/{id}/executions` → the run is listed.
 
 ## Workflow engine
 
@@ -273,27 +434,35 @@ every node's config. In short:
   variable), and `{{system.execution_id}}`. A config value that is exactly one reference keeps
   its type.
 - **Nodes:** `input`, `output`, `text`, `condition` (routes via `true`/`false` edge handles),
-  `delay` (≤ 10 s), `gemini`, `openai`, `anthropic`, `gmail`, `http_request`.
-  `default_registry.describe()` lists them with their JSON config schemas.
+  `delay` (≤ 10 s), `gemini`, `groq`, `openrouter`, `ollama`, `openai`, `anthropic`, `gmail`,
+  `gmail_read`, `http_request`. `default_registry.describe()` lists them with their JSON config
+  schemas.
 - **Validation** catches unknown node types, missing or invalid config, broken edges, cycles
-  (all cycles are rejected for now), and unresolvable references: unknown nodes or variables,
-  nodes that aren't upstream, and output keys a node doesn't produce.
+  (all cycles are rejected for now), unresolvable references (unknown nodes or variables,
+  nodes that aren't upstream, and output keys a node doesn't produce), and, when given the
+  run's `ExecutionServices`, providers without credentials (`auth_missing`).
 - **Execution** runs nodes in topological order, resolving each node's config just before it
   runs. The first failure stops the run and skips the rest. Nodes behind a condition branch
   that wasn't taken are skipped without failing the run. Each node gets a timeout of
   `WORKFLOW_NODE_TIMEOUT_SECONDS`.
 
-**Providers:** each LLM node uses the real SDK adapter when its key (`GEMINI_API_KEY`,
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) is set, and otherwise falls back to a deterministic
-mock (`[MOCK RESPONSE to: <first 50 chars>]`) with a warning in the logs. Email always uses
-the mock in this phase: nothing is sent, and the receipt (a `mock-…` message id) is recorded in
-the execution history. Adapter details:
+**Providers** (see [Providers and free API keys](#providers-and-free-api-keys)): real
+adapters only; a missing credential raises `MissingCredentialsError` ("Authentication
+missing ..."). Adapter details:
 
+- **Gemini:** google-genai against Google AI Studio; defaults to `gemini-3.5-flash-lite`,
+  embeddings `gemini-embedding-2`. A `404` for a retired model (for example `gemini-2.5-flash`,
+  which is no longer offered to new users) is passed through as-is.
+- **OpenAI-compatible** (`OpenAICompatibleProvider`): one adapter with presets for Groq
+  (`https://api.groq.com/openai/v1`), OpenRouter (`https://openrouter.ai/api/v1`, sends
+  `max_tokens` and an `X-Title` header), Ollama (no key; `/test` checks that the model is
+  pulled), and OpenAI (`temperature` omitted for reasoning models).
 - **Anthropic:** defaults to `claude-opus-5` and drops `temperature` for current Claude models,
   which reject sampling parameters. For Opus 5 it enables server-side refusal fallbacks
-  (`fallbacks: "default"`).
-- **OpenAI:** defaults to `gpt-4.1-mini`; `temperature` is omitted for reasoning models.
-- **Gemini:** defaults to `gemini-2.5-flash`.
+  (`fallbacks: "default"`); above 16k `max_tokens` it streams internally.
+- **Email:** `SMTPEmailProvider` (send) and `IMAPEmailProvider` (read), stdlib-based, run in a
+  worker thread, with retries for connection problems and 4xx replies only (a dropped
+  connection mid-send isn't retried, so a message is never sent twice).
 
 ## Database schema
 
@@ -308,8 +477,8 @@ All tables use UUID primary keys, `timestamptz` timestamps, and JSONB for JSON c
 | `workflow_variables`  | `key`, `value`, `var_type` enum                                                   |
 | `workflow_executions` | `status` and `trigger` enums, timings, `final_output_json`, `error_message`       |
 | `node_executions`     | per-node status, input/output JSON, timings, `duration_ms`; `node_id` is nullable, plus a `node_key`/`node_type`/`node_label` snapshot |
-| `credentials`         | per-user provider secrets (`encrypted_value`; encryption lands in a later phase)  |
-| `integrations`        | per-user provider connection `status` enum and metadata                           |
+| `credentials`         | per-user provider secrets: Fernet-encrypted JSON in `encrypted_value`; unique per (user, provider) |
+| `integrations`        | per-user connection `status` enum and non-secret metadata (masked values, last test); unique per (user, provider) |
 | `templates`           | `name`, `category`, starter `graph_json`                                          |
 
 Child rows cascade on delete: deleting a workflow removes its nodes, edges, variables, and
@@ -318,7 +487,7 @@ is `ON DELETE SET NULL`, and the snapshot columns keep the row readable.
 `workflow_executions.triggered_by_user_id` is set to NULL if that user is deleted.
 
 Migrations: `initial schema` → `preserve node execution history` (node_id SET NULL +
-snapshot) → `graph node keys`. The downgrade of the second one deletes history rows whose
+snapshot) → `graph node keys` → `unique credential per provider`. The downgrade of the second one deletes history rows whose
 node is gone, since those can't satisfy the old NOT NULL constraint.
 
 ## Environment variables
@@ -330,19 +499,33 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `DATABASE_URL`                  | `postgresql+asyncpg://…@localhost:5433/flowforge` | API (local run) |
 | `REDIS_URL`                     | `redis://localhost:6379/0`       | API (not used yet)   |
 | `JWT_SECRET`                    | none, **required** (≥ 32 chars)  | API                  |
+| `ENCRYPTION_KEY`                | none, **required** (Fernet key; comma-separate to rotate) | API (stored credentials) |
 | `JWT_ALGORITHM`                 | `HS256`                          | API                  |
 | `ACCESS_TOKEN_EXPIRE_MINUTES`   | `30`                             | API                  |
 | `REFRESH_TOKEN_EXPIRE_DAYS`     | `7`                              | API                  |
 | `CORS_ORIGINS`                  | `http://localhost:3000,http://127.0.0.1:3000` | API     |
 | `AUTH_RATE_LIMIT`               | `10/minute`                      | API                  |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | blank (mock mode) | API (LLM nodes) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL` | blank, `gemini-3.5-flash-lite`, `gemini-embedding-2` | Gemini nodes |
+| `GROQ_API_KEY`, `GROQ_MODEL`    | blank, `llama-3.3-70b-versatile` | Groq nodes           |
+| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | blank, `openrouter/free` | OpenRouter nodes     |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBEDDING_MODEL` | `http://host.docker.internal:11434/v1` (`.env.example`), `llama3.2`, `nomic-embed-text` | Ollama nodes |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | blank, `gpt-4.1-mini`           | OpenAI nodes         |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | blank, `claude-opus-5`    | Claude nodes         |
+| `SMTP_USER`, `SMTP_PASSWORD`    | blank (Gmail address + App Password) | Gmail / Gmail Read nodes |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_FROM_NAME` | `smtp.gmail.com`, `587`, `auto`, blank | Gmail node |
+| `IMAP_HOST`, `IMAP_PORT`        | `imap.gmail.com`, `993`          | Gmail Read node      |
+| `LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECONDS`, `LLM_RETRY_MAX_DELAY_SECONDS` | `3`, `1`, `30` | backoff for 429/5xx/network errors |
+| `LLM_REQUEST_TIMEOUT_SECONDS`   | `60`                             | per provider request |
 | `WORKFLOW_NODE_TIMEOUT_SECONDS` | `120`                            | API (per-node limit during a run) |
+| `TESTING`                       | unset                            | set by the test suite only: all providers become mocks |
 | `POSTGRES_USER/PASSWORD/DB`     | `flowforge`                      | Compose              |
 | `*_HOST_PORT`                   | `5433`, `6379`, `8000`, `3000`   | Compose port mapping |
 | `NEXT_PUBLIC_API_URL`           | `http://localhost:8000`          | Web                  |
 
 Inside Compose, `DATABASE_URL` and `REDIS_URL` are overridden to use the `postgres` and
-`redis` service hostnames, so the same `.env` works for both Docker and local runs.
+`redis` service hostnames, so the same `.env` works for both Docker and local runs. A blank
+value (`GROQ_API_KEY=`) means "not set". Keep comments on their own lines in `.env`; not every
+dotenv parser accepts trailing `# comments`.
 
 ## Project structure
 
@@ -359,14 +542,14 @@ Inside Compose, `DATABASE_URL` and `REDIS_URL` are overridden to use the `postgr
 │   │   ├── requirements.txt      # pinned deps + the engine (editable)
 │   │   ├── requirements-dev.txt  # + pytest
 │   │   ├── Dockerfile
-│   │   ├── tests/                # API tests (auth, workflows, execution, history, migrations)
+│   │   ├── tests/                # API tests (auth, workflows, execution, integrations, migrations; live)
 │   │   └── app/
 │   │       ├── main.py           # app, CORS, request logging, rate-limit handler
-│   │       ├── core/             # config, security (bcrypt/JWT), logging, rate limiter
+│   │       ├── core/             # config, security (bcrypt/JWT), crypto (Fernet), logging, rate limiter
 │   │       ├── db/               # declarative base, async session, seed
 │   │       ├── models/           # SQLAlchemy models + enums
 │   │       ├── schemas/          # Pydantic request/response models
-│   │       ├── services/         # graph sync, run + persist, provider wiring
+│   │       ├── services/         # graph sync, run + persist, credentials + per-user providers
 │   │       ├── api/              # deps (get_current_user) + routes
 │   │       └── alembic/          # env.py + versions/
 │   ├── web/                      # Next.js frontend (see apps/web/README.md)
@@ -389,9 +572,25 @@ Inside Compose, `DATABASE_URL` and `REDIS_URL` are overridden to use the `postgr
   bind mounts. `npm run dev` on the host still uses Turbopack.
 - **`429 Too many requests` while testing.** Wait a minute, or raise `AUTH_RATE_LIMIT` in `.env`
   and restart the API.
+- **`auth_missing` / "Authentication missing for provider ..."** The node's provider has no key
+  (neither yours nor the server's). Add it to `.env` and restart the API, or connect it with
+  `POST /api/integrations/{provider}/connect`. For a deliberate dry run, set the node's
+  `provider` (or an email node's `auth`) to `mock`.
+- **Gmail `534 5.7.9 Application-specific password required`.** `SMTP_PASSWORD` is your normal
+  password; create an App Password (see [Gmail: create an App Password](#gmail-create-an-app-password)).
+- **Gemini `429 ... quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier=N`.** The
+  free daily quota for that model is used up. Wait for the reset, switch `GEMINI_MODEL` to a
+  model with more free quota, or add a `fallback` chain.
+- **Ollama "cannot connect ... is `ollama serve` running?"** Start Ollama on the host. From
+  Docker, `OLLAMA_BASE_URL` must be `http://host.docker.internal:11434/v1`, not `localhost`.
+  "model is not pulled" means you need to run `ollama pull <model>`.
+- **API won't start: `ENCRYPTION_KEY` missing or invalid.** Generate one (see Quick start). If
+  you replace the key, stored credentials can't be decrypted and are ignored (with a warning)
+  until users reconnect them. Prepend the new key instead (`NEW,OLD`) to rotate.
 - **Containers exit with code 255 after the machine sleeps.** Docker Desktop's file sharing can
   drop bind mounts (`EIO` errors in the logs). `api` and `web` use `restart: unless-stopped` and
   come back on their own; if not, run `docker compose up -d`.
 - **Security note: HTTP Request node.** It can call any URL the API container can reach,
   including internal addresses like `http://postgres:5432`. That's fine for local development,
-  but add an allow/deny list before exposing the API to untrusted users.
+  but add an allow/deny list before exposing the API to untrusted users. The same applies to
+  the per-user `base_url` accepted for Ollama and OpenAI credentials.

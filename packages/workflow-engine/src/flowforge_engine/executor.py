@@ -43,10 +43,11 @@ async def execute_graph(
     marked skipped. Nodes behind a Condition branch that wasn't taken are skipped too,
     but that is not a failure.
 
-    Raises GraphValidationFailed (without running anything) if the graph is invalid.
+    Raises GraphValidationFailed (without running anything) if the graph is invalid,
+    including when a node's provider has no credentials ("Authentication missing").
     """
     registry = registry or default_registry
-    issues = validate_workflow(workflow, registry=registry)
+    issues = validate_workflow(workflow, registry=registry, services=context.services)
     if issues:
         raise GraphValidationFailed(issues)
 

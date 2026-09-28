@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -6,7 +7,8 @@ from pydantic import ValidationError
 
 from flowforge_engine import get_node_definition
 from flowforge_engine.errors import ProviderError
-from flowforge_engine.providers import MockEmailProvider
+from flowforge_engine.models import GraphNode
+from flowforge_engine.providers import LLM_PROVIDERS, MockEmailProvider, ProviderSettings
 from flowforge_engine.services import ExecutionServices
 from flowforge_engine.testing import make_context, mock_services
 
@@ -116,35 +118,124 @@ class TestConditionNode:
             )
 
 
+class FailingProvider:
+    is_mock = False
+
+    def __init__(self, name, message="rate limited (HTTP 429): quota exceeded"):
+        self.name, self.message, self.calls = name, message, 0
+
+    async def generate(self, **kwargs):
+        self.calls += 1
+        raise ProviderError(self.name, self.message)
+
+
 class TestLLMNodes:
-    @pytest.mark.parametrize("node_type", ["gemini", "openai", "anthropic"])
-    async def test_mock_response(self, node_type):
+    LLM_TYPES = ["gemini", "groq", "openrouter", "ollama", "openai", "anthropic"]
+
+    @pytest.mark.parametrize("node_type", LLM_TYPES)
+    async def test_mock_response_in_testing_mode(self, node_type):
         prompt = "Summarize the following paragraph about the history of workflow engines"
         result = await run(node_type, {"user_prompt": prompt, "system_prompt": "Be brief."})
         assert result.success
         assert result.output["response"] == f"[MOCK RESPONSE to: {prompt[:50]}]"
-        assert result.output["provider"] == node_type
+        assert result.output["provider"] == result.output["provider_used"] == node_type
         assert result.output["mock"] is True
-        assert result.output["model"] == get_node_definition(node_type).config_schema.model_fields["model"].default
+        assert result.output["fallback_errors"] == []
+        # No model in config -> the provider's default model.
+        assert result.output["model"] == LLM_PROVIDERS[node_type].default_model
 
-    async def test_default_models(self):
-        defaults = {t: get_node_definition(t).config_schema.model_fields["model"].default for t in ("gemini", "openai", "anthropic")}
-        assert defaults == {"gemini": "gemini-2.5-flash", "openai": "gpt-4.1-mini", "anthropic": "claude-opus-5"}
+    def test_config_has_the_required_fields(self):
+        for node_type in self.LLM_TYPES:
+            fields = get_node_definition(node_type).config_schema.model_fields
+            expected = {"provider", "model", "system_prompt", "user_prompt", "temperature", "max_tokens", "fallback"}
+            assert expected <= set(fields)
+            assert fields["provider"].default == node_type
+
+    def test_default_models(self):
+        defaults = {name: info.default_model for name, info in LLM_PROVIDERS.items()}
+        assert defaults == {
+            "gemini": "gemini-3.5-flash-lite",
+            "groq": "llama-3.3-70b-versatile",
+            "openrouter": "openrouter/free",
+            "ollama": "llama3.2",
+            "openai": "gpt-4.1-mini",
+            "anthropic": "claude-opus-5",
+            "mock": "mock",
+        }
+
+    async def test_model_override_and_settings_default(self):
+        settings = ProviderSettings(testing=True).with_account("groq", model="openai/gpt-oss-20b")
+        services = ExecutionServices(provider_settings=settings)
+        default = await run("groq", {"user_prompt": "hi"}, services=services)
+        assert default.output["model"] == "openai/gpt-oss-20b"
+        explicit = await run("groq", {"user_prompt": "hi", "model": "llama-3.1-8b-instant"}, services=services)
+        assert explicit.output["model"] == "llama-3.1-8b-instant"
+
+    async def test_explicit_mock_provider_works_without_testing_mode(self):
+        services = ExecutionServices(provider_settings=ProviderSettings())  # no keys, not testing
+        result = await run("gemini", {"user_prompt": "hi", "provider": "mock"}, services=services)
+        assert result.success
+        assert result.output["provider_used"] == "mock" and result.output["mock"] is True
+
+    async def test_missing_key_fails_instead_of_mocking(self):
+        services = ExecutionServices(provider_settings=ProviderSettings())  # no keys, not testing
+        result = await run("gemini", {"user_prompt": "hi"}, services=services)
+        assert not result.success
+        assert result.error.startswith("Authentication missing for provider 'gemini'")
+        assert "GEMINI_API_KEY" in result.error
 
     async def test_provider_error_becomes_node_failure(self):
-        class FailingProvider:
-            name, is_mock = "gemini", False
-
-            async def generate(self, **kwargs):
-                raise ProviderError("gemini", "API error 429: quota exceeded")
-
-        services = ExecutionServices(llm_providers={"gemini": FailingProvider()})
-        definition = get_node_definition("gemini")
-        result = await definition.execute(
-            make_context(services=services), definition.config_schema.model_validate({"user_prompt": "hi"})
-        )
+        services = ExecutionServices(llm_providers={"gemini": FailingProvider("gemini")})
+        result = await run("gemini", {"user_prompt": "hi"}, services=services)
         assert not result.success
-        assert result.error == "gemini: API error 429: quota exceeded"
+        assert result.error == "gemini: rate limited (HTTP 429): quota exceeded"
+        assert result.output["fallback_errors"][0]["provider"] == "gemini"
+
+    async def test_fallback_chain_uses_the_next_provider(self, caplog):
+        caplog.set_level(logging.INFO, logger="flowforge_engine")
+        gemini, groq = FailingProvider("gemini"), FailingProvider("groq", "server error (HTTP 503): overloaded")
+        services = ExecutionServices(
+            provider_settings=ProviderSettings(testing=True),
+            llm_providers={"gemini": gemini, "groq": groq},
+        )
+        result = await run(
+            "gemini",
+            {"user_prompt": "hi", "fallback": ["groq", "openrouter:google/gemma-4-31b-it:free", "ollama"]},
+            services=services,
+        )
+        assert result.success
+        assert result.output["provider"] == "gemini"
+        assert result.output["provider_used"] == "openrouter"
+        assert result.output["model"] == "google/gemma-4-31b-it:free"
+        assert [e["provider"] for e in result.output["fallback_errors"]] == ["gemini", "groq"]
+        assert gemini.calls == groq.calls == 1
+        assert "LLM node answered" in caplog.text
+
+    async def test_fallback_chain_all_failing(self):
+        services = ExecutionServices(
+            provider_settings=ProviderSettings(),
+            llm_providers={"gemini": FailingProvider("gemini")},
+        )
+        result = await run("gemini", {"user_prompt": "hi", "fallback": ["groq"]}, services=services)
+        assert not result.success
+        assert result.error.startswith("All 2 providers failed: gemini: rate limited")
+        assert "Authentication missing for provider 'groq'" in result.error
+
+    def test_fallback_entries_must_name_known_providers(self):
+        schema = get_node_definition("gemini").config_schema
+        with pytest.raises(ValidationError, match="unknown provider 'mistral'"):
+            schema.model_validate({"user_prompt": "hi", "fallback": ["mistral"]})
+        with pytest.raises(ValidationError):
+            schema.model_validate({"user_prompt": "hi", "provider": "mistral"})
+
+    def test_required_providers(self):
+        definition = get_node_definition("gemini")
+        node = GraphNode(id="g", type="gemini", config={"user_prompt": "x", "fallback": ["groq", "ollama:qwen3"]})
+        assert definition.required_providers(node) == [
+            ("gemini", "provider"), ("groq", "fallback"), ("ollama", "fallback"),
+        ]
+        templated = GraphNode(id="g", type="gemini", config={"user_prompt": "x", "provider": "{{vars.p}}"})
+        assert definition.required_providers(templated) == []
 
     def test_anthropic_temperature_capped_at_one(self):
         schema = get_node_definition("anthropic").config_schema
@@ -156,27 +247,68 @@ class TestGmailNode:
     async def test_sends_through_mock_provider(self):
         result = await run(
             "gmail",
-            {"to": "a@example.com, b@example.com", "cc": ["c@example.com"], "subject": "Hi", "body": "Body text"},
+            {"to": "a@example.com, b@example.com", "cc": ["c@example.com"], "bcc": "d@example.com",
+             "subject": "Hi", "body": "Body text", "html_body": "<p>Body</p>",
+             "attachments": [{"filename": "notes.txt", "content": "hello"}]},
         )
         assert result.success
         assert result.output["status"] == "sent"
         assert result.output["message_id"].startswith("mock-")
         assert result.output["to"] == ["a@example.com", "b@example.com"]
         assert result.output["cc"] == ["c@example.com"]
+        assert result.output["bcc"] == ["d@example.com"]
+        assert result.output["attachments"] == ["notes.txt"]
         assert result.output["mock"] is True
 
         [sent] = MockEmailProvider.outbox()
         assert sent.message_id == result.output["message_id"]
-        assert sent.body == "Body text"
+        assert sent.body == "Body text" and sent.html_body == "<p>Body</p>"
 
     async def test_rejects_invalid_addresses(self):
-        result = await run("gmail", {"to": "not-an-email", "subject": "s", "body": "b"})
+        result = await run("gmail", {"to": "a@example.com", "bcc": "not-an-email", "subject": "s", "body": "b"})
         assert not result.success and "Invalid email address(es): not-an-email" in result.error
         assert MockEmailProvider.outbox() == []
 
     async def test_requires_a_recipient(self):
         result = await run("gmail", {"to": " , ", "subject": "s", "body": "b"})
         assert not result.success and "At least one recipient" in result.error
+
+    async def test_missing_credentials_fail_the_node(self):
+        services = ExecutionServices(provider_settings=ProviderSettings())
+        result = await run("gmail", {"to": "a@example.com", "subject": "s", "body": "b"}, services=services)
+        assert not result.success
+        assert result.error.startswith("Authentication missing for provider 'gmail'")
+        assert "SMTP_USER" in result.error
+
+    async def test_mock_auth_sends_nothing_even_without_testing(self):
+        services = ExecutionServices(provider_settings=ProviderSettings())
+        config = {"auth": "mock", "to": "a@example.com", "subject": "s", "body": "b"}
+        result = await run("gmail", config, services=services)
+        assert result.success and result.output["mock"] is True
+
+
+class TestGmailReadNode:
+    async def test_reads_the_mock_mailbox(self):
+        await run("gmail", {"to": "a@example.com", "subject": "Invoice 42", "body": "Please pay"})
+        await run("gmail", {"to": "a@example.com", "subject": "Hello", "body": "Hi there"})
+        result = await run("gmail_read", {"subject": "invoice"})
+        assert result.success
+        assert result.output["count"] == 1
+        [message] = result.output["emails"]
+        assert message["subject"] == "Invoice 42"
+        assert message["body_text"] == "Please pay"
+        assert result.output["folder"] == "INBOX" and result.output["mock"] is True
+
+    def test_limits(self):
+        schema = get_node_definition("gmail_read").config_schema
+        with pytest.raises(ValidationError):
+            schema.model_validate({"max_results": 500})
+        assert schema.model_validate({}).unread_only is True
+
+    async def test_missing_credentials_fail_the_node(self):
+        services = ExecutionServices(provider_settings=ProviderSettings())
+        result = await run("gmail_read", {}, services=services)
+        assert not result.success and "Authentication missing for provider 'gmail'" in result.error
 
 
 class TestHTTPRequestNode:

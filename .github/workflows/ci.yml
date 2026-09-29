@@ -82,7 +82,7 @@ jobs:
 
       # pytest.ini runs the API suite and the engine suite; live tests call real providers.
       - name: Run tests
-        run: pytest -q -m "not live" -p no:cacheprovider
+        run: pytest -q -m "not live and not network" -p no:cacheprovider
 
   web:
     name: Web (typecheck, lint, vitest)

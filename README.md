@@ -1,5 +1,7 @@
 # FlowForge AI
 
+[![CI](https://github.com/Eyeroniq/AutoFlow-Ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eyeroniq/AutoFlow-Ai/actions/workflows/ci.yml)
+
 A visual AI workflow automation builder. This repository is being built in phases.
 
 - **Phase 1:** monorepo skeleton, Docker Compose stack, the full database schema, JWT

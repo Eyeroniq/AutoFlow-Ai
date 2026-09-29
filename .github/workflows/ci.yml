@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch or PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: flowforge
+          POSTGRES_PASSWORD: flowforge
+          POSTGRES_DB: flowforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flowforge -d flowforge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://flowforge:flowforge@localhost:5432/flowforge
+      REDIS_URL: redis://localhost:6379/0
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements-dev.txt
+            packages/workflow-engine/pyproject.toml
+
+      # The binaries the OCR and Speech to Text tests use (they skip without them).
+      - name: Install tesseract and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr ffmpeg
+
+      # requirements.txt installs the engine editable from ../../packages, so run from apps/api.
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Throwaway secrets for this run only (the settings require both).
+      - name: Generate test secrets
+        run: |
+          echo "JWT_SECRET=$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" >> "$GITHUB_ENV"
+          echo "ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      # pytest.ini runs the API suite and the engine suite; live tests call real providers.
+      - name: Run tests
+        run: pytest -q -m "not live" -p no:cacheprovider
+
+  web:
+    name: Web (typecheck, lint, vitest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # next-env.d.ts and the route types (PageProps, LayoutProps) are generated, not committed.
+      - name: Typecheck
+        run: |
+          npx next typegen
+          npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+  build:
+    name: Docker images build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # The compose files read the root .env; the example is enough to build.
+      - name: Create .env
+        run: cp .env.example .env
+
+      - name: Build images (no push)
+        run: docker compose build

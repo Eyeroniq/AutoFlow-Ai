@@ -22,7 +22,8 @@ def require(*names):
     env = live_env()
     missing = [name for name in names if not env.get(name)]
     if missing:
-        pytest.skip(f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} blank; set it in .env to run this live test")
+        one = len(missing) == 1
+        pytest.skip(f"{' and '.join(missing)} {'is' if one else 'are'} blank; set {'it' if one else 'them'} in .env to run this live test")
 
 
 def report(label, **fields):
@@ -98,6 +99,86 @@ class TestOpenAICompatible:
         if model not in pulled and f"{model}:latest" not in pulled:
             pytest.skip(f"Ollama is running but '{model}' isn't pulled; run `ollama pull {model}`")
         await generate("ollama")
+
+
+async def run_llm_node(node_type, settings=None, **config):
+    """One LLM node of `node_type` in a real graph; returns its output."""
+    graph = WorkflowGraph(
+        nodes=[node("llm", node_type, user_prompt=PROMPT, max_tokens=512, **config), node("out", "output", value="{{llm.response}}")],
+        edges=chain("llm", "out"),
+    )
+    start = time.perf_counter()
+    result = await execute_graph(graph, make_context(services=ExecutionServices(provider_settings=settings or live_settings())))
+    assert result.status is RunStatus.SUCCESS, result.error
+    output = result.result_for("llm").output
+    report(f"{node_type} node", provider_used=output["provider_used"], model=output["model"], mock=output["mock"],
+           latency_ms=round((time.perf_counter() - start) * 1000), response=repr(output["response"][:160]))
+    assert output["mock"] is False and output["response"].strip()
+    return output
+
+
+class TestNewLLMProviders:
+    async def test_mistral_node(self):
+        require("MISTRAL_API_KEY")
+        await run_llm_node("mistral")
+
+    async def test_cerebras_node(self):
+        require("CEREBRAS_API_KEY")
+        await run_llm_node("cerebras")
+
+    async def test_custom_node(self):
+        require("CUSTOM_OPENAI_BASE_URL", "CUSTOM_OPENAI_MODEL")
+        await run_llm_node("custom_llm")
+
+    async def test_custom_node_against_groqs_openai_compatible_endpoint(self):
+        """The Custom provider end to end with a real OpenAI-compatible server: Groq's, with
+        GROQ_API_KEY (nothing is stored; the settings exist only in this test)."""
+        require("GROQ_API_KEY")
+        env = live_env()
+        settings = live_settings().model_copy(update={"custom": live_settings().custom.model_validate({
+            "api_key": env["GROQ_API_KEY"], "base_url": "https://api.groq.com/openai/v1", "model": "openai/gpt-oss-20b"})})
+        output = await run_llm_node("custom_llm", settings)
+        assert output["provider_used"] == "custom" and output["model"] == "openai/gpt-oss-20b"
+
+    async def test_custom_endpoint_on_a_private_address_is_refused(self):
+        settings = live_settings().model_copy(update={"custom": live_settings().custom.model_validate({
+            "base_url": "http://169.254.169.254/v1", "model": "m"})})
+        with pytest.raises(Exception, match="Blocked"):
+            get_llm_provider("custom", settings)
+
+
+class TestAudioAndSearch:
+    async def test_groq_whisper_on_the_sample_meeting(self, tmp_path):
+        require("GROQ_API_KEY")
+        from pathlib import Path
+
+        from flowforge_engine.providers import get_transcriber
+
+        sample = Path(__file__).resolve().parents[3] / "samples" / "team-meeting.mp3"
+        if not sample.exists():
+            sample = Path("/samples/team-meeting.mp3")
+        settings = live_settings()
+        start = time.perf_counter()
+        out = await get_transcriber("groq", settings).transcribe(sample, model=settings.speech.groq_model, prompt="FlowForge, Groq")
+        report("groq whisper", latency_ms=round((time.perf_counter() - start) * 1000), language=out["language"],
+               segments=len(out["segments"]), text=repr(out["text"][:120]))
+        assert out["language"] == "en" and "October" in out["text"]
+
+    async def test_duckduckgo_search(self):
+        from flowforge_engine.providers import get_search_provider
+
+        results = await get_search_provider("duckduckgo", live_settings()).search("QUIC transport protocol RFC 9000", max_results=3)
+        report("duckduckgo", count=len(results), urls=[r["url"] for r in results])
+        assert results and all(r["url"].startswith("http") for r in results)
+
+    async def test_tavily_search_and_usage(self):
+        require("TAVILY_API_KEY")
+        from flowforge_engine.providers import get_search_provider
+
+        tavily = get_search_provider("tavily", live_settings())
+        results = await tavily.search("QUIC transport protocol RFC 9000", max_results=3)
+        report("tavily", count=len(results), urls=[r["url"] for r in results], usage=await tavily.verify())
+        assert results
 
 
 async def test_fallback_chain_reports_the_provider_that_answered():

@@ -1,10 +1,14 @@
 import { API_URL } from "./config";
 import { isTokenExpired, tokenStorage } from "./token-storage";
 import type {
+  Deployment,
+  DeploymentWithKey,
+  EmailCheckResult,
   ExecutionAccepted,
   ExecutionDetail,
   ExecutionListItem,
   ExecutionStatus,
+  ExecutionTrigger,
   Integration,
   IntegrationConnect,
   IntegrationTestResult,
@@ -13,7 +17,12 @@ import type {
   NodeTestResult,
   NodeType,
   RegisterPayload,
+  SchedulePreview,
+  Template,
   TokenResponse,
+  TriggerSettings,
+  TriggersResponse,
+  TriggerType,
   UploadedFile,
   User,
   ValidationIssue,
@@ -170,6 +179,32 @@ export async function getFreshAccessToken(): Promise<string | null> {
 const authed = <T>(path: string, options: Omit<RequestOptions, "auth"> = {}) =>
   request<T>(path, { ...options, auth: true });
 
+/**
+ * GET a file the API serves only to signed-in users (so a plain link can't carry the
+ * token) and hand it to the browser as a download.
+ */
+export async function downloadAuthed(path: string, fallbackName: string): Promise<void> {
+  let token = await getFreshAccessToken();
+  let response = await send(path, {}, token);
+  if (response.status === 401 && tokenStorage.getRefreshToken() && (await refreshSession())) {
+    token = tokenStorage.getAccessToken();
+    response = await send(path, {}, token);
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new ApiError(response.status, describeDetail((data as { detail?: unknown } | null)?.detail) ?? `Download failed (${response.status})`, data);
+  }
+  const name = /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export interface UploadOptions {
   /** Called with 0..1 as the bytes go out. */
   onProgress?: (fraction: number) => void;
@@ -261,14 +296,43 @@ export const api = {
       authed<ExecutionAccepted>(`/api/workflows/${enc(id)}/run`, { method: "POST", body: { inputs } }),
     executions: (id: string, params: { limit?: number; offset?: number } = {}) =>
       authed<ExecutionListItem[]>(`/api/workflows/${enc(id)}/executions${query(params)}`),
+    triggers: (id: string) => authed<TriggersResponse>(`/api/workflows/${enc(id)}/triggers`),
+    /** Save a trigger's config and switch it on or off; resolves with every trigger. */
+    saveTrigger: (id: string, type: TriggerType, body: { enabled: boolean; config?: Record<string, unknown> }) =>
+      authed<TriggersResponse>(`/api/workflows/${enc(id)}/triggers/${type}`, { method: "PUT", body }),
+    saveTriggerSettings: (id: string, body: TriggerSettings) =>
+      authed<TriggersResponse>(`/api/workflows/${enc(id)}/trigger-settings`, { method: "PUT", body }),
+    checkEmail: (id: string) => authed<EmailCheckResult>(`/api/workflows/${enc(id)}/triggers/email/check`, { method: "POST" }),
     testNode: (id: string, nodeKey: string, body: NodeTestRequest) =>
       authed<NodeTestResult>(`/api/workflows/${enc(id)}/nodes/${enc(nodeKey)}/test`, { method: "POST", body }),
   },
+  triggers: {
+    previewSchedule: (body: { cron: string; timezone: string; count?: number }) =>
+      authed<SchedulePreview>("/api/triggers/schedule-preview", { method: "POST", body }),
+  },
+  templates: {
+    list: () => authed<Template[]>("/api/templates"),
+    use: (slug: string, timezone?: string) =>
+      authed<Workflow>(`/api/templates/${enc(slug)}/use`, { method: "POST", body: { timezone } }),
+  },
   executions: {
-    list: (params: { limit?: number; offset?: number; status?: ExecutionStatus; workflow_id?: string } = {}) =>
-      authed<ExecutionListItem[]>(`/api/executions${query(params)}`),
+    list: (
+      params: { limit?: number; offset?: number; status?: ExecutionStatus; workflow_id?: string; trigger?: ExecutionTrigger } = {},
+    ) => authed<ExecutionListItem[]>(`/api/executions${query(params)}`),
+    /** Download the final output: JSON as is, or CSV (one row per record, e.g. per entity). */
+    downloadOutput: (id: string, format: "json" | "csv") =>
+      downloadAuthed(`/api/executions/${enc(id)}/output?format=${format}`, `execution-${id.slice(0, 8)}-output.${format}`),
     get: (id: string, signal?: AbortSignal) => authed<ExecutionDetail>(`/api/executions/${enc(id)}`, { signal }),
     stop: (id: string) => authed<ExecutionDetail>(`/api/executions/${enc(id)}/stop`, { method: "POST" }),
+  },
+  deployments: {
+    list: (params: { workflow_id?: string } = {}) => authed<Deployment[]>(`/api/deployments${query(params)}`),
+    /** Deploy or redeploy the saved graph; `api_key` is set only on the first deploy. */
+    deploy: (workflowId: string) =>
+      authed<DeploymentWithKey>("/api/deployments", { method: "POST", body: { workflow_id: workflowId } }),
+    /** A new API key (in `api_key`); the old one is revoked. The deployed graph doesn't change. */
+    rotateKey: (deploymentId: string) =>
+      authed<DeploymentWithKey>(`/api/deployments/${enc(deploymentId)}/rotate-key`, { method: "POST" }),
   },
   files: {
     list: () => authed<UploadedFile[]>("/api/files"),

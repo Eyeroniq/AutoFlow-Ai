@@ -6,7 +6,7 @@ import type { WorkflowVariable } from "@/lib/types";
 
 import { ancestorsOf, type Catalog, type FlowEdge, type FlowNode, IDENTIFIER, outputKeysFor } from "./graph";
 
-export type ReferenceKind = "input" | "node" | "variable" | "system";
+export type ReferenceKind = "input" | "node" | "variable" | "system" | "item";
 
 export interface ReferenceSuggestion {
   /** What goes between the braces, e.g. "gemini.response". */
@@ -18,21 +18,32 @@ export interface ReferenceSuggestion {
 
 export const SYSTEM_REFERENCES = ["system.execution_id", "system.workflow_id", "system.node_id"];
 
+/** Offered first in a list node's per-item fields (For Each's prompt, Join's template). */
+export const ITEM_REFERENCES: ReferenceSuggestion[] = [
+  { ref: "item", kind: "item", detail: "the current list item" },
+  { ref: "item.title", kind: "item", detail: "a field of the item" },
+  { ref: "index", kind: "item", detail: "its position (0-based)" },
+];
+
 interface SuggestionContext {
   nodeId: string;
   nodes: FlowNode[];
   edges: Pick<FlowEdge, "source" | "target">[];
   variables: WorkflowVariable[];
   catalog: Catalog;
+  /** The config field being edited: per-item fields also get {{item}} and {{index}}. */
+  field?: string;
 }
 
 /**
  * Every reference the backend validator would accept in `nodeId`'s config: upstream
  * nodes' outputs (Input nodes as {{input.<name>}}), workflow variables, system values.
  */
-export function buildReferenceSuggestions({ nodeId, nodes, edges, variables, catalog }: SuggestionContext): ReferenceSuggestion[] {
+export function buildReferenceSuggestions({ nodeId, nodes, edges, variables, catalog, field }: SuggestionContext): ReferenceSuggestion[] {
   const upstream = ancestorsOf(nodeId, edges);
-  const suggestions: ReferenceSuggestion[] = [];
+  const self = nodes.find((n) => n.id === nodeId);
+  const itemFields = (self && catalog[self.data.nodeType]?.item_fields) ?? [];
+  const suggestions: ReferenceSuggestion[] = field && itemFields.includes(field) ? [...ITEM_REFERENCES] : [];
   // Declaration order is close to execution order and stable for the user.
   for (const node of nodes) {
     if (!upstream.has(node.id)) continue;

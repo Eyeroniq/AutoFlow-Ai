@@ -11,6 +11,7 @@ import { formatDuration, prettyJson } from "@/lib/format";
 
 import { FileChooser } from "../files/file-chooser";
 import { NodeTimeline } from "../runs/node-timeline";
+import { OutputDownloads } from "../runs/output-downloads";
 import { topologicalOrder } from "./graph";
 import { useRun } from "./run-controller";
 import { useEditor } from "./store";
@@ -68,7 +69,7 @@ export function RunPanel() {
       </div>
       <div className="grid flex-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[1fr_20rem]">
         <NodeTimeline run={run} />
-        <div className="space-y-2">
+        <div className="min-w-0 space-y-2">
           {run.error && (
             <div className={`rounded-lg p-2.5 text-xs ${run.status === "stopped" ? "bg-amber-50 text-amber-900" : "bg-red-50 text-red-700"}`} data-testid="run-error">
               {run.error}
@@ -76,8 +77,15 @@ export function RunPanel() {
           )}
           {run.finalOutput && (
             <div>
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Final output</p>
-              <pre className="max-h-48 overflow-auto rounded-md bg-white p-2 text-[11px] text-slate-800 ring-1 ring-slate-200" data-testid="final-output">
+              <div className="mb-1 flex items-center justify-between">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Final output</p>
+                {run.executionId && <OutputDownloads executionId={run.executionId} />}
+              </div>
+              {/* Long values (URLs, ids, one-line text) wrap instead of scrolling sideways. */}
+              <pre
+                className="max-h-48 overflow-y-auto whitespace-pre-wrap wrap-anywhere rounded-md bg-white p-2 text-[11px] text-slate-800 ring-1 ring-slate-200"
+                data-testid="final-output"
+              >
                 {prettyJson(run.finalOutput)}
               </pre>
             </div>
@@ -217,6 +225,7 @@ function InputsForm({ fields, onClose, onRun }: { fields: InputField[]; onClose:
                 value={values[field.name] || undefined}
                 onChange={(fileId) => setValues({ ...values, [field.name]: fileId ?? "" })}
                 emptyLabel="Choose a file"
+                recordable
                 testId={`run-input-${field.name}`}
                 onUploadingChange={(busyUploading) => setUploading((u) => (u[field.name] === busyUploading ? u : { ...u, [field.name]: busyUploading }))}
               />

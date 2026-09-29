@@ -1,7 +1,10 @@
-"""One adapter for every OpenAI-compatible chat API: Groq, OpenRouter, Ollama, OpenAI.
+"""One adapter for every OpenAI-compatible chat API: Groq, OpenRouter, Mistral, Cerebras,
+Ollama, OpenAI, and a custom endpoint.
 
 Presets pick the base URL, the max-tokens parameter name, embeddings support, and how
-to check credentials; everything else is the standard /chat/completions contract.
+to check credentials; everything else is the standard /chat/completions contract. The
+custom endpoint's URL is the user's, so it goes through the SSRF guard: checked up front,
+and every connection (redirects included) must reach a public address.
 """
 
 from __future__ import annotations
@@ -38,6 +41,11 @@ class CompatPreset:
     verify: str = "models"
     headers: dict[str, str] = field(default_factory=dict)
     requires_key: bool = True
+    # Whether verify() fails when the model isn't in the endpoint's model list (a custom
+    # server may not list models it serves).
+    strict_model_check: bool = True
+    # A user-supplied endpoint: connections go through the SSRF guard.
+    guarded: bool = False
 
 
 PRESETS: dict[str, CompatPreset] = {
@@ -52,7 +60,15 @@ PRESETS: dict[str, CompatPreset] = {
         "ollama", "Ollama", LLM_PROVIDERS["ollama"].base_url,
         max_tokens_param="max_tokens", supports_embeddings=True, requires_key=False,
     ),
+    # https://docs.mistral.ai/api/ (POST /v1/chat/completions, max_tokens).
+    "mistral": CompatPreset("mistral", "Mistral", LLM_PROVIDERS["mistral"].base_url, max_tokens_param="max_tokens"),
+    # https://inference-docs.cerebras.ai (OpenAI-compatible, max_completion_tokens).
+    "cerebras": CompatPreset("cerebras", "Cerebras", LLM_PROVIDERS["cerebras"].base_url),
     "openai": CompatPreset("openai", "OpenAI", None, supports_embeddings=True),
+    "custom": CompatPreset(
+        "custom", "Custom (OpenAI-compatible)", None, max_tokens_param="max_tokens",
+        requires_key=False, strict_model_check=False, guarded=True,
+    ),
 }
 
 
@@ -69,6 +85,7 @@ class OpenAICompatibleProvider:
         retry: RetryPolicy | None = None,
         timeout: float = 60,
         client: AsyncOpenAI | None = None,
+        allow_private_network: bool = False,
     ):
         self.preset = PRESETS[preset] if isinstance(preset, str) else preset
         self.name = self.preset.name
@@ -76,6 +93,19 @@ class OpenAICompatibleProvider:
         self._api_key = api_key
         self._embedding_model = embedding_model
         self._retry = retry or RetryPolicy()
+        http_client = None
+        if self.preset.guarded and not allow_private_network:
+            if not self.base_url:
+                raise ProviderError(self.name, "no base URL configured")
+            import httpx
+
+            from flowforge_engine.netguard import BlockedDestination, check_url, guarded_transport
+
+            try:
+                check_url(self.base_url)
+            except BlockedDestination as exc:
+                raise ProviderError(self.name, f"base URL {self.base_url}: {exc}") from None
+            http_client = httpx.AsyncClient(transport=guarded_transport(), timeout=timeout, trust_env=False)
         if client is None:
             try:
                 from openai import AsyncOpenAI
@@ -90,6 +120,7 @@ class OpenAICompatibleProvider:
                 default_headers=self.preset.headers or None,
                 timeout=timeout,
                 max_retries=0,  # with_retries owns backoff
+                http_client=http_client,
             )
         self._client = client
 
@@ -98,6 +129,11 @@ class OpenAICompatibleProvider:
     def _error(self, exc: BaseException) -> ProviderError:
         import openai
 
+        from flowforge_engine.netguard import BlockedDestination
+
+        blocked = exc if isinstance(exc, BlockedDestination) else getattr(exc, "__cause__", None)
+        if isinstance(blocked, BlockedDestination):
+            return ProviderError(self.name, str(blocked))
         if isinstance(exc, openai.APIStatusError):
             message = redact(self._status_message(exc), self._api_key)
             return classify_status(
@@ -228,6 +264,8 @@ class OpenAICompatibleProvider:
                 raise ProviderError(
                     self.name, f"model '{model}' is not pulled on {self.base_url}; run `ollama pull {model}`"
                 )
+            if not available and not self.preset.strict_model_check:
+                return details
             if not available:
                 shown = ", ".join(sorted(ids)[:15]) + (", ..." if len(ids) > 15 else "")
                 raise ProviderError(

@@ -7,6 +7,7 @@ from flowforge_engine.testing import example_graph
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.models.enums import ExecutionStatus, WorkflowStatus
+from app.schemas.trigger import TriggerBrief
 
 
 def _example_graph() -> dict[str, Any]:
@@ -69,6 +70,7 @@ class WorkflowListItem(WorkflowSummary):
 
     node_count: int
     last_execution: LastExecution | None
+    triggers: list[TriggerBrief] = Field(default_factory=list, description="Saved triggers: type, on/off, auto-disabled.")
 
 
 class WorkflowRead(WorkflowSummary):

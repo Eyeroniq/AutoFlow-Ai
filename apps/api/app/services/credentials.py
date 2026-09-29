@@ -6,13 +6,27 @@ server-wide default from .env. Nothing falls back to a mock.
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from flowforge_engine import ExecutionServices, ProviderError
-from flowforge_engine.providers import EMAIL_PROVIDERS, LLM_PROVIDERS, EmailAccount, ProviderInfo, ProviderSettings
+from flowforge_engine import ExecutionServices, NodeStateStore, ProviderError
+from flowforge_engine.providers import (
+    EMAIL_PROVIDERS,
+    LLM_PROVIDERS,
+    MESSAGING_PROVIDERS,
+    SEARCH_PROVIDERS,
+    DiscordAccount,
+    EmailAccount,
+    ProviderInfo,
+    ProviderSettings,
+    SearchAccount,
+    TelegramAccount,
+)
+from flowforge_engine.netguard import BlockedDestination, check_url
+from flowforge_engine.providers.discord_provider import parse_webhook_url
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,8 +48,15 @@ Source = Literal["user", "server", "none"]
 CONNECTABLE: dict[str, ProviderInfo] = {
     **{name: info for name, info in LLM_PROVIDERS.items() if name != "mock"},
     "gmail": EMAIL_PROVIDERS["gmail"],
+    **MESSAGING_PROVIDERS,
+    # DuckDuckGo needs no credential.
+    "tavily": SEARCH_PROVIDERS["tavily"],
 }
-SECRET_FIELDS = frozenset({"api_key", "password"})
+# Providers whose base URL the user may set: a local Ollama, OpenAI (or a proxy), and any
+# OpenAI-compatible endpoint.
+CUSTOM_ENDPOINTS = frozenset({"ollama", "openai", "custom"})
+SECRET_FIELDS = frozenset({"api_key", "password", "bot_token", "webhook_url"})
+_BOT_TOKEN = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 TEST_TIMEOUT_SECONDS = 45
 
 
@@ -56,7 +77,18 @@ def mask_secret(value: str) -> str:
     return f"{value[:3]}...{value[-4:]}" if len(value) >= 16 else "****"
 
 
+def mask_webhook(url: str) -> str:
+    """The webhook id stays readable; the token part is hidden."""
+    try:
+        webhook_id, _ = parse_webhook_url(url)
+    except ValueError:
+        return "****"
+    return f"https://discord.com/api/webhooks/{webhook_id}/****"
+
+
 def masked_view(provider: str, data: dict[str, Any]) -> dict[str, Any]:
+    if provider == "discord":
+        return {"webhook_url": mask_webhook(str(data.get("webhook_url", "")))}
     if provider == "gmail":
         view = {"email": data.get("username"), "app_password": "********"}
         view |= {k: v for k, v in data.items() if k not in SECRET_FIELDS and k != "username"}
@@ -76,7 +108,7 @@ def normalize_credential(provider: str, body: ConnectRequest) -> dict[str, Any]:
         return (value.get_secret_value().strip() or None) if value is not None else None
 
     if info.kind == "email":
-        stray = fields & {"api_key", "base_url", "model"}
+        stray = fields & {"api_key", "base_url", "model", "bot_token", "chat_id", "webhook_url"}
         if stray:
             raise CredentialInputError(f"{provider} doesn't take {', '.join(sorted(stray))}; send email and app_password")
         password = secret(body.app_password)
@@ -94,16 +126,63 @@ def normalize_credential(provider: str, body: ConnectRequest) -> dict[str, Any]:
         }
         return {k: v for k, v in data.items() if v not in (None, "")}
 
-    stray = fields & {"email", "app_password", "from_name", "smtp_host", "smtp_port", "smtp_security", "imap_host", "imap_port"}
+    if info.kind == "messaging":
+        return _messaging_credential(provider, body, fields)
+
+    if info.kind == "search":
+        stray = fields - {"api_key"}
+        if stray:
+            raise CredentialInputError(f"{provider} doesn't take {', '.join(sorted(stray))}; send api_key")
+        api_key = secret(body.api_key)
+        if not api_key:
+            raise CredentialInputError(f"{provider} needs an 'api_key' (get one at {info.get_key_url})")
+        return {"api_key": api_key}
+
+    stray = fields & {
+        "email", "app_password", "from_name", "smtp_host", "smtp_port", "smtp_security", "imap_host", "imap_port",
+        "bot_token", "chat_id", "webhook_url",
+    }
     if stray:
         raise CredentialInputError(f"{provider} doesn't take {', '.join(sorted(stray))}")
     api_key = secret(body.api_key)
     if info.requires_key and not api_key:
         raise CredentialInputError(f"{provider} needs an 'api_key' (get one at {info.get_key_url})")
-    if body.base_url and provider not in ("ollama", "openai"):
-        raise CredentialInputError(f"{provider} has a fixed endpoint; base_url is only for ollama and openai")
+    if body.base_url and provider not in CUSTOM_ENDPOINTS:
+        raise CredentialInputError(f"{provider} has a fixed endpoint; base_url is only for ollama, openai, and custom")
+    if provider == "custom":
+        if not body.base_url or not (body.model or "").strip():
+            raise CredentialInputError("custom needs a 'base_url' (e.g. https://host/v1) and the 'model' to use")
+        if not settings.HTTP_ALLOW_PRIVATE_NETWORKS:
+            # The same SSRF guard as the HTTP Request node: the endpoint must be public.
+            try:
+                check_url(body.base_url)
+            except BlockedDestination as exc:
+                raise CredentialInputError(f"base_url: {exc}") from None
     data = {"api_key": api_key, "base_url": body.base_url, "model": body.model}
     return {k: v for k, v in data.items() if v not in (None, "")}
+
+
+def _messaging_credential(provider: str, body: ConnectRequest, fields: set[str]) -> dict[str, Any]:
+    allowed = {"bot_token", "chat_id"} if provider == "telegram" else {"webhook_url"}
+    stray = fields - allowed
+    if stray:
+        raise CredentialInputError(f"{provider} doesn't take {', '.join(sorted(stray))}; send {' and '.join(sorted(allowed))}")
+    if provider == "telegram":
+        token = body.bot_token.get_secret_value().strip() if body.bot_token else ""
+        if not token:
+            raise CredentialInputError("telegram needs a 'bot_token' (from @BotFather)")
+        if not _BOT_TOKEN.match(token):
+            raise CredentialInputError("that doesn't look like a Telegram bot token (it reads like 123456789:AAE...)")
+        chat_id = (body.chat_id or "").strip()
+        return {"bot_token": token, **({"chat_id": chat_id} if chat_id else {})}
+    url = body.webhook_url.get_secret_value().strip() if body.webhook_url else ""
+    if not url:
+        raise CredentialInputError("discord needs a 'webhook_url' (channel settings > Integrations > Webhooks)")
+    try:
+        parse_webhook_url(url)
+    except ValueError as exc:
+        raise CredentialInputError(f"webhook_url is {exc}") from None
+    return {"webhook_url": url}
 
 
 # --- storage ------------------------------------------------------------------------------
@@ -182,18 +261,32 @@ def provider_settings_for(user_credentials: dict[str, dict[str, Any]]) -> Provid
         if provider == "gmail":
             # A user's mailbox replaces the server's entirely (host overrides included).
             merged = merged.model_copy(update={"gmail": EmailAccount.model_validate(data)})
+        elif provider == "telegram":
+            # A user's bot comes with its own default chat, never the server's.
+            merged = merged.model_copy(update={"telegram": TelegramAccount.model_validate(data)})
+        elif provider == "discord":
+            merged = merged.model_copy(update={"discord": DiscordAccount.model_validate(data)})
+        elif provider == "tavily":
+            merged = merged.model_copy(update={"tavily": SearchAccount.model_validate(data)})
+        elif provider == "custom":
+            # A user's endpoint replaces the server's entirely (a key for one server is no use on another).
+            merged = merged.model_copy(update={"custom": type(merged.custom).model_validate(data)})
         elif provider in LLM_PROVIDERS and provider != "mock":
             merged = merged.with_account(provider, **data)
     return merged
 
 
-async def build_execution_services(db: AsyncSession, user: User) -> ExecutionServices:
-    """Provider credentials, the user's uploaded files, and the SSRF policy for a run."""
+async def build_execution_services(
+    db: AsyncSession, user: User, *, state: NodeStateStore | None = None
+) -> ExecutionServices:
+    """Provider credentials, the user's uploaded files, node state (`state`; in memory when
+    omitted), and the SSRF policy for a run."""
     credentials = await load_user_credentials(db, user.id)
     return ExecutionServices(
         provider_settings=provider_settings_for(credentials),
         files=DbFileStore(db, user.id),
         allow_private_network=settings.HTTP_ALLOW_PRIVATE_NETWORKS,
+        state=state,
     )
 
 
@@ -241,6 +334,14 @@ async def list_integrations(db: AsyncSession, user: User) -> list[IntegrationRea
 async def _verify(services: ExecutionServices, provider: str) -> dict[str, Any]:
     if CONNECTABLE[provider].kind == "llm":
         return await services.llm(provider).verify(services.default_model(provider))
+    if provider == "telegram":
+        # getMe (the token works) and, with a default chat, getChat (the bot can reach it).
+        return await services.telegram("telegram").verify(services.telegram_default_chat())
+    if provider == "discord":
+        return await services.discord("discord").verify()
+    if provider == "tavily":
+        # GET /usage: proves the key and shows the credits left, without a search.
+        return await services.search("tavily").verify()
     details: dict[str, Any] = {"smtp": await services.email(provider).verify()}
     details["imap"] = await services.mailbox(provider).verify()
     return details

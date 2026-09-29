@@ -40,7 +40,8 @@ async def test_node_catalog_comes_from_the_registry(client, user):
     assert nodes["output"]["produces_final_output"] is True
 
     groups = [n["group"] for n in response.json()]
-    assert groups == sorted(groups, key=["General", "LLM", "Integrations", "Documents"].index)  # grouped, in order
+    order = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Audio"]
+    assert groups == sorted(groups, key=order.index)  # grouped, in order
 
     assert (await client.get("/api/nodes")).status_code == 401
 
@@ -197,3 +198,8 @@ def test_seeded_demo_pipeline_is_valid():
     assert validate_workflow(graph, services=services) == []
     # Editor-only fields round-trip through the graph model.
     assert graph.model_dump(mode="json")["nodes"][0]["description"] == "What to write about"
+
+    # With a Groq key on the server, Gemini falls back to Groq.
+    with_fallback = WorkflowGraph.model_validate(demo_graph("me@example.com", ["groq"]))
+    assert next(n for n in with_fallback.nodes if n.id == "gemini").config["fallback"] == ["groq"]
+    assert validate_workflow(with_fallback, services=services) == []

@@ -1,9 +1,11 @@
 """Uploaded files: validation, storage on the shared volume, and owner-scoped access.
 
-- **Size:** streamed to disk in chunks and aborted past MAX_UPLOAD_MB (413); an honest
-  Content-Length over the limit is refused before reading.
+- **Size:** streamed to disk in chunks and aborted past the limit (413): MAX_UPLOAD_MB for
+  documents and images, MAX_MEDIA_UPLOAD_MB for audio and video. A Content-Length over the
+  larger one is refused before reading.
 - **Type:** decided by the file's first bytes (magic numbers), never the client's
-  Content-Type or the extension: PDF, PNG, JPEG, TIFF, WebP, BMP, GIF, or UTF-8 text.
+  Content-Type or the extension: PDF, PNG, JPEG, TIFF, WebP, BMP, GIF, UTF-8 text, and the
+  audio/video formats speech-to-text reads (MP3, WAV, FLAC, M4A/MP4, MOV, WebM, Ogg).
   Anything else is 415.
 - **Storage:** FILES_DIR/<owner id>/<file id>. The path never contains the uploaded name,
   so a name like "../../etc/passwd" can't escape; that name is kept, sanitized, for display.
@@ -22,6 +24,7 @@ from typing import Any
 
 from fastapi import UploadFile
 from flowforge_engine import FileNotAvailable, StoredFile, WorkflowGraph, file_id_from
+from flowforge_engine.files import MEDIA_TYPES
 from flowforge_engine.variables import contains_reference
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +47,30 @@ ALLOWED_TYPES = {
     "image/bmp": "BMP",
     "image/gif": "GIF",
     "text/plain": "plain text",
+    "audio/mpeg": "MP3",
+    "audio/wav": "WAV",
+    "audio/flac": "FLAC",
+    "audio/mp4": "M4A",
+    "audio/webm": "WebM audio",
+    "audio/ogg": "Ogg audio",
+    "video/mp4": "MP4",
+    "video/quicktime": "MOV",
+    "video/webm": "WebM video",
+    "video/ogg": "Ogg video",
 }
+UNSUPPORTED_MESSAGE = (
+    "Unsupported file type. Upload a PDF, an image (PNG, JPEG, TIFF, WebP, BMP, GIF), plain text, or audio/video "
+    "(MP3, WAV, FLAC, M4A, MP4, MOV, WebM, Ogg)."
+)
+# ISO base media (MP4) major brands that are audio only.
+_AUDIO_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"F4A "}
+_VIDEO_BRANDS = {
+    b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"M4V ", b"M4VP", b"M4VH",
+    b"dash", b"mmp4", b"MSNV", b"f4v ", b"3gp4", b"3gp5", b"3gp6", b"3g2a",
+}
+_OGG_AUDIO_CODECS = (b"OpusHead", b"\x01vorbis", b"\x7fFLAC", b"Speex   ")
+# Matroska/WebM codec ids of video tracks.
+_VIDEO_CODECS = (b"V_VP8", b"V_VP9", b"V_AV1", b"V_MPEG4", b"V_MPEGH")
 
 
 class UploadRejected(Exception):
@@ -53,8 +79,43 @@ class UploadRejected(Exception):
         super().__init__(message)
 
 
+def sniff_media_type(head: bytes) -> str | None:
+    """Audio and video containers: MP3 (ID3 tag or an MPEG audio frame), WAV, FLAC, ISO base
+    media (M4A / MP4 / MOV, by the ftyp brand), Ogg (Opus / Vorbis / Theora), and WebM (by its
+    tracks' codecs: MediaRecorder's audio-only WebM has only an A_OPUS track)."""
+    if head.startswith(b"ID3"):
+        return "audio/mpeg"
+    # An MPEG audio frame: 11 sync bits, then a layer other than "reserved" (00 is AAC's ADTS).
+    if len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 and (head[1] >> 1) & 0x03 != 0:
+        return "audio/mpeg"
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return "audio/wav"
+    if head.startswith(b"fLaC"):
+        return "audio/flac"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in _AUDIO_BRANDS:
+            return "audio/mp4"
+        if brand == b"qt  ":
+            return "video/quicktime"
+        # Only video brands: HEIC/AVIF images and other ISO media share the ftyp box.
+        return "video/mp4" if brand in _VIDEO_BRANDS else None
+    if head.startswith(b"OggS"):
+        if b"\x80theora" in head:
+            return "video/ogg"
+        # The first page names the codec; anything else in an Ogg isn't audio we know.
+        return "audio/ogg" if any(codec in head for codec in _OGG_AUDIO_CODECS) else None
+    if head.startswith(b"\x1a\x45\xdf\xa3") and b"webm" in head[:64]:
+        if any(codec in head for codec in _VIDEO_CODECS):
+            return "video/webm"
+        return "audio/webm" if (b"A_OPUS" in head or b"A_VORBIS" in head) else "video/webm"
+    return None
+
+
 def sniff_content_type(head: bytes) -> str | None:
     """The file's type from its first bytes, or None if it isn't an allowed type."""
+    if media := sniff_media_type(head):
+        return media
     if head.startswith(b"%PDF-"):
         return "application/pdf"
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -105,10 +166,17 @@ def _path(record: UploadedFile) -> Path:
     return storage_root() / record.storage_key
 
 
+def upload_limit(content_type: str | None) -> tuple[int, str]:
+    """(bytes, "N MB") allowed for a file of this type: recordings get MAX_MEDIA_UPLOAD_MB."""
+    if content_type in MEDIA_TYPES:
+        return settings.max_media_upload_bytes, f"{settings.MAX_MEDIA_UPLOAD_MB:g} MB audio/video"
+    return settings.max_upload_bytes, f"{settings.MAX_UPLOAD_MB:g} MB"
+
+
 async def save_upload(db: AsyncSession, owner_id: uuid.UUID, upload: UploadFile, *, declared_size: int | None) -> UploadedFile:
     """Validate and store an upload. Raises UploadRejected (413/415/400)."""
-    limit = settings.max_upload_bytes
-    limit_text = f"{settings.MAX_UPLOAD_MB:g} MB"
+    limit = max(settings.max_upload_bytes, settings.max_media_upload_bytes)
+    limit_text = f"{max(settings.MAX_UPLOAD_MB, settings.MAX_MEDIA_UPLOAD_MB):g} MB"
     if declared_size is not None and declared_size > limit + 64 * 1024:  # multipart overhead
         raise UploadRejected(413, f"The file is larger than the {limit_text} limit")
 
@@ -127,9 +195,8 @@ async def save_upload(db: AsyncSession, owner_id: uuid.UUID, upload: UploadFile,
                     # The first chunk is at least SNIFF_BYTES unless the file is smaller.
                     content_type = sniff_content_type(chunk[:SNIFF_BYTES])
                     if content_type is None:
-                        raise UploadRejected(
-                            415, "Unsupported file type. Upload a PDF, an image (PNG, JPEG, TIFF, WebP, BMP, GIF), or plain text."
-                        )
+                        raise UploadRejected(415, UNSUPPORTED_MESSAGE)
+                    limit, limit_text = upload_limit(content_type)
                 size += len(chunk)
                 if size > limit:
                     raise UploadRejected(413, f"The file is larger than the {limit_text} limit")
@@ -255,4 +322,22 @@ async def import_file(db: AsyncSession, owner_id: uuid.UUID, source: Path, filen
     target.write_bytes(data)
     db.add(record)
     await db.flush()
+    return record
+
+
+async def ensure_sample_file(db: AsyncSession, owner_id: uuid.UUID, name: str) -> UploadedFile | None:
+    """samples/<name> as one of the user's uploads (reused if they already have it), or
+    None when the samples directory doesn't have it."""
+    source = settings.samples_dir / name
+    if not source.is_file():
+        logger.warning("sample file not found", extra={"path": str(source)})
+        return None
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    existing = await db.scalar(
+        select(UploadedFile).where(UploadedFile.owner_id == owner_id, UploadedFile.sha256 == digest)
+    )
+    if existing is not None and file_path(existing).is_file():
+        return existing
+    record = await import_file(db, owner_id, source)
+    logger.info("sample file stored", extra={"file_id": str(record.id), "owner_id": str(owner_id)})
     return record

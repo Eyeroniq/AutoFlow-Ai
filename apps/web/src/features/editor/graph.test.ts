@@ -53,6 +53,23 @@ describe("helpers", () => {
     expect(configSummary("gmail", { to: "{{vars.recipient}}" })).toBe("to {{vars.recipient}}");
     expect(configSummary("http_request", { url: "https://example.com" })).toBe("GET https://example.com");
   });
+
+  it("keeps whole values in summaries (the card truncates them and shows the rest on hover)", () => {
+    const left = "{{classifier.response.category.label}}";
+    const right = "a fairly long expected value";
+    expect(configSummary("condition", { left, operator: "not_equals", right })).toBe(`${left} not equals ${right}`);
+    expect(configSummary("input", { name: "topic", input_type: "text", default: "the history of workflow automation" })).toBe(
+      "topic · text = the history of workflow automation",
+    );
+    expect(configSummary("output", { name: "result", value: { summary: "{{gemini.response}}", email: "{{gmail.message_id}}" } })).toBe(
+      'result ← {"summary":"{{gemini.response}}","email":"{{gmail.message_id}}"}',
+    );
+    expect(configSummary("text", { text: "line one\n\n  line two" })).toBe("line one line two");
+    // Only runaway values (a pasted document) are cut.
+    const summary = configSummary("text", { text: "x".repeat(5000) });
+    expect(summary).toHaveLength(600);
+    expect(summary.endsWith("…")).toBe(true);
+  });
 });
 
 describe("topologicalOrder", () => {

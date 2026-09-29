@@ -9,22 +9,34 @@ from app.api.deps import CurrentUser
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
 # Engine categories -> the editor's library groups. Unknown categories get their own group.
-GROUPS = {"io": "General", "logic": "General", "ai": "LLM", "integration": "Integrations", "documents": "Documents"}
-GROUP_ORDER = ["General", "LLM", "Integrations", "Documents"]
+GROUPS = {
+    "io": "General",
+    "logic": "General",
+    "ai": "LLM",
+    "lists": "Lists",
+    "sources": "Data sources",
+    "integration": "Integrations",
+    "documents": "Documents",
+    "audio": "Audio",
+}
+GROUP_ORDER = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Audio"]
 
 
 class NodeTypeRead(BaseModel):
     type: str
     category: str = Field(description="Engine category: io, logic, ai, integration, ...")
-    group: str = Field(description="Library group: General, LLM, Integrations (Documents when such nodes exist).")
+    group: str = Field(description="Library group: General, LLM, Lists, Data sources, Integrations, Documents, Audio.")
     label: str
     description: str
     icon: str = Field(description="lucide icon name, e.g. 'sparkles'.")
-    queue: str = Field(description="Celery queue whose workers run it: default, llm, or ocr.")
+    queue: str = Field(description="Celery queue whose workers run it: default, llm, ocr, or audio.")
     portable: bool = Field(description="Runs on whichever worker holds the run (never causes a queue hand-off).")
     interruptible: bool
     branches: list[str] = Field(description="Named output handles (Condition: true/false); empty = one output.")
     has_input: bool = Field(description="Whether the node takes incoming edges (Input nodes don't).")
+    item_fields: list[str] = Field(
+        default_factory=list, description="Per-item template fields, where {{item}} and {{index}} can be used."
+    )
     produces_final_output: bool
     config_schema: dict[str, Any] = Field(description="JSON Schema of the node's config.")
     output_schema: dict[str, Any] | None
@@ -53,6 +65,7 @@ def _describe(node_type: str) -> NodeTypeRead:
         interruptible=definition.interruptible,
         branches=info["branches"],
         has_input=node_type != "input",
+        item_fields=info["item_fields"],
         produces_final_output=definition.produces_final_output,
         config_schema=info["config_schema"],
         output_schema=info["output_schema"],

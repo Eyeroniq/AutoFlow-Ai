@@ -19,6 +19,9 @@ from flowforge_engine.errors import EngineError
 
 PDF = "application/pdf"
 IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/tiff", "image/webp", "image/bmp", "image/gif"})
+AUDIO_TYPES = frozenset({"audio/mpeg", "audio/wav", "audio/mp4", "audio/webm", "audio/ogg", "audio/flac"})
+VIDEO_TYPES = frozenset({"video/mp4", "video/webm", "video/ogg", "video/quicktime"})
+MEDIA_TYPES = AUDIO_TYPES | VIDEO_TYPES
 
 
 class FileNotAvailable(EngineError):

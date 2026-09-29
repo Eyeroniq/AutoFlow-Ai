@@ -55,6 +55,15 @@ class WorkflowExecution(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # set. The next task claims segment N+1 with a compare-and-set, so it runs once.
     segment: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     handoff_at: Mapped[datetime | None]
+    # Set for runs started through a deployment's endpoint (trigger "webhook").
+    deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deployments.id", ondelete="SET NULL"), index=True
+    )
+    # The trigger that started the run (schedule, email, or webhook); its outcome feeds the
+    # trigger's consecutive-failure count.
+    trigger_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_triggers.id", ondelete="SET NULL"), index=True
+    )
 
     workflow: Mapped["Workflow"] = relationship(back_populates="executions")
     triggered_by: Mapped["User | None"] = relationship()

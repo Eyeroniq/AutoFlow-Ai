@@ -9,6 +9,7 @@ from app.models.enums import VariableType, WorkflowStatus, pg_enum
 
 if TYPE_CHECKING:
     from app.models.execution import WorkflowExecution
+    from app.models.trigger import WorkflowTrigger
     from app.models.user import User
 
 
@@ -28,6 +29,11 @@ class Workflow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    # Trigger safety (schedule, email, webhook runs; manual runs don't count): at most this
+    # many triggered runs start per rolling hour, and a trigger switches itself off after
+    # this many failed runs in a row (0 = never).
+    max_runs_per_hour: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    max_consecutive_failures: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
 
     owner: Mapped["User"] = relationship(back_populates="workflows")
     nodes: Mapped[list["WorkflowNode"]] = relationship(
@@ -40,6 +46,9 @@ class Workflow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
     )
     executions: Mapped[list["WorkflowExecution"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
+    )
+    triggers: Mapped[list["WorkflowTrigger"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
     )
 

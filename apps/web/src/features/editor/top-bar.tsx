@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, Check, CircleAlert, Play, Redo2, Save, ShieldCheck, Square, Undo2, Variable } from "lucide-react";
+import { ArrowLeft, CalendarClock, Check, CircleAlert, Play, Redo2, Rocket, Save, ShieldCheck, Square, Undo2, Variable } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
@@ -9,7 +9,37 @@ import { UserMenu } from "@/components/app-shell";
 import { isTerminal } from "../runs/run-state";
 import { useRun } from "./run-controller";
 import { getEditorStore, useEditor } from "./store";
+import { overallTone, type TriggerTone } from "./triggers";
+import { useTriggers } from "./triggers-panel";
 import { useEditorUi } from "./ui-store";
+
+const TRIGGER_DOT: Record<TriggerTone, string> = {
+  off: "",
+  on: "bg-emerald-400",
+  warning: "bg-amber-400",
+  disabled: "bg-red-500",
+};
+
+function TriggersButton() {
+  const rightPanel = useEditorUi((s) => s.rightPanel);
+  const setUi = useEditorUi((s) => s.set);
+  const { data } = useTriggers();
+  const tone = data ? overallTone(data.triggers, data.settings) : "off";
+  const title = tone === "disabled" ? "A trigger was switched off after repeated failures" : "Schedule, email, and webhook triggers";
+  return (
+    <button
+      type="button"
+      className={`${barButton} ${rightPanel === "triggers" ? "bg-indigo-600" : ""}`}
+      onClick={() => setUi({ rightPanel: rightPanel === "triggers" ? null : "triggers" })}
+      title={title}
+      data-testid="triggers-button"
+      data-tone={tone}
+    >
+      <CalendarClock className="size-4" aria-hidden /> Triggers
+      {tone !== "off" && <span className={`size-2 rounded-full ${TRIGGER_DOT[tone]}`} aria-label={tone} />}
+    </button>
+  );
+}
 
 function WorkflowName() {
   const name = useEditor((s) => s.name);
@@ -144,6 +174,16 @@ export function TopBar({ onValidate, onRun }: { onValidate: () => void; onRun: (
               {issueCount}
             </span>
           )}
+        </button>
+        <TriggersButton />
+        <button
+          type="button"
+          className={barButton}
+          onClick={() => setUi({ deployOpen: true })}
+          title="Publish this pipeline as an API endpoint"
+          data-testid="deploy-button"
+        >
+          <Rocket className="size-4" aria-hidden /> Deploy
         </button>
         {active ? (
           <button

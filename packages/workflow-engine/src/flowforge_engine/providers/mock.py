@@ -122,6 +122,10 @@ class MockEmailProvider:
             "mock": True,
         }
 
+    async def mailbox_status(self, folder: str = "INBOX") -> dict[str, Any]:
+        # Mock UIDs are message ids, not numbers: polling relies on Message-ID de-duplication.
+        return {"uidvalidity": 1, "uidnext": 1, "messages": len(self._outbox), "mock": True}
+
     async def fetch_emails(self, query: MailboxQuery) -> list[dict[str, Any]]:
         matches = []
         for sent in reversed(self._outbox):
@@ -162,3 +166,67 @@ class MockEmailProvider:
     @classmethod
     def clear_outbox(cls) -> None:
         cls._outbox.clear()
+
+
+@dataclass(frozen=True)
+class SentMessage:
+    provider: str
+    destination: str
+    payload: dict[str, Any]
+    message_id: str
+    sent_at: str
+
+
+class _MockMessenger:
+    """Records messages in a process-wide, bounded outbox instead of sending them."""
+
+    is_mock = True
+    _outbox: ClassVar[deque[SentMessage]]
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def _record(self, destination: str, payload: dict[str, Any]) -> SentMessage:
+        sent = SentMessage(
+            provider=self.name, destination=destination, payload=dict(payload),
+            message_id=str(len(self._outbox) + 1), sent_at=datetime.now(UTC).isoformat(),
+        )
+        self._outbox.append(sent)
+        logger.info("mock message sent", extra={"provider": self.name, "destination": destination})
+        return sent
+
+    @classmethod
+    def outbox(cls) -> list[SentMessage]:
+        return list(cls._outbox)
+
+    @classmethod
+    def clear_outbox(cls) -> None:
+        cls._outbox.clear()
+
+
+class MockTelegramProvider(_MockMessenger):
+    _outbox: ClassVar[deque[SentMessage]] = deque(maxlen=200)
+
+    def __init__(self, name: str = "telegram"):
+        super().__init__(name)
+
+    async def send_message(self, chat_id: str, text: str, **options: Any) -> dict[str, Any]:
+        sent = self._record(str(chat_id), {"text": text, **options})
+        return {"message_id": int(sent.message_id), "chat": {"id": chat_id}, "date": 0, "text": text}
+
+    async def verify(self, chat_id: str | None = None) -> dict[str, Any]:
+        return {"mock": True, "bot": "@mock_bot", "chat": {"id": chat_id} if chat_id else None}
+
+
+class MockDiscordProvider(_MockMessenger):
+    _outbox: ClassVar[deque[SentMessage]] = deque(maxlen=200)
+
+    def __init__(self, name: str = "discord"):
+        super().__init__(name)
+
+    async def execute(self, payload: dict[str, Any], *, thread_id: str | None = None) -> dict[str, Any]:
+        sent = self._record(thread_id or "webhook", payload)
+        return {"id": sent.message_id, "channel_id": "mock", **payload}
+
+    async def verify(self) -> dict[str, Any]:
+        return {"mock": True, "webhook": "mock"}

@@ -58,6 +58,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       FILES_DIR: /data/files
       SAMPLES_DIR: /samples
+      WHISPER_MODELS_DIR: /data/models
       # Bind mounts from a Windows/macOS host don't deliver inotify events.
       WATCHFILES_FORCE_POLLING: "true"
     # Lets the API reach services on the host, e.g. Ollama at
@@ -78,6 +79,8 @@ services:
       - ../packages/workflow-engine:/packages/workflow-engine
       # Uploaded files (POST /api/files), shared with every worker.
       - files_data:/data/files
+      # faster-whisper models, downloaded once and shared (Test node runs Speech to Text here).
+      - whisper_models:/data/models
       # Sample documents for the seed (read-only).
       - ../samples:/samples:ro
     depends_on:
@@ -96,6 +99,7 @@ services:
   #   worker-default  HTTP, email, delays          (WORKER_DEFAULT_CONCURRENCY, default 4)
   #   worker-llm      LLM calls: I/O-bound         (WORKER_LLM_CONCURRENCY, default 8)
   #   worker-ocr      PDF extraction and OCR: CPU  (WORKER_OCR_CONCURRENCY, default 2)
+  #   worker-audio    Speech to Text: ffmpeg + Whisper, long-running (WORKER_AUDIO_CONCURRENCY, default 2)
   # A run hands itself from queue to queue as it reaches each kind of node (see
   # flowforge_engine.routing). Scale one kind with, e.g.
   #   docker compose up -d --scale worker-ocr=3
@@ -112,6 +116,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:-flowforge}@postgres:5432/${POSTGRES_DB:-flowforge}
       REDIS_URL: redis://redis:6379/0
       FILES_DIR: /data/files
+      WHISPER_MODELS_DIR: /data/models
       WATCHFILES_FORCE_POLLING: "true"
       WORKER_NAME: worker-default
       WORKER_QUEUES: default
@@ -134,6 +139,7 @@ services:
       - ../apps/api:/app
       - ../packages/workflow-engine:/packages/workflow-engine
       - files_data:/data/files
+      - whisper_models:/data/models
     depends_on:
       postgres:
         condition: service_healthy
@@ -170,6 +176,49 @@ services:
       # One CPU thread per Tesseract process: parallelism comes from concurrency and
       # replicas instead of OpenMP threads fighting over the same cores.
       OMP_THREAD_LIMIT: ${OCR_THREADS_PER_TASK:-1}
+
+  # Speech to Text. Groq transcriptions are mostly waiting on the network; local
+  # faster-whisper is CPU-heavy, so each task gets AUDIO_THREADS_PER_TASK threads.
+  worker-audio:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-audio
+      WORKER_QUEUES: audio
+      WORKER_CONCURRENCY: ${WORKER_AUDIO_CONCURRENCY:-2}
+      OMP_NUM_THREADS: ${AUDIO_THREADS_PER_TASK:-2}
+
+  # Celery beat: sends the triggers tick every minute (due schedules, due mailbox checks;
+  # see app.services.triggers), which worker-default runs. Run exactly one. A second beat
+  # would only send duplicate ticks, and fire times are claimed atomically, so nothing
+  # would run twice.
+  beat:
+    build:
+      context: ../apps/api
+      additional_contexts:
+        workflow_engine: ../packages/workflow-engine
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:-flowforge}@postgres:5432/${POSTGRES_DB:-flowforge}
+      REDIS_URL: redis://redis:6379/0
+      WATCHFILES_FORCE_POLLING: "true"
+    command:
+      - sh
+      - -c
+      - >-
+        exec watchfiles --filter python
+        "celery -A app.worker.celery_app:celery_app beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule"
+        app
+    volumes:
+      - ../apps/api:/app
+      - ../packages/workflow-engine:/packages/workflow-engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
   # Load testing (loadtest/README.md). Not started by `up`; run it with
   #   docker compose --profile loadtest run --rm locust --headless -u 7 -r 5 -t 2m
@@ -220,3 +269,4 @@ volumes:
   postgres_data:
   redis_data:
   files_data:
+  whisper_models:

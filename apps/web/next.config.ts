@@ -6,6 +6,9 @@ import type { NextConfig } from "next";
 const pollIntervalMs = Number(process.env.NEXT_DEV_POLL_INTERVAL_MS) || undefined;
 
 const nextConfig: NextConfig = {
+  // The dev-mode badge sits over the canvas controls and shows up in screenshots.
+  // Build and runtime errors still open the error overlay.
+  devIndicators: false,
   ...(pollIntervalMs && { watchOptions: { pollIntervalMs } }),
 };
 

@@ -15,6 +15,7 @@ from typing import Any
 
 from celery import signals
 from celery.exceptions import SoftTimeLimitExceeded
+from flowforge_engine import DEFAULT_QUEUE
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -27,7 +28,8 @@ from app.services.control import finalize_dead, recover_stale_executions
 from app.services.events import EventPublisher
 from app.services.runs import InfrastructureUnavailable, run_execution, utcnow
 from app.services.task_queue import CeleryTaskQueue
-from app.worker.celery_app import RUN_EXECUTION_TASK, celery_app
+from app.services.triggers import claim_email_polls, fire_due_schedules, poll_email_trigger
+from app.worker.celery_app import POLL_EMAIL_TASK, RUN_EXECUTION_TASK, TRIGGERS_TICK_TASK, celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,37 @@ def run_execution_task(self: Any, execution_id: str, segment: int = 0) -> dict[s
         with contextlib.suppress(Exception):
             asyncio.run(_fail(uuid.UUID(execution_id), error))
         raise
+
+
+async def _tick() -> tuple[list[dict[str, Any]], list[uuid.UUID]]:
+    async with worker_resources() as (session_factory, _redis):
+        fired = await fire_due_schedules(session_factory, CeleryTaskQueue())
+        polls = await claim_email_polls(session_factory)
+    return [result.as_dict() for result in fired], polls
+
+
+@celery_app.task(name=TRIGGERS_TICK_TASK, acks_late=True)
+def triggers_tick() -> dict[str, Any]:
+    """Beat, every minute: start the runs of due schedules, and queue a check of every
+    email trigger whose poll interval has passed (one task each: IMAP can be slow)."""
+    fired, polls = asyncio.run(_tick())
+    for trigger_id in polls:
+        celery_app.send_task(POLL_EMAIL_TASK, args=[str(trigger_id)], queue=DEFAULT_QUEUE, expires=300)
+    if fired or polls:
+        logger.info("triggers tick", extra={"fired": fired, "email_polls": [str(t) for t in polls]})
+    return {"fired": fired, "email_polls": [str(t) for t in polls]}
+
+
+@celery_app.task(name=POLL_EMAIL_TASK, acks_late=True)
+def poll_email_task(trigger_id: str) -> dict[str, Any]:
+    """Check one email trigger's mailbox and start a run per new matching email."""
+
+    async def poll() -> dict[str, Any]:
+        async with worker_resources() as (session_factory, redis):
+            result = await poll_email_trigger(session_factory, CeleryTaskQueue(), uuid.UUID(trigger_id), redis=redis)
+        return result.as_dict()
+
+    return asyncio.run(poll())
 
 
 @signals.worker_init.connect

@@ -11,8 +11,8 @@ import { freePosition } from "./graph";
 import { getEditorStore, useEditor } from "./store";
 import { useEditorUi } from "./ui-store";
 
-// "Documents" only appears when the registry has nodes in that group.
-const GROUP_ORDER = ["General", "LLM", "Integrations", "Documents"];
+// A group only appears when the registry has nodes in it.
+const GROUP_ORDER = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Audio"];
 
 export function groupCatalog(entries: NodeType[], query: string): [string, NodeType[]][] {
   const q = query.trim().toLowerCase();

@@ -22,6 +22,9 @@ from flowforge_engine.models import NodeContext
 
 RESERVED_NAMESPACES = frozenset({"vars", "system"})
 SYSTEM_KEYS = frozenset({"workflow_id", "execution_id", "node_id"})
+# Available only in per-item template fields (NodeDefinition.deferred_fields): the current
+# list item and its 0-based position. They shadow a node with the same id there.
+ITEM_NAMESPACES = frozenset({"item", "index"})
 
 _TEMPLATE_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 _SEGMENT_RE = re.compile(r"^([^\[\]]*)((?:\[\d+\])*)$")
@@ -62,6 +65,21 @@ def build_scope(context: NodeContext) -> dict[str, Any]:
             "node_id": context.node_id,
         },
     }
+
+
+def item_scope(scope: Mapping[str, Any], item: Any, index: int) -> dict[str, Any]:
+    """`scope` plus {{item}} and {{index}}, for resolving a per-item template."""
+    return {**scope, "item": item, "index": index}
+
+
+def walk_path(value: Any, path: str) -> Any:
+    """Read a dot path ("output.score", "tags[0]") inside `value`.
+
+    Raises VariableResolutionError when a segment is missing. An empty path is `value`.
+    """
+    if not path.strip():
+        return value
+    return lookup({"_": value}, f"_.{path.strip()}")
 
 
 def lookup(scope: Mapping[str, Any], expression: str) -> Any:

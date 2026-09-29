@@ -7,6 +7,7 @@ import type { FlowNode } from "./graph";
 import { getEditorStore, useEditor } from "./store";
 
 const KIND_STYLE: Record<ReferenceKind, string> = {
+  item: "bg-teal-50 text-teal-700",
   input: "bg-emerald-50 text-emerald-700",
   node: "bg-violet-50 text-violet-700",
   variable: "bg-amber-50 text-amber-800",
@@ -17,20 +18,22 @@ const KIND_STYLE: Record<ReferenceKind, string> = {
 const referenceSignature = (nodes: FlowNode[]) =>
   nodes.map((n) => `${n.id}:${n.data.nodeType}:${String(n.data.config.name ?? "")}:${n.data.label}`).join("|");
 
-export function useReferenceSuggestions(nodeId: string) {
+export function useReferenceSuggestions(nodeId: string, field?: string) {
   const signature = useEditor((s) => referenceSignature(s.nodes));
   const edges = useEditor((s) => s.edges);
   const variables = useEditor((s) => s.variables);
   const catalog = useEditor((s) => s.catalog);
   return useMemo(() => {
     void signature; // recompute when a referenceable property of a node changes
-    return buildReferenceSuggestions({ nodeId, nodes: getEditorStore().getState().nodes, edges, variables, catalog });
-  }, [nodeId, signature, edges, variables, catalog]);
+    return buildReferenceSuggestions({ nodeId, nodes: getEditorStore().getState().nodes, edges, variables, catalog, field });
+  }, [nodeId, signature, edges, variables, catalog, field]);
 }
 
 interface ReferenceFieldProps {
   id?: string;
   nodeId: string;
+  /** The config field (per-item fields also offer {{item}} and {{index}}). */
+  field?: string;
   value: string;
   onChange: (value: string) => void;
   onBlur?: () => void;
@@ -47,6 +50,7 @@ interface ReferenceFieldProps {
 export function ReferenceField({
   id,
   nodeId,
+  field,
   value,
   onChange,
   onBlur,
@@ -62,7 +66,7 @@ export function ReferenceField({
   const element = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
   const [open, setOpen] = useState<{ start: number; query: string } | null>(null);
   const [active, setActive] = useState(0);
-  const all = useReferenceSuggestions(nodeId);
+  const all = useReferenceSuggestions(nodeId, field);
   const items = open ? filterSuggestions(all, open.query, 12) : [];
 
   const sync = (text: string, caret: number | null) => {

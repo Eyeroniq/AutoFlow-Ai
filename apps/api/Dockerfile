@@ -12,8 +12,10 @@ WORKDIR /app
 # also works for "Test node" and ?sync=true runs. Add languages with
 #   docker compose build --build-arg TESSERACT_LANGS="deu fra hin" api
 ARG TESSERACT_LANGS="deu fra spa ita por"
+# ffmpeg (with ffprobe) for Speech to Text: probing, extracting audio from video,
+# converting, and splitting long recordings into chunks.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd ffmpeg \
        $(for lang in $TESSERACT_LANGS; do printf 'tesseract-ocr-%s ' "$lang"; done) \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,8 +30,10 @@ RUN pip install -r requirements-dev.txt
 
 COPY . .
 
-# /data/files is the upload volume shared by the API and the workers.
-RUN useradd --create-home --uid 1000 appuser && mkdir -p /data/files && chown appuser:appuser /data/files
+# /data/files is the upload volume shared by the API and the workers; /data/models holds
+# the faster-whisper models, downloaded on first use.
+RUN useradd --create-home --uid 1000 appuser && mkdir -p /data/files /data/models \
+    && chown appuser:appuser /data/files /data/models
 USER appuser
 
 EXPOSE 8000

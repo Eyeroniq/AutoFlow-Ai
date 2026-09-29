@@ -59,7 +59,9 @@ from app.models.workflow import Workflow, WorkflowNode
 from app.schemas.execution import ExecutionDetail, NodeExecutionRead
 from app.services.credentials import build_execution_services
 from app.services.events import EventPublisher, iso, stop_flag_set
+from app.services.node_state import DbNodeStateStore
 from app.services.task_queue import EnqueueFailed, TaskQueue
+from app.services.trigger_outcomes import apply_trigger_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -98,18 +100,26 @@ def utcnow() -> datetime:
 async def create_execution(
     db: AsyncSession,
     workflow: Workflow,
-    user: User,
+    user: User | None,
     inputs: dict[str, Any],
     services: ExecutionServices,
     *,
     queue: str | None = None,
+    graph: WorkflowGraph | None = None,
+    trigger: ExecutionTrigger = ExecutionTrigger.MANUAL,
+    deployment_id: uuid.UUID | None = None,
+    trigger_id: uuid.UUID | None = None,
+    created_at: datetime | None = None,
 ) -> WorkflowExecution:
-    """Validate the saved graph and record a pending execution with one pending row per node.
+    """Validate the graph and record a pending execution with one pending row per node.
 
+    `graph` defaults to the workflow's saved graph (a deployment passes its snapshot).
+    `user` is who triggered it: None for runs started by a trigger (a schedule, an email, a
+    deployment's API key); `trigger_id` then names the trigger.
     Raises InvalidWorkflowGraph (and records nothing) if the graph doesn't validate,
     including "Authentication missing" for providers without credentials.
     """
-    graph = WorkflowGraph.model_validate(workflow.graph_json)
+    graph = graph or WorkflowGraph.model_validate(workflow.graph_json)
     issues = validate_workflow(graph, services=services)
     if issues:
         raise InvalidWorkflowGraph(issues)
@@ -119,14 +129,18 @@ async def create_execution(
         id=execution_id,
         workflow_id=workflow.id,
         status=ExecutionStatus.PENDING,
-        trigger=ExecutionTrigger.MANUAL,
-        triggered_by_user_id=user.id,
+        trigger=trigger,
+        triggered_by_user_id=user.id if user else None,
+        deployment_id=deployment_id,
+        trigger_id=trigger_id,
         inputs_json=inputs,
         graph_json=graph.model_dump(mode="json"),
         queue=queue,
         # Queued runs use the execution id as their Celery task id (see task_queue).
         celery_task_id=str(execution_id) if queue else None,
     )
+    if created_at is not None:
+        execution.created_at = created_at
     db.add(execution)
     row_ids = {
         row.node_key: row.id
@@ -147,6 +161,16 @@ async def create_execution(
         ))
     await db.commit()
     return execution
+
+
+async def fail_unqueued(db: AsyncSession, execution_id: uuid.UUID, exc: EnqueueFailed) -> str:
+    """Mark a pending execution failed because its task couldn't be sent; returns the error."""
+    error = f"Could not queue the run: the task broker is unavailable ({exc})"
+    await finish_execution(db, None, execution_id, ExecutionStatus.FAILED, error=error,
+                           from_statuses=(ExecutionStatus.PENDING,))
+    await close_out_nodes(db, None, execution_id, pending_reason="Not run: could not be queued",
+                          running_reason="Not run: could not be queued")
+    return error
 
 
 # --- shared state transitions (also used by stop and crash recovery) ---------------------
@@ -220,7 +244,8 @@ async def finish_execution(
     `unclaimed`, no worker holds it: a run waiting between queues).
 
     Returns False (changing nothing) when someone else already finished it, e.g. the
-    run was stopped or recovered while this code was working.
+    run was stopped or recovered while this code was working. A triggered run's outcome
+    updates its trigger's failure count in the same transaction.
     """
     now = utcnow()
     conditions = [WorkflowExecution.id == execution_id, WorkflowExecution.status.in_(from_statuses)]
@@ -230,10 +255,12 @@ async def finish_execution(
         update(WorkflowExecution)
         .where(*conditions)
         .values(status=status, finished_at=now, error_message=error, final_output_json=final_output)
-        .returning(WorkflowExecution.id, WorkflowExecution.started_at)
+        .returning(WorkflowExecution.id, WorkflowExecution.started_at, WorkflowExecution.trigger_id)
         .execution_options(synchronize_session=False)
     )
     row = result.first()
+    if row is not None and row.trigger_id is not None:
+        await apply_trigger_outcome(db, row.trigger_id, status, error)
     await db.commit()
     if row is None:
         return False
@@ -560,7 +587,8 @@ async def run_execution(
         handed_to: str | None = None
         try:
             if services is None:
-                services = await build_execution_services(db, owner)
+                state = DbNodeStateStore(session_factory, execution.workflow_id, execution_id)
+                services = await build_execution_services(db, owner, state=state)
             context = NodeContext(
                 workflow_id=str(execution.workflow_id),
                 execution_id=str(execution_id),

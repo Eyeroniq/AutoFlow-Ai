@@ -82,6 +82,10 @@ class MailboxQuery:
     mark_as_read: bool = False
     include_body: bool = True
     max_body_chars: int = 5000
+    # Polling (the email trigger): only messages with a UID above this, and the oldest
+    # `max_results` of them instead of the newest, so a backlog is worked through in order.
+    uid_after: int | None = None
+    oldest_first: bool = False
 
 
 @runtime_checkable
@@ -100,5 +104,10 @@ class MailboxProvider(Protocol):
     is_mock: bool
 
     async def fetch_emails(self, query: MailboxQuery) -> list[dict[str, Any]]: ...
+
+    async def mailbox_status(self, folder: str = "INBOX") -> dict[str, Any]:
+        """{"uidvalidity": int, "uidnext": int, "messages": int} for a folder. A new
+        UIDVALIDITY means earlier UIDs no longer identify the same messages."""
+        ...
 
     async def verify(self) -> dict[str, Any]: ...

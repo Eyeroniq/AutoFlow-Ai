@@ -2,6 +2,10 @@
 and file inputs on runs."""
 
 import io
+import pathlib
+import shutil
+import subprocess
+import tempfile
 
 import pymupdf
 import pytest
@@ -66,6 +70,71 @@ async def test_upload_stores_the_file_and_detects_its_type(client, user, files_d
 )
 def test_types_come_from_the_content(head, expected):
     assert sniff_content_type(head) == expected
+
+
+# --- audio and video ---------------------------------------------------------------------------
+
+FFMPEG = shutil.which("ffmpeg")
+needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg is not installed")
+
+
+def media(*args: str) -> bytes:
+    """One second of a tone (and a black frame, for video), encoded by ffmpeg; the last arg is the extension."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pathlib.Path(tmp) / f"clip.{args[-1]}"
+        subprocess.run(
+            [FFMPEG, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-f", "lavfi", "-i",
+             "color=c=black:s=64x64:d=1", *args[:-1], str(out)],
+            check=True,
+        )
+        return out.read_bytes()
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("-map", "0:a", "mp3"), "audio/mpeg"),
+        (("-map", "0:a", "-write_xing", "0", "-id3v2_version", "0", "mp3"), "audio/mpeg"),  # a bare MPEG frame
+        (("-map", "0:a", "wav"), "audio/wav"),
+        (("-map", "0:a", "-c:a", "aac", "m4a"), "audio/mp4"),
+        (("-map", "0:a", "-c:a", "libopus", "ogg"), "audio/ogg"),
+        (("-map", "0:a", "-c:a", "libopus", "webm"), "audio/webm"),  # what MediaRecorder makes
+        (("-map", "0:a", "flac"), "audio/flac"),
+        (("-map", "1:v", "-map", "0:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "mp4"), "video/mp4"),
+        (("-map", "1:v", "-map", "0:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "mov"), "video/quicktime"),
+        (("-map", "1:v", "-map", "0:a", "-c:v", "libvpx", "-c:a", "libopus", "webm"), "video/webm"),
+    ],
+    ids=["mp3-id3", "mp3-bare", "wav", "m4a", "ogg-opus", "webm-audio", "flac", "mp4", "mov", "webm-video"],
+)
+def test_media_types_come_from_the_content(args, expected):
+    content = media(*args)
+    assert sniff_content_type(content[:8192]) == expected
+
+
+def test_media_lookalikes_are_refused():
+    assert sniff_content_type(b"RIFF\x00\x00\x00\x00AVI LIST") is None  # AVI isn't accepted
+    assert sniff_content_type(b"\x00\x00\x00\x18ftypheic\x00\x00") is None  # HEIC image
+    assert sniff_content_type(b"\x1aE\xdf\xa3" + b"\x00" * 60) is None  # EBML without tracks we know
+    assert sniff_content_type(b"OggS" + b"\x00" * 60) is None  # Ogg without a known codec
+
+
+async def test_media_uploads_have_their_own_size_limit(client, user, monkeypatch, files_dir):
+    monkeypatch.setattr(settings, "MAX_UPLOAD_MB", 0.1)
+    monkeypatch.setattr(settings, "MAX_MEDIA_UPLOAD_MB", 0.3)
+    mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 200_000  # over the document limit, under the media one
+    ok = await upload(client, user, mp3, filename="call.mp3", content_type="audio/mpeg")
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["content_type"] == "audio/mpeg"
+    pdf = await upload(client, user, b"%PDF-" + b"0" * 200_000)
+    assert pdf.status_code == 413 and pdf.json()["detail"] == "The file is larger than the 0.1 MB limit"
+    # Caught while streaming, once the content shows it's audio.
+    too_long = await upload(client, user, b"ID3\x04" + b"\x00" * 330_000, filename="long.mp3", content_type="audio/mpeg")
+    assert too_long.status_code == 413
+    assert too_long.json()["detail"] == "The file is larger than the 0.3 MB audio/video limit"
+    # Declared bigger than any limit: refused before reading.
+    huge = await upload(client, user, b"ID3\x04" + b"\x00" * 500_000, filename="huge.mp3", content_type="audio/mpeg")
+    assert huge.status_code == 413 and huge.json()["detail"] == "The file is larger than the 0.3 MB limit"
 
 
 async def test_disallowed_and_empty_files_are_refused(client, user, files_dir):

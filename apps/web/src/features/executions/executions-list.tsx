@@ -9,14 +9,22 @@ import { AppShell, Spinner } from "@/components/app-shell";
 import { ErrorAlert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status";
+import { TriggerBadge } from "@/components/ui/trigger-badge";
 import { api } from "@/lib/api";
 import { formatDateTime, formatDuration, formatRelative } from "@/lib/format";
-import type { ExecutionListItem, ExecutionStatus } from "@/lib/types";
+import type { ExecutionListItem, ExecutionStatus, ExecutionTrigger } from "@/lib/types";
 
 import { isTerminal } from "../runs/run-state";
 
 const PAGE = 25;
 const STATUSES: ExecutionStatus[] = ["pending", "running", "success", "failed", "stopped"];
+const TRIGGERS: ExecutionTrigger[] = ["manual", "schedule", "email", "webhook"];
+
+/** A filter from the page's URL (?workflow_id=...&trigger=...), e.g. from the Triggers panel. */
+function initialFilter(name: string): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get(name) ?? "";
+}
 
 /** Poll while anything listed is still queued or running. */
 export const pollWhileActive = (rows: ExecutionListItem[] | undefined) => (rows?.some((row) => !isTerminal(row.status)) ? 3000 : false);
@@ -31,9 +39,9 @@ export function ExecutionRows({ rows, compact = false }: { rows: ExecutionListIt
             <th className="px-4 py-2.5">Pipeline</th>
             <th className="px-4 py-2.5">Status</th>
             {!compact && <th className="hidden px-4 py-2.5 md:table-cell">Execution</th>}
+            <th className="px-4 py-2.5">Trigger</th>
             <th className="px-4 py-2.5">Started</th>
             <th className="px-4 py-2.5 text-right">Duration</th>
-            {!compact && <th className="hidden px-4 py-2.5 lg:table-cell">Trigger</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -54,11 +62,13 @@ export function ExecutionRows({ rows, compact = false }: { rows: ExecutionListIt
                 <StatusBadge status={row.status} />
               </td>
               {!compact && <td className="hidden px-4 py-2.5 font-mono text-xs text-slate-500 md:table-cell">{row.id.slice(0, 8)}</td>}
+              <td className="px-4 py-2.5">
+                <TriggerBadge trigger={row.trigger} />
+              </td>
               <td className="px-4 py-2.5 text-slate-600" title={formatDateTime(row.started_at ?? row.created_at)}>
                 {row.started_at ? formatRelative(row.started_at) : `queued ${formatRelative(row.created_at)}`}
               </td>
               <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-600">{formatDuration(row.duration_ms)}</td>
-              {!compact && <td className="hidden px-4 py-2.5 text-slate-500 lg:table-cell">{row.trigger}</td>}
             </tr>
           ))}
         </tbody>
@@ -77,14 +87,21 @@ export function ExecutionsScreen() {
 
 function ExecutionsList() {
   const [status, setStatus] = useState<ExecutionStatus | "">("");
-  const [workflowId, setWorkflowId] = useState("");
+  const [workflowId, setWorkflowId] = useState(() => initialFilter("workflow_id"));
+  const [trigger, setTrigger] = useState<ExecutionTrigger | "">(() => initialFilter("trigger") as ExecutionTrigger | "");
   const [page, setPage] = useState(0);
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows.list });
   const executions = useQuery({
-    queryKey: ["executions", { status, workflowId, page }],
+    queryKey: ["executions", { status, workflowId, trigger, page }],
     queryFn: () =>
       // One extra row tells us whether there's a next page.
-      api.executions.list({ limit: PAGE + 1, offset: page * PAGE, status: status || undefined, workflow_id: workflowId || undefined }),
+      api.executions.list({
+        limit: PAGE + 1,
+        offset: page * PAGE,
+        status: status || undefined,
+        workflow_id: workflowId || undefined,
+        trigger: trigger || undefined,
+      }),
     placeholderData: keepPreviousData,
     refetchInterval: (query) => pollWhileActive(query.state.data),
   });
@@ -131,6 +148,23 @@ function ExecutionsList() {
             </option>
           ))}
         </select>
+        <select
+          aria-label="Filter by trigger"
+          value={trigger}
+          onChange={(e) => {
+            setTrigger(e.target.value as ExecutionTrigger | "");
+            setPage(0);
+          }}
+          className={select}
+          data-testid="trigger-filter"
+        >
+          <option value="">Any trigger</option>
+          {TRIGGERS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
       </div>
 
       {executions.isPending ? (
@@ -144,8 +178,8 @@ function ExecutionsList() {
         </div>
       ) : rows.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
-          <p className="text-sm text-slate-600">{status || workflowId ? "No executions match these filters." : "No runs yet."}</p>
-          {!status && !workflowId && (
+          <p className="text-sm text-slate-600">{status || workflowId || trigger ? "No executions match these filters." : "No runs yet."}</p>
+          {!status && !workflowId && !trigger && (
             <Link href="/dashboard" className="mt-2 inline-block text-sm font-medium text-indigo-600 hover:text-indigo-500">
               Run a pipeline from the dashboard
             </Link>

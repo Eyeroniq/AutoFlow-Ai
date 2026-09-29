@@ -166,6 +166,7 @@ export function DefaultControl({ spec, field, nodeId, inputId, invalid, describe
         <ReferenceField
           id={inputId}
           nodeId={nodeId}
+          field={spec.name}
           value={Array.isArray(field.value) ? (field.value as string[]).join(", ") : text(field.value)}
           onChange={field.onChange}
           onBlur={field.onBlur}

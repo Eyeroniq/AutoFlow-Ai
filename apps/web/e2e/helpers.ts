@@ -2,7 +2,7 @@ import path from "node:path";
 
 import { type APIRequestContext, expect, type Page } from "@playwright/test";
 
-import type { TokenResponse, Workflow, WorkflowGraph, WorkflowListItem } from "../src/lib/types";
+import type { TokenResponse, Workflow, WorkflowGraph, WorkflowListItem, WorkflowValidation } from "../src/lib/types";
 
 export const API_URL = process.env.E2E_API_URL ?? "http://localhost:8000";
 // The seed account (apps/api/app/db/seed.py).
@@ -61,6 +61,19 @@ export class Api {
     const demo = (await this.workflows()).find((w) => w.name === DEMO_PIPELINE);
     expect(demo, `"${DEMO_PIPELINE}" is seeded for ${DEMO_EMAIL}`).toBeTruthy();
     return this.workflow(demo!.id);
+  }
+
+  /**
+   * Fails at once, with the backend's reasons, if a seeded pipeline wouldn't run (a node
+   * left behind while editing it, a missing key), instead of the run quietly never starting.
+   */
+  async expectRunnable(workflow: Pick<Workflow, "id" | "name">) {
+    const { status, body } = await this.call<WorkflowValidation>("POST", `/api/workflows/${workflow.id}/validate`);
+    expect(status).toBe(200);
+    expect(
+      body.errors.map((e) => e.message),
+      `"${workflow.name}" must validate before these tests can run it: fix it in the editor, or delete it and re-run the seed`,
+    ).toEqual([]);
   }
 
   async createWorkflow(name: string, graph: WorkflowGraph) {
@@ -134,11 +147,6 @@ export async function clickEdge(page: Page, source: string, target: string) {
   const a = (await page.locator(`.react-flow__handle.source[data-nodeid="${source}"]`).first().boundingBox())!;
   const b = (await page.locator(`.react-flow__handle.target[data-nodeid="${target}"]`).boundingBox())!;
   await page.mouse.click((a.x + a.width / 2 + b.x + b.width / 2) / 2, (a.y + a.height / 2 + b.y + b.height / 2) / 2);
-}
-
-/** Hides the Next.js dev-mode badge so it doesn't cover the UI in screenshots. */
-export async function hideDevOverlay(page: Page) {
-  await page.addStyleTag({ content: "nextjs-portal { display: none !important; }" });
 }
 
 interface ReadEmail {

@@ -21,6 +21,12 @@ anthropic = ["anthropic>=1,<2"]
 providers = ["flowforge-workflow-engine[gemini,openai,anthropic]"]
 # PDF Extract and OCR. OCR also needs the tesseract binary (apt install tesseract-ocr).
 documents = ["pymupdf>=1.24", "pytesseract>=0.3.10", "pillow>=10"]
+# RSS Feed (feedparser) and Web Page (trafilatura).
+sources = ["feedparser>=6", "trafilatura>=2"]
+# Speech to Text with local faster-whisper (Groq needs nothing extra). Both need ffmpeg.
+audio = ["faster-whisper>=1.1"]
+# Web Search with DuckDuckGo (Tavily needs nothing extra).
+search = ["ddgs>=9"]
 test = ["pytest>=8", "pytest-asyncio>=1.0"]
 
 [tool.hatch.build.targets.wheel]

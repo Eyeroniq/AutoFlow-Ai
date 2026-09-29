@@ -101,6 +101,12 @@ export function ConfigPanel({ nodeId }: { nodeId: string }) {
           {(node.data.nodeType === "gmail" || node.data.nodeType === "gmail_read") && auth !== "mock" && (
             <ConnectionTest provider="gmail" label="Gmail (SMTP + IMAP) connection" />
           )}
+          {node.data.nodeType === "telegram" && node.data.config.auth !== "mock" && (
+            <ConnectionTest provider="telegram" label="Telegram bot connection" />
+          )}
+          {node.data.nodeType === "discord_webhook" && node.data.config.auth !== "mock" && !node.data.config.webhook_url && (
+            <ConnectionTest provider="discord" label="Discord webhook connection" />
+          )}
         </Section>
 
         <Section title="Inputs and outputs">

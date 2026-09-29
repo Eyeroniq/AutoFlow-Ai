@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, CircleAlert, CircleCheck, ExternalLink, KeyRound, Mail, PlugZap, Unplug } from "lucide-react";
+import { Bot, CircleAlert, CircleCheck, ExternalLink, KeyRound, Mail, MessageSquare, PlugZap, Search, Send, Unplug } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -17,20 +17,32 @@ import { api } from "@/lib/api";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import type { Integration, IntegrationConnect, IntegrationTestResult } from "@/lib/types";
 
-// Providers whose endpoint can be changed (a local Ollama, an OpenAI-compatible server).
-const CUSTOM_ENDPOINT = new Set(["ollama", "openai"]);
+// Providers whose endpoint can be changed (a local Ollama, OpenAI or a proxy, any
+// OpenAI-compatible server).
+const CUSTOM_ENDPOINT = new Set(["ollama", "openai", "custom"]);
 const KEYLESS = new Set(["ollama"]);
+// The key is optional (many self-hosted OpenAI-compatible servers take none).
+const OPTIONAL_KEY = new Set(["custom"]);
 
 const optional = (schema: z.ZodType) => z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
 const port = optional(z.coerce.number().int("Whole number").min(1, "1–65535").max(65535, "1–65535"));
 
 function llmSchema(provider: string) {
+  if (provider === "custom") {
+    return z.object({
+      api_key: optional(z.string().trim()),
+      base_url: z.url("Enter the endpoint's base URL, e.g. https://api.together.xyz/v1"),
+      model: z.string().trim().min(1, "Enter the model to use").max(200),
+    });
+  }
   return z.object({
     api_key: KEYLESS.has(provider) ? z.string().optional() : z.string().trim().min(1, "Paste your API key"),
     base_url: optional(z.url("Enter a full URL, e.g. http://localhost:11434")),
     model: optional(z.string().trim().max(200)),
   });
 }
+
+const searchSchema = z.object({ api_key: z.string().trim().min(1, "Paste your API key") });
 
 const emailSchema = z.object({
   email: z.email("Enter the Gmail address"),
@@ -43,13 +55,36 @@ const emailSchema = z.object({
   imap_port: port,
 });
 
+const telegramSchema = z.object({
+  bot_token: z.string().trim().regex(/^\d{5,}:[A-Za-z0-9_-]{30,}$/, "Paste the token @BotFather gave you (123456789:AAE...)"),
+  chat_id: optional(z.string().trim().max(100)),
+});
+
+const discordSchema = z.object({
+  webhook_url: z
+    .string()
+    .trim()
+    .regex(/^https:\/\/((ptb|canary)\.)?discord(app)?\.com\/api(\/v\d+)?\/webhooks\/\d+\/[\w-]+\/?$/, "Paste a Discord webhook URL (https://discord.com/api/webhooks/...)"),
+});
+
+function schemaFor(integration: Integration) {
+  if (integration.kind === "email") return emailSchema;
+  if (integration.provider === "telegram") return telegramSchema;
+  if (integration.provider === "discord") return discordSchema;
+  if (integration.kind === "search") return searchSchema;
+  return llmSchema(integration.provider);
+}
+
+const ICONS = { llm: Bot, email: Mail, search: Search, telegram: Send, discord: MessageSquare } as const;
+const TINTS = { llm: "bg-violet-50 text-violet-600", email: "bg-sky-50 text-sky-600", messaging: "bg-teal-50 text-teal-600", search: "bg-amber-50 text-amber-700" } as const;
+
 type FormValues = Record<string, string | undefined>;
 
 /** Write-only credential form: secrets go to the API and are cleared from the page. */
 function ConnectForm({ integration, onDone }: { integration: Integration; onDone: (saved: boolean) => void }) {
   const queryClient = useQueryClient();
   const email = integration.kind === "email";
-  const schema = email ? emailSchema : llmSchema(integration.provider);
+  const schema = schemaFor(integration);
   const form = useForm<FormValues>({ resolver: zodResolver(schema as z.ZodType<FormValues, FormValues>), defaultValues: {} });
   const connect = useMutation({
     meta: { silent: true },
@@ -70,7 +105,26 @@ function ConnectForm({ integration, onDone }: { integration: Integration; onDone
 
   return (
     <form onSubmit={(e) => void submit(e)} className="space-y-3 border-t border-slate-100 pt-4" data-testid={`connect-form-${integration.provider}`}>
-      {email ? (
+      {integration.provider === "telegram" ? (
+        <>
+          <FormField label="Bot token" {...secret} placeholder="From @BotFather: 123456789:AAE..." registration={form.register("bot_token")} error={errors.bot_token} />
+          <FormField
+            label="Default chat id (optional)"
+            autoComplete="off"
+            placeholder="Where Telegram nodes send when they name no chat"
+            registration={form.register("chat_id")}
+            error={errors.chat_id}
+          />
+          <p className="text-xs text-slate-500">
+            Send your bot a message, then open <code className="rounded bg-slate-100 px-1">https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> and copy{" "}
+            <code className="rounded bg-slate-100 px-1">message.chat.id</code>.
+          </p>
+        </>
+      ) : integration.provider === "discord" ? (
+        <FormField label="Webhook URL" {...secret} placeholder="https://discord.com/api/webhooks/..." registration={form.register("webhook_url")} error={errors.webhook_url} />
+      ) : integration.kind === "search" ? (
+        <FormField label="API key" {...secret} placeholder="tvly-..." registration={form.register("api_key")} error={errors.api_key} />
+      ) : email ? (
         <>
           <FormField label="Gmail address" type="email" autoComplete="off" placeholder="you@gmail.com" registration={form.register("email")} error={errors.email} />
           <FormField label="App password" {...secret} placeholder="16 characters from myaccount.google.com/apppasswords" registration={form.register("app_password")} error={errors.app_password} />
@@ -95,19 +149,37 @@ function ConnectForm({ integration, onDone }: { integration: Integration; onDone
         </>
       ) : (
         <>
-          {!KEYLESS.has(integration.provider) && (
-            <FormField label="API key" {...secret} placeholder="Paste the key" registration={form.register("api_key")} error={errors.api_key} />
-          )}
           {CUSTOM_ENDPOINT.has(integration.provider) && (
             <FormField
-              label={KEYLESS.has(integration.provider) ? "Server URL" : "Base URL (optional)"}
-              placeholder={integration.provider === "ollama" ? "http://localhost:11434" : "https://api.openai.com/v1"}
+              label={KEYLESS.has(integration.provider) ? "Server URL" : integration.provider === "custom" ? "Base URL" : "Base URL (optional)"}
+              placeholder={
+                integration.provider === "ollama"
+                  ? "http://localhost:11434"
+                  : integration.provider === "custom"
+                    ? "https://api.example.com/v1"
+                    : "https://api.openai.com/v1"
+              }
               registration={form.register("base_url")}
               error={errors.base_url}
             />
           )}
+          {!KEYLESS.has(integration.provider) && (
+            <FormField
+              label={OPTIONAL_KEY.has(integration.provider) ? "API key (if the endpoint needs one)" : "API key"}
+              {...secret}
+              placeholder="Paste the key"
+              registration={form.register("api_key")}
+              error={errors.api_key}
+            />
+          )}
+          {integration.provider === "custom" && (
+            <p className="text-xs text-slate-500">
+              Any server that speaks the OpenAI chat completions API. The URL must be a public address; private and internal
+              addresses are refused unless the server sets HTTP_ALLOW_PRIVATE_NETWORKS.
+            </p>
+          )}
           <FormField
-            label="Default model (optional)"
+            label={integration.provider === "custom" ? "Model" : "Default model (optional)"}
             placeholder={integration.default_model ?? ""}
             autoComplete="off"
             registration={form.register("model")}
@@ -181,14 +253,16 @@ function IntegrationCard({ integration }: { integration: Integration }) {
       toast.success(`${integration.label} disconnected`, "Runs fall back to the server's credential, if there is one.");
     },
   });
-  const Icon = integration.kind === "email" ? Mail : Bot;
+  const Icon = integration.kind === "messaging" ? ICONS[integration.provider as "telegram" | "discord"] ?? Send : ICONS[integration.kind];
   const latest = test.data ?? integration.last_test;
   const masked = Object.entries(integration.masked ?? {}).filter(([, v]) => v !== null && v !== "");
 
   return (
     <article className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4" data-testid={`integration-${integration.provider}`} data-source={integration.source}>
       <div className="flex items-start gap-3">
-        <span className={`grid size-9 shrink-0 place-items-center rounded-lg ${integration.kind === "email" ? "bg-sky-50 text-sky-600" : "bg-violet-50 text-violet-600"}`}>
+        <span
+          className={`grid size-9 shrink-0 place-items-center rounded-lg ${TINTS[integration.kind]}`}
+        >
           <Icon className="size-5" aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
@@ -197,7 +271,16 @@ function IntegrationCard({ integration }: { integration: Integration }) {
         </div>
         {integration.get_key_url && (
           <a href={integration.get_key_url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-500">
-            {KEYLESS.has(integration.provider) ? "Set up" : integration.kind === "email" ? "Get an app password" : "Get a key"} <ExternalLink className="size-3" />
+            {KEYLESS.has(integration.provider)
+              ? "Set up"
+              : integration.kind === "email"
+                ? "Get an app password"
+                : integration.provider === "telegram"
+                  ? "Create a bot"
+                  : integration.provider === "discord"
+                    ? "Create a webhook"
+                    : "Get a key"}{" "}
+            <ExternalLink className="size-3" />
           </a>
         )}
       </div>
@@ -297,6 +380,8 @@ function Integrations() {
   const groups: [string, Integration[]][] = [
     ["LLM providers", integrations.data.filter((i) => i.kind === "llm")],
     ["Email", integrations.data.filter((i) => i.kind === "email")],
+    ["Notifications", integrations.data.filter((i) => i.kind === "messaging")],
+    ["Web search", integrations.data.filter((i) => i.kind === "search")],
   ];
   return (
     <div className="space-y-8">
@@ -305,7 +390,7 @@ function Integrations() {
         <p className="mt-1 max-w-2xl text-sm text-slate-500">
           Your credentials take priority over the server-wide ones in <code className="rounded bg-slate-100 px-1">.env</code>. They&apos;re
           encrypted at rest and never shown again, only masked. &ldquo;Test connection&rdquo; makes a real, minimal call (no tokens generated,
-          no email sent).
+          no email or message sent).
         </p>
       </div>
       {groups.map(([title, items]) =>

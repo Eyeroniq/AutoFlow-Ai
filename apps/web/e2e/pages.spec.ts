@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import type { Integration, WorkflowGraph } from "../src/lib/types";
 
-import { API_URL, Api, DEMO_PIPELINE, hideDevOverlay, screenshotPath, signIn } from "./helpers";
+import { API_URL, Api, DEMO_PIPELINE, screenshotPath, signIn } from "./helpers";
 
 const quickGraph = (): WorkflowGraph => ({
   nodes: [
@@ -127,7 +127,6 @@ test("integrations: test real credentials, connect and disconnect a key", async 
     await card.getByTestId(`test-${provider}`).click();
     await expect(card.getByTestId(`integration-test-${provider}`)).toContainText("Works", { timeout: 30_000 });
   }
-  await hideDevOverlay(page);
   await page.screenshot({ path: screenshotPath("integrations"), fullPage: true });
 
   if (!spare) return;

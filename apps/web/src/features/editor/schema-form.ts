@@ -44,7 +44,7 @@ export interface FieldSpec {
 }
 
 /** Free-text fields that deserve a multi-line box. */
-const LONG_TEXT = new Set(["system_prompt", "user_prompt", "body", "html_body", "text", "prompt"]);
+const LONG_TEXT = new Set(["system_prompt", "user_prompt", "body", "html_body", "text", "prompt", "template", "content", "embed_description"]);
 
 const REFERENCE_ONLY = /^\s*\{\{[^{}]+\}\}\s*$/;
 export const containsReference = (value: unknown) => typeof value === "string" && /\{\{[^{}]+\}\}/.test(value);

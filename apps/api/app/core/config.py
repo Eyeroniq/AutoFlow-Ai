@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     # slowapi limit string applied to /auth/login, /auth/register, and /auth/refresh.
     AUTH_RATE_LIMIT: str = "10/minute"
 
+    # --- Deployments (POST /api/v1/deployments/{id}/run) ------------------------------
+    # Per deployment (every caller of one endpoint shares it), counted after the API key
+    # is checked. The status endpoint has its own, higher limit for polling.
+    DEPLOYMENT_RUN_RATE_LIMIT: str = "30/minute"
+    DEPLOYMENT_STATUS_RATE_LIMIT: str = "240/minute"
+    # ?wait=true blocks this long by default (?timeout= overrides, up to the maximum),
+    # then answers 202 with the execution id if the run hasn't finished.
+    DEPLOYMENT_WAIT_TIMEOUT_SECONDS: float = Field(default=30, gt=0)
+    DEPLOYMENT_MAX_WAIT_SECONDS: float = Field(default=120, gt=0)
+
     # --- Providers: server-wide defaults. A user's own stored credential wins. ---------
     # Unset values fall back to the engine's defaults (see flowforge_engine.providers).
     GEMINI_API_KEY: SecretStr | None = None
@@ -52,6 +62,14 @@ class Settings(BaseSettings):
     GROQ_MODEL: str | None = None
     OPENROUTER_API_KEY: SecretStr | None = None
     OPENROUTER_MODEL: str | None = None
+    MISTRAL_API_KEY: SecretStr | None = None
+    MISTRAL_MODEL: str | None = None
+    CEREBRAS_API_KEY: SecretStr | None = None
+    CEREBRAS_MODEL: str | None = None
+    # Any OpenAI-compatible endpoint. Its base URL must be public unless HTTP_ALLOW_PRIVATE_NETWORKS.
+    CUSTOM_OPENAI_BASE_URL: str | None = None
+    CUSTOM_OPENAI_API_KEY: SecretStr | None = None
+    CUSTOM_OPENAI_MODEL: str | None = None
     OLLAMA_BASE_URL: str | None = None
     OLLAMA_MODEL: str | None = None
     OLLAMA_EMBEDDING_MODEL: str | None = None
@@ -69,6 +87,24 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str | None = None
     IMAP_HOST: str | None = None
     IMAP_PORT: int | None = None
+
+    # Notifications. A Telegram bot token from @BotFather (plus the chat Telegram nodes send
+    # to by default), and a Discord channel webhook URL. Users can store their own instead.
+    # Web search: Tavily (optional; DuckDuckGo needs no key).
+    TAVILY_API_KEY: SecretStr | None = None
+
+    # Speech-to-text. Groq Whisper uses GROQ_API_KEY; faster-whisper runs locally and keeps
+    # its models in WHISPER_MODELS_DIR (a volume in Docker).
+    GROQ_WHISPER_MODEL: str | None = None
+    GROQ_WHISPER_TRANSLATE_MODEL: str | None = None
+    GROQ_WHISPER_MAX_FILE_MB: float | None = Field(default=None, gt=0)
+    FASTER_WHISPER_MODEL: str | None = None
+    FASTER_WHISPER_COMPUTE_TYPE: str | None = None
+    WHISPER_MODELS_DIR: str | None = None
+
+    TELEGRAM_BOT_TOKEN: SecretStr | None = None
+    TELEGRAM_CHAT_ID: str | None = None
+    DISCORD_WEBHOOK_URL: SecretStr | None = None
 
     # Backoff for 429/5xx/network errors; free-tier limits change, so nothing is hardcoded.
     LLM_MAX_RETRIES: int | None = Field(default=None, ge=0, le=10)
@@ -88,6 +124,8 @@ class Settings(BaseSettings):
     # and every worker; for a local run it defaults to apps/api/.data/files.
     FILES_DIR: str = str(Path(__file__).resolve().parents[2] / ".data" / "files")
     MAX_UPLOAD_MB: float = Field(default=25, gt=0, le=1024)
+    # Audio and video for speech-to-text (recordings are much larger than documents).
+    MAX_MEDIA_UPLOAD_MB: float = Field(default=500, gt=0, le=4096)
     # Sample documents the seed loads (the repo's samples/; /samples in Docker).
     SAMPLES_DIR: str | None = None
 
@@ -96,8 +134,9 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str | None = None
     CELERY_RESULT_BACKEND: str | None = None
     # A whole run is stopped (and marked failed) after this long. Celery's own hard limit
-    # sits a minute above it as a backstop.
-    EXECUTION_TIME_LIMIT_SECONDS: float = Field(default=600, gt=0)
+    # sits a minute above it as a backstop. 30 minutes leaves room for Speech to Text on
+    # long recordings (an hour of audio takes ~1 minute on Groq, 10+ on a CPU).
+    EXECUTION_TIME_LIMIT_SECONDS: float = Field(default=1800, gt=0)
     # Retries for infrastructure errors (database/broker unreachable) before a run starts.
     # Node failures are never retried: they are recorded as the run's result.
     CELERY_TASK_MAX_RETRIES: int = Field(default=3, ge=0)
@@ -113,6 +152,15 @@ class Settings(BaseSettings):
     EXECUTION_STOP_WAIT_SECONDS: float = Field(default=5, ge=0)
     # How often a running execution checks for a stop request.
     EXECUTION_STOP_POLL_SECONDS: float = Field(default=0.25, gt=0)
+
+    # --- Triggers (schedules, email, webhook) ------------------------------------------
+    # Celery beat ticks every minute; a schedule whose fire time is older than this when a
+    # tick sees it (beat or the workers were down) is skipped instead of run late.
+    TRIGGER_MISFIRE_GRACE_SECONDS: float = Field(default=3600, gt=0)
+    # Email triggers poll at most this often (per trigger).
+    EMAIL_TRIGGER_MIN_POLL_MINUTES: int = Field(default=1, ge=1)
+    # Longest an email poll may hold its lock (a crashed poller frees it after this).
+    EMAIL_POLL_LOCK_SECONDS: int = Field(default=300, gt=0)
 
     # --- WebSocket ---------------------------------------------------------------------
     WS_HEARTBEAT_SECONDS: float = Field(default=15, gt=0)
@@ -141,6 +189,10 @@ class Settings(BaseSettings):
         return int(self.MAX_UPLOAD_MB * 1024 * 1024)
 
     @property
+    def max_media_upload_bytes(self) -> int:
+        return int(self.MAX_MEDIA_UPLOAD_MB * 1024 * 1024)
+
+    @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
@@ -151,24 +203,31 @@ class Settings(BaseSettings):
         """
         names = (
             "TESTING", "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_EMBEDDING_MODEL", "GROQ_API_KEY",
-            "GROQ_MODEL", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
+            "GROQ_MODEL", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "MISTRAL_API_KEY", "MISTRAL_MODEL",
+            "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "CUSTOM_OPENAI_BASE_URL", "CUSTOM_OPENAI_API_KEY",
+            "CUSTOM_OPENAI_MODEL", "TAVILY_API_KEY", "GROQ_WHISPER_MODEL", "GROQ_WHISPER_TRANSLATE_MODEL",
+            "GROQ_WHISPER_MAX_FILE_MB", "FASTER_WHISPER_MODEL", "FASTER_WHISPER_COMPUTE_TYPE", "WHISPER_MODELS_DIR",
+            "HTTP_ALLOW_PRIVATE_NETWORKS", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
             "OLLAMA_EMBEDDING_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "ANTHROPIC_API_KEY",
             "ANTHROPIC_MODEL", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USER", "SMTP_PASSWORD",
             "SMTP_FROM_NAME", "IMAP_HOST", "IMAP_PORT", "LLM_MAX_RETRIES", "LLM_RETRY_BASE_DELAY_SECONDS",
-            "LLM_RETRY_MAX_DELAY_SECONDS", "LLM_REQUEST_TIMEOUT_SECONDS",
+            "LLM_RETRY_MAX_DELAY_SECONDS", "LLM_REQUEST_TIMEOUT_SECONDS", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+            "DISCORD_WEBHOOK_URL",
         )
         env: dict[str, Any] = {}
         for name in names:
             value = getattr(self, name)
             env[name] = value.get_secret_value() if isinstance(value, SecretStr) else value
         env["TESTING"] = "true" if self.TESTING else ""
+        env["HTTP_ALLOW_PRIVATE_NETWORKS"] = "true" if self.HTTP_ALLOW_PRIVATE_NETWORKS else ""
         return env
 
     def secret_values(self) -> list[str]:
         """Server secrets the log formatter redacts wherever they appear."""
         secrets = [self.JWT_SECRET, *self.ENCRYPTION_KEY.get_secret_value().split(",")]
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
-                     "ANTHROPIC_API_KEY", "SMTP_PASSWORD"):
+                     "ANTHROPIC_API_KEY", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL",
+                     "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "CUSTOM_OPENAI_API_KEY", "TAVILY_API_KEY"):
             value = getattr(self, name)
             if value is not None:
                 secrets.append(value.get_secret_value())

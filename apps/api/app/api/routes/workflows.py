@@ -22,8 +22,10 @@ from app.core.config import settings
 from app.core.redis import get_redis
 from app.models.enums import ExecutionStatus
 from app.models.execution import WorkflowExecution
+from app.models.trigger import WorkflowTrigger
 from app.models.workflow import Workflow
 from app.schemas.execution import ExecutionAccepted, ExecutionDetail, ExecutionSummary, RunRequest
+from app.schemas.trigger import TriggerBrief
 from app.schemas.workflow import (
     LastExecution,
     NodeTestRequest,
@@ -37,19 +39,19 @@ from app.schemas.workflow import (
     WorkflowValidation,
 )
 from app.services.files import file_input_issues
+from app.services.node_state import DbNodeStateStore
 from app.services.providers import get_execution_services
 from app.services.runs import (
     InvalidWorkflowGraph,
-    close_out_nodes,
     create_execution,
-    finish_execution,
+    fail_unqueued,
     load_execution_detail,
     run_execution,
 )
 from app.services.task_queue import EnqueueFailed
+from app.services.workflows import get_owned_workflow, replace_graph
 
 logger = logging.getLogger(__name__)
-from app.services.workflows import get_owned_workflow, replace_graph
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -69,7 +71,16 @@ async def list_workflows(db: DbSession, user: CurrentUser) -> list[WorkflowListI
         select(Workflow).where(Workflow.owner_id == user.id).order_by(Workflow.updated_at.desc())
     ))
     latest: dict[uuid.UUID, WorkflowExecution] = {}
+    triggers: dict[uuid.UUID, list[TriggerBrief]] = {}
     if workflows:
+        for row in await db.scalars(
+            select(WorkflowTrigger)
+            .where(WorkflowTrigger.workflow_id.in_([w.id for w in workflows]))
+            .order_by(WorkflowTrigger.type)
+        ):
+            triggers.setdefault(row.workflow_id, []).append(
+                TriggerBrief(type=row.type, enabled=row.enabled, auto_disabled=row.auto_disabled_at is not None and not row.enabled)
+            )
         rows = await db.scalars(
             select(WorkflowExecution)
             .where(WorkflowExecution.workflow_id.in_([w.id for w in workflows]))
@@ -82,6 +93,7 @@ async def list_workflows(db: DbSession, user: CurrentUser) -> list[WorkflowListI
             **WorkflowSummary.model_validate(w).model_dump(),
             node_count=len((w.graph_json or {}).get("nodes", [])),
             last_execution=LastExecution.model_validate(latest[w.id]) if w.id in latest else None,
+            triggers=triggers.get(w.id, []),
         )
         for w in workflows
     ]
@@ -217,6 +229,7 @@ async def run_node_test(
     db: DbSession,
     user: CurrentUser,
     services: Services,
+    session_factory: SessionFactoryDep,
     body: NodeTestRequest | None = None,
 ) -> NodeTestResult:
     workflow = await get_owned_workflow(db, workflow_id, user)
@@ -227,6 +240,8 @@ async def run_node_test(
     body = body or NodeTestRequest()
     if body.config is not None:
         node = node.model_copy(update={"config": body.config})
+    # Reads what earlier runs saved (an RSS feed's position) without moving it.
+    services.state = DbNodeStateStore(session_factory, workflow.id, None)
     context = NodeContext(
         workflow_id=str(workflow.id),
         execution_id=f"test-{uuid.uuid4()}",
@@ -306,6 +321,7 @@ async def run(
         ) from None
 
     if sync:
+        services.state = DbNodeStateStore(session_factory, workflow.id, execution.id)
         await run_execution(
             execution.id, session_factory=session_factory, redis=get_redis(),
             worker_id=f"api@{socket.gethostname()}", services=services,
@@ -325,11 +341,7 @@ async def run(
                 "enqueue_ms": round((sent - created) * 1000),
             })
     except EnqueueFailed as exc:
-        error = f"Could not queue the run: the task broker is unavailable ({exc})"
-        await finish_execution(db, None, execution.id, ExecutionStatus.FAILED, error=error,
-                               from_statuses=(ExecutionStatus.PENDING,))
-        await close_out_nodes(db, None, execution.id, pending_reason="Not run: could not be queued",
-                              running_reason="Not run: could not be queued")
+        error = await fail_unqueued(db, execution.id, exc)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=error) from None
     return ExecutionAccepted.build(execution.id, workflow.id, ExecutionStatus.PENDING, queue)
 

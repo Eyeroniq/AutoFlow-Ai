@@ -9,10 +9,14 @@ from app.models.enums import IntegrationStatus
 class ConnectRequest(BaseModel):
     """Credential fields; which ones apply depends on the provider.
 
-    - gemini / groq / openrouter / anthropic: `api_key` (required), optional `model`
+    - gemini / groq / openrouter / mistral / cerebras / anthropic: `api_key` (required), optional `model`
     - openai: `api_key`, optional `base_url` and `model`
+    - custom (any OpenAI-compatible endpoint): `base_url` and `model` (required), `api_key` if it needs one
+    - tavily: `api_key`
     - ollama: optional `base_url` and `model` (no key)
     - gmail: `email` and `app_password` (a Google App Password), optional SMTP/IMAP overrides
+    - telegram: `bot_token` (from @BotFather), optional `chat_id` (where Telegram nodes send by default)
+    - discord: `webhook_url` (a channel webhook)
     """
 
     model_config = ConfigDict(
@@ -22,6 +26,7 @@ class ConnectRequest(BaseModel):
                 {"api_key": "AIza...your-key", "model": "gemini-3.8-flash"},
                 {"email": "you@gmail.com", "app_password": "abcd efgh ijkl mnop"},
                 {"base_url": "http://host.docker.internal:11434/v1", "model": "llama3.2"},
+                {"bot_token": "123456789:AAE...from-BotFather", "chat_id": "123456789"},
             ]
         },
     )
@@ -37,6 +42,9 @@ class ConnectRequest(BaseModel):
     smtp_security: Literal["auto", "starttls", "ssl"] | None = None
     imap_host: str | None = Field(default=None, max_length=255)
     imap_port: int | None = Field(default=None, ge=1, le=65535)
+    bot_token: SecretStr | None = Field(default=None, description="Telegram bot token; never returned.")
+    chat_id: str | None = Field(default=None, max_length=100, description="Telegram chat Telegram nodes send to by default.")
+    webhook_url: SecretStr | None = Field(default=None, description="Discord webhook URL; never returned (shown masked).")
 
     @field_validator("base_url")
     @classmethod
@@ -49,7 +57,7 @@ class ConnectRequest(BaseModel):
 class IntegrationRead(BaseModel):
     provider: str
     label: str
-    kind: Literal["llm", "email"]
+    kind: Literal["llm", "email", "messaging", "search"]
     # True when *you* have stored a credential (it takes priority over the server's).
     connected: bool
     # Which credential a run would use right now.

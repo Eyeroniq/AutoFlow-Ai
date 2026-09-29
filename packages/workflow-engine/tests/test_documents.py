@@ -187,6 +187,30 @@ async def test_ocr_reports_missing_language_data(tmp_path, store):
 
 
 @needs_tesseract
+async def test_ocr_prefer_text_layer_reads_digital_pages_and_ocrs_scans(tmp_path, store):
+    digital = text_pdf(tmp_path / "digital.pdf", ["Invoice INV-2291 from Acme Supplies, total due 120.00 EUR"])
+    scan = scanned_pdf(tmp_path / "scan.pdf", "Invoice 4417 due March")
+    merged = pymupdf.open(digital)
+    merged.insert_pdf(pymupdf.open(scan))
+    merged.save(tmp_path / "mixed.pdf")
+    pdf = store.add(tmp_path / "mixed.pdf")
+
+    result = await execute_node(
+        node("ocr", "ocr", file=pdf.id, dpi=200, prefer_text_layer=True), make_context(services=services(store))
+    )
+    assert result.status is NodeStatus.SUCCESS, result.error
+    first, second = result.output["pages"]
+    assert first["method"] == "text_layer" and first["confidence"] is None
+    assert first["text"] == "Invoice INV-2291 from Acme Supplies, total due 120.00 EUR"
+    assert second["method"] == "ocr" and "Invoice 4417 due March" in second["text"]
+    # Only the OCR'd page counts toward the confidence.
+    assert result.output["mean_confidence"] == second["confidence"]
+
+    default = await execute_node(node("ocr", "ocr", file=pdf.id, dpi=200), make_context(services=services(store)))
+    assert [p["method"] for p in default.output["pages"]] == ["ocr", "ocr"]
+
+
+@needs_tesseract
 async def test_ocr_refuses_documents_over_max_pages(tmp_path, store):
     pdf = store.add(text_pdf(tmp_path / "long.pdf", ["a", "b", "c"]))
     result = await execute_node(node("ocr", "ocr", file=pdf.id, max_pages=2), make_context(services=services(store)))

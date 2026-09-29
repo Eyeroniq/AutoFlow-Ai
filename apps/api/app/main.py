@@ -22,6 +22,7 @@ from app.core.rate_limit import limiter
 from app.core.redis import close_redis, get_redis
 from app.db.session import AsyncSessionLocal, engine
 from app.services.control import recover_stale_executions
+from app.services.templates import sync_templates
 
 setup_logging(settings.LOG_LEVEL)
 for _secret in settings.secret_values():
@@ -49,6 +50,12 @@ async def _recovery_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("api starting", extra={"environment": settings.ENVIRONMENT})
+    try:
+        async with AsyncSessionLocal() as db:
+            count = await sync_templates(db)
+        logger.info("templates synced", extra={"templates": count})
+    except Exception:  # a missing migration mustn't keep the API down; the seed syncs too
+        logger.exception("template sync failed")
     recovery = asyncio.create_task(_recovery_loop())
     yield
     recovery.cancel()

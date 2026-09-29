@@ -1,11 +1,13 @@
+import asyncio
 import json
 import logging
+import time
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
-from flowforge_engine import get_node_definition
+from flowforge_engine import ExecutionHooks, execute_node, get_node_definition
 from flowforge_engine.errors import ProviderError
 from flowforge_engine.models import GraphNode
 from flowforge_engine.providers import LLM_PROVIDERS, MockEmailProvider, ProviderSettings
@@ -114,7 +116,7 @@ class TestConditionNode:
     def test_unknown_operator_is_a_config_error(self):
         with pytest.raises(ValidationError):
             get_node_definition("condition").config_schema.model_validate(
-                {"left": 1, "operator": "matches", "right": 1}
+                {"left": 1, "operator": "resembles", "right": 1}
             )
 
 
@@ -127,6 +129,25 @@ class FailingProvider:
     async def generate(self, **kwargs):
         self.calls += 1
         raise ProviderError(self.name, self.message)
+
+
+class SlowProvider:
+    """Answers after `delay` seconds: an overloaded provider that's slow to respond."""
+
+    is_mock = False
+
+    def __init__(self, name, delay):
+        self.name, self.delay, self.calls = name, delay, 0
+
+    async def generate(self, **kwargs):
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        return f"{self.name} answered"
+
+    async def stream(self, **kwargs):
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        yield f"{self.name} answered"
 
 
 class TestLLMNodes:
@@ -157,9 +178,13 @@ class TestLLMNodes:
             "gemini": "gemini-3.5-flash-lite",
             "groq": "openai/gpt-oss-20b",
             "openrouter": "openrouter/free",
+            "mistral": "mistral-small-latest",
+            "cerebras": "qwen-3.8-27b",
             "ollama": "llama3.2",
             "openai": "gpt-4.1-mini",
             "anthropic": "claude-opus-5",
+            # The user names the endpoint's model.
+            "custom": None,
             "mock": "mock",
         }
 
@@ -221,12 +246,58 @@ class TestLLMNodes:
         assert result.error.startswith("All 2 providers failed: gemini: rate limited")
         assert "Authentication missing for provider 'groq'" in result.error
 
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_a_slow_provider_leaves_the_fallback_its_share_of_the_timeout(self, stream):
+        # Gemini would answer after 30s, far past its half of the 1s node timeout.
+        gemini, groq = SlowProvider("gemini", 30), SlowProvider("groq", 0)
+        services = ExecutionServices(
+            provider_settings=ProviderSettings(testing=True), llm_providers={"gemini": gemini, "groq": groq}
+        )
+        node = GraphNode(id="llm", type="gemini", config={"user_prompt": "hi", "fallback": ["groq"], "stream": stream})
+        tokens = []
+
+        class Watcher(ExecutionHooks):
+            async def node_token(self, node_id, text, provider):
+                tokens.append((text, provider))
+
+        started = time.monotonic()
+        result = await execute_node(node, make_context(services=services), node_timeout=1.0, hooks=Watcher())
+        elapsed = time.monotonic() - started
+
+        assert result.status.value == "success", result.error
+        assert result.output["provider_used"] == "groq" and result.output["response"] == "groq answered"
+        [error] = result.output["fallback_errors"]
+        assert error["provider"] == "gemini" and "no answer within 0s, its share of the node's time" in error["error"]
+        assert 0.4 < elapsed < 0.9  # about half the timeout went to Gemini
+        if stream:
+            assert tokens == [("groq answered", "groq")]
+
+    async def test_without_a_fallback_the_provider_gets_the_whole_timeout(self):
+        def only(provider):
+            return ExecutionServices(provider_settings=ProviderSettings(testing=True), llm_providers={"gemini": provider})
+
+        node = GraphNode(id="llm", type="gemini", config={"user_prompt": "hi"})
+        result = await execute_node(node, make_context(services=only(SlowProvider("gemini", 0.6))), node_timeout=1.0)
+        assert result.status.value == "success" and result.output["provider_used"] == "gemini"
+
+        result = await execute_node(node, make_context(services=only(SlowProvider("gemini", 5))), node_timeout=0.3)
+        assert result.status.value == "failed" and result.error == "Timed out after 0.3s"
+
+    async def test_the_last_provider_gets_all_the_time_left(self):
+        # Three providers, 1.5s: the first two get 0.5s each, the last whatever remains.
+        chain = {"gemini": SlowProvider("gemini", 30), "groq": SlowProvider("groq", 30), "ollama": SlowProvider("ollama", 0.35)}
+        services = ExecutionServices(provider_settings=ProviderSettings(testing=True), llm_providers=chain)
+        node = GraphNode(id="llm", type="gemini", config={"user_prompt": "hi", "fallback": ["groq", "ollama"]})
+        result = await execute_node(node, make_context(services=services), node_timeout=1.5)
+        assert result.status.value == "success" and result.output["provider_used"] == "ollama"
+        assert [e["provider"] for e in result.output["fallback_errors"]] == ["gemini", "groq"]
+
     def test_fallback_entries_must_name_known_providers(self):
         schema = get_node_definition("gemini").config_schema
-        with pytest.raises(ValidationError, match="unknown provider 'mistral'"):
-            schema.model_validate({"user_prompt": "hi", "fallback": ["mistral"]})
+        with pytest.raises(ValidationError, match="unknown provider 'cohere'"):
+            schema.model_validate({"user_prompt": "hi", "fallback": ["cohere"]})
         with pytest.raises(ValidationError):
-            schema.model_validate({"user_prompt": "hi", "provider": "mistral"})
+            schema.model_validate({"user_prompt": "hi", "provider": "cohere"})
 
     def test_required_providers(self):
         definition = get_node_definition("gemini")

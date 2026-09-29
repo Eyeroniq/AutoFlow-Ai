@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from flowforge_engine.providers.retry import RetryPolicy
 
-ProviderKind = Literal["llm", "email"]
+ProviderKind = Literal["llm", "email", "messaging", "search"]
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,18 @@ LLM_PROVIDERS: dict[str, ProviderInfo] = {
             default_model="openrouter/free",
             env_vars=("OPENROUTER_API_KEY",), get_key_url="https://openrouter.ai/settings/keys",
         ),
+        # Mistral La Plateforme: its free "Experiment" plan covers every model (rate limited).
+        ProviderInfo(
+            "mistral", "Mistral", "llm", base_url="https://api.mistral.ai/v1",
+            default_model="mistral-small-latest",
+            env_vars=("MISTRAL_API_KEY",), get_key_url="https://console.mistral.ai/api-keys",
+        ),
+        # Cerebras Inference: free trial tier, 5 requests per minute per model (checked 2026-09).
+        ProviderInfo(
+            "cerebras", "Cerebras", "llm", base_url="https://api.cerebras.ai/v1",
+            default_model="qwen-3.8-27b",
+            env_vars=("CEREBRAS_API_KEY",), get_key_url="https://cloud.cerebras.ai",
+        ),
         ProviderInfo(
             "ollama", "Ollama (local)", "llm", base_url="http://localhost:11434/v1",
             default_model="llama3.2", embedding_model="nomic-embed-text", requires_key=False,
@@ -76,6 +88,12 @@ LLM_PROVIDERS: dict[str, ProviderInfo] = {
             default_model="claude-opus-5",
             env_vars=("ANTHROPIC_API_KEY",), get_key_url="https://console.anthropic.com/settings/keys",
         ),
+        # Any other OpenAI-compatible endpoint: the user supplies the base URL, the model, and
+        # (if the endpoint needs one) a key. The base URL is subject to the SSRF guard.
+        ProviderInfo(
+            "custom", "Custom (OpenAI-compatible)", "llm", requires_key=False,
+            env_vars=("CUSTOM_OPENAI_BASE_URL", "CUSTOM_OPENAI_API_KEY", "CUSTOM_OPENAI_MODEL"),
+        ),
         ProviderInfo("mock", "Mock (no network)", "llm", default_model="mock", requires_key=False),
     )
 }
@@ -89,11 +107,41 @@ EMAIL_PROVIDERS: dict[str, ProviderInfo] = {
     "mock": ProviderInfo("mock", "Mock (nothing is sent)", "email", requires_key=False),
 }
 
+# Notifications. Telegram: a bot token from @BotFather (plus an optional default chat id).
+# Discord: a channel's webhook URL, which is itself the secret.
+MESSAGING_PROVIDERS: dict[str, ProviderInfo] = {
+    "telegram": ProviderInfo(
+        "telegram", "Telegram bot", "messaging",
+        base_url="https://api.telegram.org",
+        env_vars=("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"),
+        get_key_url="https://t.me/BotFather",
+    ),
+    "discord": ProviderInfo(
+        "discord", "Discord webhook", "messaging",
+        env_vars=("DISCORD_WEBHOOK_URL",),
+        get_key_url="https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks",
+    ),
+}
+
+# Web search. DuckDuckGo (through the ddgs library) needs no key; Tavily has a free tier.
+SEARCH_PROVIDERS: dict[str, ProviderInfo] = {
+    "duckduckgo": ProviderInfo("duckduckgo", "DuckDuckGo", "search", requires_key=False),
+    "tavily": ProviderInfo(
+        "tavily", "Tavily", "search", base_url="https://api.tavily.com",
+        env_vars=("TAVILY_API_KEY",), get_key_url="https://app.tavily.com/home",
+    ),
+}
+
 LLM_PROVIDER_NAMES = tuple(LLM_PROVIDERS)
 EMAIL_PROVIDER_NAMES = tuple(EMAIL_PROVIDERS)
 
-LLMProviderName = Literal["gemini", "groq", "openrouter", "ollama", "openai", "anthropic", "mock"]
+LLMProviderName = Literal[
+    "gemini", "groq", "openrouter", "mistral", "cerebras", "ollama", "openai", "anthropic", "custom", "mock"
+]
+SearchProviderName = Literal["duckduckgo", "tavily"]
 EmailProviderName = Literal["gmail", "mock"]
+TelegramProviderName = Literal["telegram", "mock"]
+DiscordProviderName = Literal["discord", "mock"]
 
 
 def _blank_to_none(value: Any) -> Any:
@@ -151,6 +199,70 @@ class EmailAccount(BaseModel):
         return self.smtp_security
 
 
+class TelegramAccount(BaseModel):
+    """A Telegram bot. `chat_id` is where a Telegram node sends when it names no chat."""
+
+    bot_token: SecretStr | None = None
+    chat_id: str | None = None
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank(cls, value: Any) -> Any:
+        value = _blank_to_none(value)
+        return str(value) if isinstance(value, int) else value
+
+    @property
+    def configured(self) -> bool:
+        return self.bot_token is not None
+
+
+class SearchAccount(BaseModel):
+    api_key: SecretStr | None = None
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank(cls, value: Any) -> Any:
+        return _blank_to_none(value)
+
+
+class SpeechSettings(BaseModel):
+    """Speech-to-text: Groq Whisper (the groq account's key) and local faster-whisper."""
+
+    groq_model: str = "whisper-large-v3-turbo"
+    # whisper-large-v3-turbo can't translate; translation uses this one.
+    groq_translate_model: str = "whisper-large-v3"
+    # Groq's upload limit (25 MB on the free tier, 100 MB on the dev tier).
+    groq_max_file_mb: float = Field(default=25, gt=0)
+    # faster-whisper model size (tiny, base, small, medium, large-v3, turbo), downloaded on
+    # first use into models_dir.
+    local_model: str = "base"
+    models_dir: str | None = None
+    local_compute_type: str = "int8"
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank(cls, value: Any, info: Any) -> Any:
+        value = _blank_to_none(value)
+        if value is None and cls.model_fields[info.field_name].default is not None:
+            return cls.model_fields[info.field_name].default
+        return value
+
+
+class DiscordAccount(BaseModel):
+    """A Discord channel webhook (https://discord.com/api/webhooks/<id>/<token>)."""
+
+    webhook_url: SecretStr | None = None
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank(cls, value: Any) -> Any:
+        return _blank_to_none(value)
+
+    @property
+    def configured(self) -> bool:
+        return self.webhook_url is not None
+
+
 class ProviderSettings(BaseModel):
     """Credentials and defaults for every provider.
 
@@ -163,10 +275,20 @@ class ProviderSettings(BaseModel):
     gemini: LLMAccount = Field(default_factory=LLMAccount)
     groq: LLMAccount = Field(default_factory=LLMAccount)
     openrouter: LLMAccount = Field(default_factory=LLMAccount)
+    mistral: LLMAccount = Field(default_factory=LLMAccount)
+    cerebras: LLMAccount = Field(default_factory=LLMAccount)
     ollama: LLMAccount = Field(default_factory=LLMAccount)
     openai: LLMAccount = Field(default_factory=LLMAccount)
     anthropic: LLMAccount = Field(default_factory=LLMAccount)
+    custom: LLMAccount = Field(default_factory=LLMAccount)
     gmail: EmailAccount = Field(default_factory=EmailAccount)
+    telegram: TelegramAccount = Field(default_factory=TelegramAccount)
+    discord: DiscordAccount = Field(default_factory=DiscordAccount)
+    tavily: SearchAccount = Field(default_factory=SearchAccount)
+    speech: SpeechSettings = Field(default_factory=SpeechSettings)
+    # The SSRF guard for user-supplied endpoints (the custom LLM's base URL), like the HTTP
+    # Request node's: on unless HTTP_ALLOW_PRIVATE_NETWORKS is true.
+    allow_private_network: bool = False
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     request_timeout_seconds: float = Field(default=60, gt=0)
 
@@ -198,10 +320,21 @@ class ProviderSettings(BaseModel):
         """Whether a run could use provider `name` (always true in testing / for mocks)."""
         if self.testing or name == "mock":
             return True
+        if name == "custom":
+            # A key is optional (some endpoints have none), but the endpoint and model aren't.
+            return bool(self.custom.base_url and self.custom.model)
         if name in LLM_PROVIDERS:
             return not LLM_PROVIDERS[name].requires_key or self.llm_account(name).api_key is not None
         if name in EMAIL_PROVIDERS:
             return self.email_account(name).configured
+        if name == "telegram":
+            return self.telegram.configured
+        if name == "discord":
+            return self.discord.configured
+        if name == "duckduckgo":
+            return True
+        if name == "tavily":
+            return self.tavily.api_key is not None
         return False
 
     def with_account(self, name: str, **fields: Any) -> ProviderSettings:
@@ -254,10 +387,29 @@ class ProviderSettings(BaseModel):
             "gemini": llm("GEMINI", embedding=True),
             "groq": llm("GROQ"),
             "openrouter": llm("OPENROUTER"),
+            "mistral": llm("MISTRAL"),
+            "cerebras": llm("CEREBRAS"),
             "ollama": llm("OLLAMA", key=False, base_url=True, embedding=True),
             "openai": llm("OPENAI", base_url=True),
             "anthropic": llm("ANTHROPIC"),
+            "custom": {
+                "api_key": get("CUSTOM_OPENAI_API_KEY"),
+                "base_url": get("CUSTOM_OPENAI_BASE_URL"),
+                "model": get("CUSTOM_OPENAI_MODEL"),
+            },
+            "tavily": {"api_key": get("TAVILY_API_KEY")},
+            "speech": {
+                "groq_model": get("GROQ_WHISPER_MODEL"),
+                "groq_translate_model": get("GROQ_WHISPER_TRANSLATE_MODEL"),
+                "groq_max_file_mb": get("GROQ_WHISPER_MAX_FILE_MB"),
+                "local_model": get("FASTER_WHISPER_MODEL"),
+                "models_dir": get("WHISPER_MODELS_DIR"),
+                "local_compute_type": get("FASTER_WHISPER_COMPUTE_TYPE"),
+            },
+            "allow_private_network": str(get("HTTP_ALLOW_PRIVATE_NETWORKS") or "").lower() in ("1", "true", "yes", "on"),
             "gmail": gmail,
+            "telegram": {"bot_token": get("TELEGRAM_BOT_TOKEN"), "chat_id": get("TELEGRAM_CHAT_ID")},
+            "discord": {"webhook_url": get("DISCORD_WEBHOOK_URL")},
             "retry": {k: v for k, v in retry.items() if v is not None},
         }
         timeout = get("LLM_REQUEST_TIMEOUT_SECONDS")
@@ -271,6 +423,24 @@ class ProviderSettings(BaseModel):
 
 
 def missing_credentials_hint(name: str) -> str:
+    if name == "custom":
+        return (
+            "no endpoint configured. Set CUSTOM_OPENAI_BASE_URL and CUSTOM_OPENAI_MODEL (and CUSTOM_OPENAI_API_KEY "
+            "if it needs one) on the server, or connect a custom credential under Integrations"
+        )
+    if name == "tavily":
+        return "no API key configured. Set TAVILY_API_KEY on the server, or connect a tavily credential under Integrations"
+    if name == "telegram":
+        return (
+            "no bot token configured. Create a bot with @BotFather, then set TELEGRAM_BOT_TOKEN on the "
+            "server or connect a telegram credential under Integrations"
+        )
+    if name == "discord":
+        return (
+            "no webhook URL configured. Create one in the channel's settings (Integrations > Webhooks), then "
+            "set DISCORD_WEBHOOK_URL on the server, connect a discord credential under Integrations, or put "
+            "the URL in the node's webhook_url"
+        )
     if name == "gmail":
         return (
             "no email account configured. Set SMTP_USER and SMTP_PASSWORD (a Google App Password) "

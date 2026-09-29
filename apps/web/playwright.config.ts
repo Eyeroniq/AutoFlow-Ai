@@ -2,7 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 // End-to-end tests against the running Docker stack (docker compose up -d):
 // the web app on :3000 talking to the real API, worker, Postgres, and Redis.
-// No mocks: the run test calls Gemini and sends a real email through SMTP_USER.
+// No mocks: the run and deploy tests call Gemini (Groq when Gemini is overloaded) and send
+// real email through SMTP_USER.
 export default defineConfig({
   testDir: "./e2e",
   // Tests share the demo account, so they run one at a time.

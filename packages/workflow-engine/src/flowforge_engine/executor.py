@@ -248,7 +248,7 @@ async def _run_node(
     hooks: ExecutionHooks | None,
     control: ExecutionControl | None,
 ) -> NodeRunResult:
-    update: dict[str, Any] = {"node_id": node.id, "on_token": None}
+    update: dict[str, Any] = {"node_id": node.id, "on_token": None, "deadline": time.monotonic() + timeout}
     if _streams_tokens(hooks):
         assert hooks is not None
 
@@ -267,8 +267,10 @@ async def _run_node(
     interrupted = False
 
     try:
-        resolved = resolve_value(node.config, build_scope(node_context))
+        resolved = _resolve_config(node.config, definition, build_scope(node_context))
         config = definition.config_schema.model_validate(resolved)
+        timeout = definition.timeout(config, timeout)
+        node_context.deadline = time.monotonic() + timeout
         node_result = await _run_with_control(
             asyncio.wait_for(definition.execute(node_context, config), timeout=timeout), definition, control
         )
@@ -320,6 +322,17 @@ async def _run_node(
         finished_at=datetime.now(UTC),
         duration_ms=duration_ms,
     )
+
+
+def _resolve_config(config: dict[str, Any], definition: NodeDefinition[Any], scope: dict[str, Any]) -> dict[str, Any]:
+    """The config with {{...}} resolved, except per-item template fields (the node resolves
+    those itself, once per item)."""
+    if not definition.deferred_fields:
+        return resolve_value(config, scope)
+    return {
+        key: value if key in definition.deferred_fields else resolve_value(value, scope)
+        for key, value in config.items()
+    }
 
 
 def _inactive_reason(

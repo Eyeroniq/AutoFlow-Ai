@@ -57,6 +57,9 @@ class NodeContext(BaseModel):
     # Set by the executor for the running node when an observer wants streamed LLM
     # tokens: await on_token(text, provider). None means "don't stream".
     on_token: Callable[[str, str], Awaitable[None]] | None = Field(default=None, exclude=True, repr=False)
+    # Set by the executor: when (time.monotonic()) the running node's timeout expires, so
+    # a node that tries several things (an LLM fallback chain) can share out the time.
+    deadline: float | None = Field(default=None, exclude=True, repr=False)
 
 
 # --- Graph ------------------------------------------------------------------------------

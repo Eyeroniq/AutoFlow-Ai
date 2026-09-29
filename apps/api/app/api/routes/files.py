@@ -37,13 +37,14 @@ async def _owned(db: DbSession, user: CurrentUser, file_id: uuid.UUID):
     summary="Upload a file (multipart field `file`)",
     description=(
         f"Accepted: {', '.join(ALLOWED_TYPES.values())}, detected from the file's content. Up to "
-        f"MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB:g} MB here). Use the returned `id` as the value of an Input "
+        f"MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB:g} MB here), or MAX_MEDIA_UPLOAD_MB "
+        f"({settings.MAX_MEDIA_UPLOAD_MB:g} MB) for audio and video. Use the returned `id` as the value of an Input "
         "node of type `file` (in `inputs` for a run, or as its default)."
     ),
     responses={
         400: {"description": "No file, or an empty one"},
         411: {"description": "The request has no Content-Length"},
-        413: {"description": "Larger than MAX_UPLOAD_MB"},
+        413: {"description": "Larger than MAX_UPLOAD_MB (MAX_MEDIA_UPLOAD_MB for audio/video)"},
         415: {"description": "Not an allowed file type"},
     },
     openapi_extra={
@@ -70,10 +71,9 @@ async def upload(request: Request, db: DbSession, user: CurrentUser) -> FileRead
         declared_size = int(declared)
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid Content-Length") from None
-    if declared_size > settings.max_upload_bytes + 64 * 1024:
-        raise HTTPException(
-            status.HTTP_413_CONTENT_TOO_LARGE, detail=f"The file is larger than the {settings.MAX_UPLOAD_MB:g} MB limit"
-        )
+    largest = max(settings.MAX_UPLOAD_MB, settings.MAX_MEDIA_UPLOAD_MB)
+    if declared_size > largest * 1024 * 1024 + 64 * 1024:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=f"The file is larger than the {largest:g} MB limit")
     try:
         form = await request.form(max_files=1, max_fields=4)
     except MultiPartException as exc:

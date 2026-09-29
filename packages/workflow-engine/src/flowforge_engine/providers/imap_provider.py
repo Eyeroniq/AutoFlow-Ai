@@ -46,6 +46,8 @@ def _search_criteria(query: MailboxQuery) -> tuple[list[str], bytes | None]:
     """IMAP SEARCH terms, plus at most one UTF-8 literal for a non-ASCII filter."""
     terms: list[str] = []
     literal: bytes | None = None
+    if query.uid_after is not None:
+        terms += ["UID", f"{query.uid_after + 1}:*"]
     if query.unread_only:
         terms.append("UNSEEN")
     if query.since_days:
@@ -211,9 +213,12 @@ class IMAPEmailProvider:
                 status, data = imap.uid("SEARCH", *terms)
             if status != "OK":
                 raise ProviderError(self.name, f"search failed: {self._text(data[0] if data else '')}")
-            uids = (data[0] or b"").split()
+            uids = sorted((data[0] or b"").split(), key=int)
+            if query.uid_after is not None:
+                # "UID n:*" always matches the newest message, even when its UID is below n.
+                uids = [uid for uid in uids if int(uid) > query.uid_after]
             # UIDs ascend with arrival, so the newest N are at the end.
-            selected = sorted(uids, key=int)[-query.max_results:]
+            selected = uids[: query.max_results] if query.oldest_first else uids[-query.max_results:]
             if not selected:
                 return []
             uid_set = b",".join(selected).decode()
@@ -246,6 +251,24 @@ class IMAPEmailProvider:
         finally:
             self._logout(imap)
 
+    def _status_sync(self, folder: str) -> dict[str, Any]:
+        imap = self._connect()
+        try:
+            status, data = imap.status(self._mailbox_name(folder), "(UIDVALIDITY UIDNEXT MESSAGES)")
+            if status != "OK" or not data or not data[0]:
+                raise ProviderError(self.name, f"cannot read folder '{folder}': {self._text(data[0] if data else '')}")
+            raw = data[0].decode("utf-8", "replace") if isinstance(data[0], bytes) else str(data[0])
+            values = {key.lower(): int(value) for key, value in re.findall(r"(UIDVALIDITY|UIDNEXT|MESSAGES) (\d+)", raw)}
+            if "uidvalidity" not in values or "uidnext" not in values:
+                raise ProviderError(self.name, f"the server's STATUS reply for '{folder}' has no UIDVALIDITY/UIDNEXT: {raw[:200]}")
+            return {"uidvalidity": values["uidvalidity"], "uidnext": values["uidnext"], "messages": values.get("messages")}
+        except (OSError, imaplib.IMAP4.abort) as exc:
+            raise ProviderError(self.name, f"IMAP connection error: {self._text(exc)}", retryable=True) from exc
+        except imaplib.IMAP4.error as exc:
+            raise ProviderError(self.name, f"IMAP error: {self._text(exc)}") from exc
+        finally:
+            self._logout(imap)
+
     def _verify_sync(self) -> dict[str, Any]:
         imap = self._connect()
         try:
@@ -267,6 +290,9 @@ class IMAPEmailProvider:
         except ValueError as exc:
             raise ProviderError(self.name, str(exc)) from exc
         return await with_retries(lambda: asyncio.to_thread(self._fetch_sync, query), self._retry)
+
+    async def mailbox_status(self, folder: str = "INBOX") -> dict[str, Any]:
+        return await with_retries(lambda: asyncio.to_thread(self._status_sync, folder), self._retry)
 
     async def verify(self) -> dict[str, Any]:
         return await with_retries(lambda: asyncio.to_thread(self._verify_sync), self._retry)

@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Ellipsis, Play, Plus, Trash2, Workflow as WorkflowIcon } from "lucide-react";
+import { CalendarClock, Copy, Ellipsis, Mail, Play, Plus, ShieldAlert, Trash2, Webhook, Workflow as WorkflowIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -23,6 +23,31 @@ import type { WorkflowListItem, WorkflowStatus } from "@/lib/types";
 
 import { ExecutionRows, pollWhileActive } from "../executions/executions-list";
 import { isTerminal } from "../runs/run-state";
+import { TemplatesSection } from "./templates";
+
+const TRIGGER_ICON = { schedule: CalendarClock, email: Mail, webhook: Webhook } as const;
+
+/** Small icons for the pipeline's triggers that are on (red when the failure limit switched one off). */
+function TriggerIcons({ triggers }: { triggers: WorkflowListItem["triggers"] }) {
+  const shown = triggers.filter((t) => t.enabled || t.auto_disabled);
+  if (!shown.length) return null;
+  return (
+    <span className="ml-2 inline-flex items-center gap-1 align-middle" data-testid="pipeline-triggers">
+      {shown.map((trigger) => {
+        const Icon = trigger.auto_disabled ? ShieldAlert : TRIGGER_ICON[trigger.type];
+        return (
+          <span
+            key={trigger.type}
+            title={trigger.auto_disabled ? `${trigger.type} trigger switched off after repeated failures` : `${trigger.type} trigger on`}
+            className={trigger.auto_disabled ? "text-red-500" : "text-indigo-500"}
+          >
+            <Icon className="size-3.5" aria-label={`${trigger.type} trigger`} />
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 const WORKFLOW_STATUS: Record<WorkflowStatus, string> = {
   draft: "bg-slate-100 text-slate-600",
@@ -98,6 +123,7 @@ function PipelineRow({ workflow, onDelete }: { workflow: WorkflowListItem; onDel
       <td className="max-w-80 px-4 py-3">
         <Link href={`/pipelines/${workflow.id}`} className="block truncate font-medium text-slate-900 hover:text-indigo-600">
           {workflow.name}
+          <TriggerIcons triggers={workflow.triggers ?? []} />
         </Link>
         <p className="truncate text-xs text-slate-500">
           {workflow.node_count} node{workflow.node_count === 1 ? "" : "s"}
@@ -240,6 +266,8 @@ function Dashboard() {
           </div>
         )}
       </section>
+
+      <TemplatesSection />
 
       <section className="space-y-4">
         <div className="flex items-end justify-between">

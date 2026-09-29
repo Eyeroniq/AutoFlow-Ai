@@ -2,7 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 import type { WorkflowGraph } from "../src/lib/types";
 
-import { Api, edge, expectSaved, hideDevOverlay, node, openEditor, screenshotPath, signIn, waitForEmail } from "./helpers";
+import { Api, edge, expectSaved, node, openEditor, screenshotPath, signIn, waitForEmail } from "./helpers";
 
 /** Counts the live events the browser receives over the execution WebSocket. */
 function watchSocket(page: Page) {
@@ -24,12 +24,12 @@ function watchSocket(page: Page) {
 test("runs the seeded pipeline with live status, streaming, and a real email", async ({ page, request }) => {
   const api = await Api.login(request);
   const demo = await api.demoWorkflow();
+  await api.expectRunnable(demo);
   const original = demo.graph;
   const events = watchSocket(page);
   try {
     await signIn(page, api);
     await openEditor(page, demo.id);
-    await hideDevOverlay(page);
     await expectSaved(page);
     await page.screenshot({ path: screenshotPath("editor") });
 
@@ -82,7 +82,7 @@ test("runs the seeded pipeline with live status, streaming, and a real email", a
 
     expect(events.snapshot, "the socket starts with a snapshot").toBeGreaterThanOrEqual(1);
     expect(events["node.started"]).toBeGreaterThanOrEqual(4);
-    expect(events["node.token"] ?? 0, "Gemini streamed tokens to the browser").toBeGreaterThan(0);
+    expect(events["node.token"] ?? 0, "the LLM (Gemini, or its Groq fallback) streamed tokens to the browser").toBeGreaterThan(0);
     expect(events["execution.finished"]).toBe(1);
 
     // The real email arrived in the SMTP_USER inbox.
@@ -94,14 +94,12 @@ test("runs the seeded pipeline with live status, streaming, and a real email", a
     await expect(page).toHaveURL(/\/executions\/[0-9a-f-]{36}$/);
     await expect(page.getByTestId("execution-status")).toHaveText(/success/i);
     await expect(page.getByTestId("timeline-gmail")).toHaveAttribute("data-status", "success");
-    await hideDevOverlay(page);
     await page.getByTestId("timeline-gemini").getByRole("button").click();
     await page.screenshot({ path: screenshotPath("execution-detail") });
 
     // The dashboard shows the pipeline's last run.
     await page.getByRole("link", { name: "Dashboard", exact: true }).click();
     await expect(page.locator(`[data-testid="pipeline-row"][data-name="${demo.name}"]`)).toContainText("success");
-    await hideDevOverlay(page);
     await page.screenshot({ path: screenshotPath("dashboard") });
   } finally {
     await api.putGraph(demo.id, original);

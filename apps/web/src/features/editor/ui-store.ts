@@ -1,14 +1,15 @@
 import { create } from "zustand";
 
-export type RightPanel = "variables" | "validation" | null;
+export type RightPanel = "variables" | "validation" | "triggers" | null;
 export type ConnectionStatus = "idle" | "connecting" | "open" | "reconnecting" | "closed" | "error";
 
 interface EditorUi {
   libraryOpen: boolean;
-  /** Variables/validation panels; with neither open, a selected node shows its config. */
+  /** Variables/validation/triggers panels; with none open, a selected node shows its config. */
   rightPanel: RightPanel;
   runPanelOpen: boolean;
   runInputsOpen: boolean;
+  deployOpen: boolean;
   connection: { status: ConnectionStatus; detail: string | null };
   /** Bumped to ask the config panel to open the Test section for the selected node. */
   testRequest: number;
@@ -21,6 +22,7 @@ export const useEditorUi = create<EditorUi>((set) => ({
   rightPanel: null,
   runPanelOpen: false,
   runInputsOpen: false,
+  deployOpen: false,
   connection: { status: "idle", detail: null },
   testRequest: 0,
   set: (patch) => set(patch),

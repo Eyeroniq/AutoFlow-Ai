@@ -6,6 +6,8 @@ then hands the run off to the queue of the next node (flowforge_engine.executor,
 
 - "llm": model calls (I/O-bound, rate-limited): many concurrent slots per worker.
 - "ocr": document processing (CPU-bound): a few slots per worker, more worker containers.
+- "audio": speech-to-text (ffmpeg, then Groq Whisper uploads or local faster-whisper on
+  the CPU): a few slots per worker.
 - "default": everything else (HTTP, email, delays).
 
 Portable nodes (Input, Output, Text, Condition) run wherever the run currently is.
@@ -20,7 +22,8 @@ from flowforge_engine.registry import NodeRegistry, default_registry
 DEFAULT_QUEUE = "default"
 LLM_QUEUE = "llm"
 OCR_QUEUE = "ocr"
-QUEUES = (DEFAULT_QUEUE, LLM_QUEUE, OCR_QUEUE)
+AUDIO_QUEUE = "audio"
+QUEUES = (DEFAULT_QUEUE, LLM_QUEUE, OCR_QUEUE, AUDIO_QUEUE)
 
 
 def queue_for_node(node: GraphNode, *, registry: NodeRegistry | None = None) -> str | None:

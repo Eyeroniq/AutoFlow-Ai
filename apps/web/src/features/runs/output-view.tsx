@@ -18,7 +18,12 @@ const FACTS: [key: string, label: string][] = [
   ["needs_ocr", "needs OCR"],
   ["truncated", "truncated"],
   ["language", "language"],
+  ["duration_seconds", "duration (s)"],
+  ["chunks", "chunks"],
+  ["task", "task"],
+  ["count", "results"],
   ["provider_used", "provider"],
+  ["provider", "provider"],
   ["model", "model"],
   ["attempts", "attempts"],
   ["engine", "engine"],
@@ -115,6 +120,60 @@ function EntitiesView({ entities }: { entities: Json }) {
   );
 }
 
+function clock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}` : `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
+}
+
+/** Speech to Text segments, with their timestamps. */
+function SegmentsView({ segments }: { segments: Json[] }) {
+  return (
+    <div>
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Segments ({segments.length})</p>
+      <ol className="max-h-64 space-y-0.5 overflow-auto rounded-md bg-white p-2 text-xs ring-1 ring-slate-200" data-testid="output-segments">
+        {segments.map((segment, index) => (
+          <li key={index} className="flex gap-2">
+            <span className="shrink-0 font-mono text-[11px] text-slate-400">
+              {clock(Number(segment.start))}–{clock(Number(segment.end))}
+            </span>
+            <span className="text-slate-800">{String(segment.text ?? "")}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** Web Search results as links. */
+function ResultsView({ results }: { results: Json[] }) {
+  return (
+    <div>
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Results ({results.length})</p>
+      <ol className="max-h-64 space-y-1.5 overflow-auto rounded-md bg-white p-2 text-xs ring-1 ring-slate-200" data-testid="output-results">
+        {results.map((result, index) => (
+          <li key={index}>
+            {/^https?:\/\//i.test(String(result.url)) ? (
+              <a href={String(result.url)} target="_blank" rel="noreferrer noopener" className="font-medium text-indigo-700 hover:underline">
+                {index + 1}. {String(result.title || result.url)}
+              </a>
+            ) : (
+              <span className="font-medium text-slate-800">
+                {index + 1}. {String(result.title || result.url)}
+              </span>
+            )}
+            <p className="truncate text-[11px] text-emerald-700">{String(result.url)}</p>
+            {typeof result.snippet === "string" && result.snippet && <p className="text-slate-600">{result.snippet}</p>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+const listOf = (value: unknown, key: string): Json[] | null =>
+  Array.isArray(value) && value.length > 0 && value.every((item) => isObject(item) && key in item) ? (value as Json[]) : null;
+
 /** A node's output, readable: facts as chips, long text as a text block, entities as lists.
  * Anything else (and the whole thing, on request) as JSON. */
 export function OutputView({ output }: { output: Json | null | undefined }) {
@@ -122,7 +181,9 @@ export function OutputView({ output }: { output: Json | null | undefined }) {
   if (!output) return null;
   const textKey = TEXT_KEYS.find((key) => typeof output[key] === "string" && (output[key] as string).trim());
   const entities = isObject(output.entities) ? output.entities : null;
-  const readable = Boolean(textKey || entities);
+  const segments = listOf(output.segments, "start");
+  const results = listOf(output.results, "url");
+  const readable = Boolean(textKey || entities || segments || results);
   const facts = FACTS.filter(([key]) => output[key] !== undefined && output[key] !== null && output[key] !== "" && typeof output[key] !== "object");
 
   return (
@@ -146,6 +207,8 @@ export function OutputView({ output }: { output: Json | null | undefined }) {
             </div>
           )}
           {textKey && <TextBlock text={output[textKey] as string} label={textKey} />}
+          {segments && <SegmentsView segments={segments} />}
+          {results && <ResultsView results={results} />}
           {entities && <EntitiesView entities={entities} />}
         </>
       ) : (

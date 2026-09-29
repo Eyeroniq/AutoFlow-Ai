@@ -94,8 +94,8 @@ class TestFactoryPolicy:
         assert isinstance(get_mailbox_provider("gmail", settings), IMAPEmailProvider)
 
     def test_unknown_providers(self):
-        with pytest.raises(ValueError, match="Unknown LLM provider 'mistral'"):
-            get_llm_provider("mistral", ProviderSettings())
+        with pytest.raises(ValueError, match="Unknown LLM provider 'cohere'"):
+            get_llm_provider("cohere", ProviderSettings())
         with pytest.raises(ValueError):
             get_email_provider("outlook", ProviderSettings())
 

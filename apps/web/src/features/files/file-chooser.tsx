@@ -1,14 +1,25 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, Image as ImageIcon, Upload, X } from "lucide-react";
+import { FileAudio, FileText, FileVideo, Image as ImageIcon, Mic, Upload, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { ApiError, api } from "@/lib/api";
 import type { UploadedFile } from "@/lib/types";
 
+import { Recorder } from "./recorder";
+
 /** What the file input accepts; the server checks the real type from the file's content. */
-export const ACCEPT = ".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp,.gif,.txt,application/pdf,image/*,text/plain";
+export const ACCEPT =
+  ".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp,.gif,.txt,.mp3,.wav,.m4a,.ogg,.oga,.opus,.flac,.mp4,.m4v,.mov,.webm," +
+  "application/pdf,image/*,text/plain,audio/*,video/*";
+
+function FileTypeIcon({ contentType }: { contentType: string }) {
+  if (contentType.startsWith("image/")) return <ImageIcon className="size-3.5" aria-hidden />;
+  if (contentType.startsWith("audio/")) return <FileAudio className="size-3.5" aria-hidden />;
+  if (contentType.startsWith("video/")) return <FileVideo className="size-3.5" aria-hidden />;
+  return <FileText className="size-3.5" aria-hidden />;
+}
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -71,10 +82,12 @@ interface FileChooserProps {
   emptyLabel?: string;
   testId?: string;
   onUploadingChange?: (uploading: boolean) => void;
+  /** Offer "Record" (microphone or tab audio) next to Upload, e.g. in the run form. */
+  recordable?: boolean;
 }
 
 /** Pick one of your uploads, or upload a new file (with a progress bar). */
-export function FileChooser({ value, onChange, id, invalid, describedBy, emptyLabel, testId, onUploadingChange }: FileChooserProps) {
+export function FileChooser({ value, onChange, id, invalid, describedBy, emptyLabel, testId, onUploadingChange, recordable }: FileChooserProps) {
   const uploads = useUploads();
   const upload = useFileUpload();
   const picker = useRef<HTMLInputElement>(null);
@@ -82,11 +95,13 @@ export function FileChooser({ value, onChange, id, invalid, describedBy, emptyLa
   const selectId = id ?? generated;
   const selected = uploads.data?.find((f) => f.id === value);
   const uploading = upload.status === "uploading";
+  const [recorderOpen, setRecorderOpen] = useState(false);
 
   useEffect(() => onUploadingChange?.(uploading), [uploading, onUploadingChange]);
 
   const onPick = async (file: File | undefined) => {
     if (!file) return;
+    setRecorderOpen(false);
     const uploaded = await upload.upload(file);
     if (uploaded) onChange(uploaded.id);
     if (picker.current) picker.current.value = "";
@@ -122,6 +137,18 @@ export function FileChooser({ value, onChange, id, invalid, describedBy, emptyLa
         >
           <Upload className="size-3.5" aria-hidden /> Upload
         </button>
+        {recordable && (
+          <button
+            type="button"
+            onClick={() => setRecorderOpen((open) => !open)}
+            disabled={uploading}
+            aria-expanded={recorderOpen}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            data-testid={testId ? `${testId}-record` : undefined}
+          >
+            <Mic className="size-3.5" aria-hidden /> Record
+          </button>
+        )}
         <input
           ref={picker}
           type="file"
@@ -133,6 +160,13 @@ export function FileChooser({ value, onChange, id, invalid, describedBy, emptyLa
         />
       </div>
 
+      {recorderOpen && !uploading && (
+        <Recorder
+          onRecorded={(file) => void onPick(file)}
+          onClose={() => setRecorderOpen(false)}
+          testId={testId ? `${testId}-recorder` : undefined}
+        />
+      )}
       {uploading && (
         <div className="space-y-1" role="status" aria-live="polite">
           <div className="flex items-center justify-between text-[11px] text-slate-600">
@@ -160,7 +194,7 @@ export function FileChooser({ value, onChange, id, invalid, describedBy, emptyLa
       )}
       {selected && !uploading && (
         <p className="flex items-center gap-1.5 text-[11px] text-slate-500" data-testid={testId ? `${testId}-selected` : undefined}>
-          {selected.content_type.startsWith("image/") ? <ImageIcon className="size-3.5" aria-hidden /> : <FileText className="size-3.5" aria-hidden />}
+          <FileTypeIcon contentType={selected.content_type} />
           {selected.filename} · {selected.content_type} · {formatBytes(selected.size_bytes)}
         </p>
       )}

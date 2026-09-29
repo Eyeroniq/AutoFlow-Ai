@@ -36,3 +36,15 @@ export function prettyJson(value: unknown): string {
     return String(value);
   }
 }
+
+/** A future time relative to now: "in 5 min", "in 3 h", "in 2 d" (past times: "now"). */
+export function formatUntil(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return "–";
+  const seconds = Math.round((new Date(iso).getTime() - now) / 1000);
+  if (seconds < 45) return "now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `in ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `in ${hours} h`;
+  return `in ${Math.round(hours / 24)} d`;
+}

@@ -7,6 +7,7 @@ import { Fragment, memo, useEffect, useRef, useState } from "react";
 import { categoryStyle, NodeIcon } from "@/components/node-icon";
 import { Menu } from "@/components/ui/menu";
 import { StatusDot } from "@/components/ui/status";
+import { TruncatedText } from "@/components/ui/truncated-text";
 
 import { configSummary, type FlowNode } from "./graph";
 import { getEditorStore, useEditor } from "./store";
@@ -125,9 +126,11 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
       {!data.collapsed && (
         <div className="space-y-1 border-t border-slate-100 py-2 pl-3.5 pr-3">
           <p className="line-clamp-2 text-xs text-slate-500">{data.description || entry?.description}</p>
-          <p className="truncate font-mono text-[11px] text-slate-600" title={configSummary(data.nodeType, data.config, entry)}>
-            {configSummary(data.nodeType, data.config, entry)}
-          </p>
+          <TruncatedText
+            text={configSummary(data.nodeType, data.config, entry)}
+            className="font-mono text-[11px] text-slate-600"
+            testId={`node-summary-${id}`}
+          />
           {streaming && (
             <p className="line-clamp-3 rounded bg-blue-50 px-1.5 py-1 text-[11px] text-blue-800" data-testid={`node-tokens-${id}`}>
               {run.tokens.slice(-160)}

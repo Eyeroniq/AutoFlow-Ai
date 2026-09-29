@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -46,6 +49,26 @@ def create_refresh_token(subject: str) -> str:
     return _create_token(
         subject, "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     )
+
+
+API_KEY_PREFIX = "ffk_"
+# "ffk_" plus the first 8 random characters: enough to tell keys apart, useless to an attacker.
+API_KEY_DISPLAY_CHARS = len(API_KEY_PREFIX) + 8
+
+
+def generate_api_key() -> str:
+    """A new deployment API key: "ffk_" + 256 random bits (URL-safe base64)."""
+    return API_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_api_key(key: str) -> str:
+    """SHA-256 hex digest. A slow hash (bcrypt) protects low-entropy passwords; a random
+    256-bit key can't be guessed from its hash, and checking it on every call stays cheap."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def verify_api_key(key: str, expected_hash: str) -> bool:
+    return hmac.compare_digest(hash_api_key(key), expected_hash)
 
 
 def decode_token(token: str, expected_type: TokenType) -> dict[str, Any]:

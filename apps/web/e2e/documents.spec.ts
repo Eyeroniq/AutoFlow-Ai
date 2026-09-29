@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 
 import type { UploadedFile, WorkflowListItem } from "../src/lib/types";
 
-import { Api, edge, hideDevOverlay, node, openEditor, screenshotPath, signIn } from "./helpers";
+import { Api, edge, node, openEditor, screenshotPath, signIn } from "./helpers";
 
 const DOCUMENT_PIPELINE = "Demo: Scanned invoice to entities";
 const SAMPLE = path.resolve(__dirname, "../../../samples/scanned-invoice.pdf");
@@ -16,12 +16,12 @@ test("uploads a scanned PDF and runs the document pipeline across the ocr and ll
   const api = await Api.login(request);
   const pipeline = (await api.call<WorkflowListItem[]>("GET", "/api/workflows")).body.find((w) => w.name === DOCUMENT_PIPELINE);
   expect(pipeline, `"${DOCUMENT_PIPELINE}" is seeded`).toBeTruthy();
+  await api.expectRunnable(pipeline!);
   const before = new Set((await api.call<UploadedFile[]>("GET", "/api/files")).body.map((f) => f.id));
   let uploaded: string | undefined;
   try {
     await signIn(page, api);
     await openEditor(page, pipeline!.id);
-    await hideDevOverlay(page);
 
     // The library shows the Documents group; cards show which queue runs them.
     for (const type of ["pdf_extract", "ocr", "summarize", "extract_entities"]) {

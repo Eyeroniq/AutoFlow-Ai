@@ -71,6 +71,8 @@ export interface NodeType {
   interruptible: boolean;
   branches: string[];
   has_input: boolean;
+  /** Per-item template fields (For Each's prompt, Join's template): {{item}} and {{index}} work there. */
+  item_fields: string[];
   produces_final_output: boolean;
   config_schema: JsonSchema;
   output_schema: JsonSchema | null;
@@ -132,6 +134,8 @@ export interface WorkflowListItem extends WorkflowSummary {
     started_at: string | null;
     finished_at: string | null;
   } | null;
+  /** Saved triggers: which are on, and which the failure limit switched off. */
+  triggers: { type: TriggerType; enabled: boolean; auto_disabled: boolean }[];
 }
 
 export interface Workflow extends WorkflowSummary {
@@ -181,13 +185,17 @@ export interface NodeTestResult {
 // --- executions -------------------------------------------------------------------------------
 
 export type ExecutionStatus = "pending" | "running" | "success" | "failed" | "stopped";
+/** What started a run. "api" is the old name for webhook runs (before triggers existed). */
+export type ExecutionTrigger = "manual" | "schedule" | "email" | "webhook" | "event" | "api";
 export type NodeExecutionStatus = "pending" | "running" | "success" | "failed" | "skipped";
 
 export interface ExecutionSummary {
   id: string;
   workflow_id: string;
   status: ExecutionStatus;
-  trigger: string;
+  trigger: ExecutionTrigger;
+  /** The schedule, email, or webhook trigger that started it; null for manual runs. */
+  trigger_id: string | null;
   triggered_by_user_id: string | null;
   created_at: string;
   started_at: string | null;
@@ -202,6 +210,8 @@ export interface ExecutionSummary {
   segment: number;
   /** Set while the run waits for a worker of `queue` after a hand-off. */
   handoff_at: string | null;
+  /** The deployment whose endpoint started the run (trigger "webhook"). */
+  deployment_id: string | null;
 }
 
 export interface ExecutionListItem extends ExecutionSummary {
@@ -310,12 +320,53 @@ export interface FileDescription {
   size_bytes: number;
 }
 
+// --- deployments ---------------------------------------------------------------------------------
+
+export interface DeploymentInput {
+  node_id: string;
+  label: string;
+  /** The key callers send in `inputs`. */
+  name: string;
+  type: "text" | "number" | "json" | "file";
+  /** The caller must send it (it has no default). */
+  required: boolean;
+  default: unknown;
+}
+
+export interface DeploymentOutput {
+  node_id: string;
+  label: string;
+  name: string;
+}
+
+export interface Deployment {
+  id: string;
+  workflow_id: string;
+  name: string;
+  version: number;
+  workflow_version: number;
+  /** Relative to the API's base URL: /api/v1/deployments/{id}/run */
+  endpoint: string;
+  api_key_prefix: string;
+  inputs: DeploymentInput[];
+  outputs: DeploymentOutput[];
+  key_created_at: string;
+  deployed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeploymentWithKey extends Deployment {
+  /** Only in the response that issued it; never retrievable again. */
+  api_key: string | null;
+}
+
 // --- integrations ------------------------------------------------------------------------------
 
 export interface Integration {
   provider: string;
   label: string;
-  kind: "llm" | "email";
+  kind: "llm" | "email" | "messaging" | "search";
   connected: boolean;
   source: "user" | "server" | "none";
   status: "connected" | "disconnected" | "error";
@@ -338,6 +389,9 @@ export interface IntegrationConnect {
   smtp_security?: "auto" | "starttls" | "ssl";
   imap_host?: string;
   imap_port?: number;
+  bot_token?: string;
+  chat_id?: string;
+  webhook_url?: string;
 }
 
 export interface IntegrationTestResult {
@@ -348,4 +402,107 @@ export interface IntegrationTestResult {
   error: string | null;
   details: Record<string, unknown>;
   tested_at: string;
+}
+
+// --- triggers ------------------------------------------------------------------------------------
+
+export type TriggerType = "schedule" | "email" | "webhook";
+
+export interface ScheduleConfig {
+  cron: string;
+  timezone: string;
+  inputs?: Record<string, unknown>;
+}
+
+export interface EmailTriggerConfig {
+  folder: string;
+  from_address: string | null;
+  subject: string | null;
+  unread_only: boolean;
+  poll_minutes: number;
+  input_name: string;
+  max_per_poll: number;
+  mark_as_read: boolean;
+  max_body_chars: number;
+}
+
+export interface TriggerLastRun {
+  execution_id: string;
+  status: ExecutionStatus;
+  created_at: string;
+  finished_at: string | null;
+  error_message: string | null;
+}
+
+export interface Trigger {
+  type: TriggerType;
+  id: string | null;
+  configured: boolean;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  /** Schedule: the next fire time. Email: the next mailbox check. */
+  next_run_at: string | null;
+  upcoming: string[];
+  last_fired_at: string | null;
+  last_run: TriggerLastRun | null;
+  consecutive_failures: number;
+  /** Set when the consecutive-failure limit switched the trigger off. */
+  auto_disabled_at: string | null;
+  disabled_reason: string | null;
+  last_error: string | null;
+  last_error_at: string | null;
+  warnings: string[];
+  webhook: { deployment_id: string; endpoint: string; api_key_prefix: string; deployed_version: number; behind: boolean } | null;
+  mailbox: { folder: string | null; last_uid: number | null; last_poll_at: string | null } | null;
+}
+
+export interface TriggerSettings {
+  max_runs_per_hour: number;
+  max_consecutive_failures: number;
+}
+
+export interface TriggersResponse {
+  workflow_id: string;
+  settings: TriggerSettings;
+  runs_last_hour: number;
+  triggers: Trigger[];
+}
+
+export interface SchedulePreview {
+  valid: boolean;
+  error: string | null;
+  cron: string | null;
+  interval: boolean | null;
+  next: string[];
+}
+
+export interface EmailCheckResult {
+  trigger_id: string;
+  polled: boolean;
+  found: number;
+  reset: boolean;
+  error: string | null;
+  runs: { outcome: string; execution_id: string | null; event_key: string; detail: string | null }[];
+}
+
+// --- templates -----------------------------------------------------------------------------------
+
+export interface TemplateRequirement {
+  providers: string[];
+  label: string;
+  why: string | null;
+  satisfied: boolean;
+  using: string | null;
+}
+
+export interface Template {
+  slug: string;
+  name: string;
+  description: string | null;
+  category: string;
+  node_types: string[];
+  requirements: TemplateRequirement[];
+  /** Every requirement has a credential (yours or the server's). */
+  ready: boolean;
+  triggers: { type: TriggerType; config: Record<string, unknown> }[];
 }

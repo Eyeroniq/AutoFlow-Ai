@@ -37,10 +37,20 @@ class ExecutionStatus(str, enum.Enum):
 
 class ExecutionTrigger(str, enum.Enum):
     MANUAL = "manual"
+    # A deployment's endpoint (POST /api/v1/deployments/{id}/run) called with its API key.
     WEBHOOK = "webhook"
     SCHEDULE = "schedule"
+    # A new email matched a workflow's email trigger.
+    EMAIL = "email"
     EVENT = "event"
+    # Legacy: deployment runs before triggers existed (the migration renamed them webhook).
     API = "api"
+
+
+class TriggerType(str, enum.Enum):
+    SCHEDULE = "schedule"
+    EMAIL = "email"
+    WEBHOOK = "webhook"
 
 
 class NodeExecutionStatus(str, enum.Enum):

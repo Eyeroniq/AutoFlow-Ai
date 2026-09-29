@@ -5,14 +5,17 @@
 - "Demo: Summarize and email" is Input -> Gemini -> Gmail -> Output on the real providers:
   it runs once GEMINI_API_KEY and SMTP_USER/SMTP_PASSWORD are set in .env. The email goes to
   SMTP_USER itself (or you@example.com if that isn't set; change the `recipient` variable).
+  With GROQ_API_KEY set, the Gemini node falls back to Groq when Gemini fails (free-tier
+  429s and "high demand" 503s happen).
 - "Demo: Scanned invoice to entities" is Input(File) -> OCR -> Summarize -> Entity
   Extraction -> Output. Its file input defaults to samples/scanned-invoice.pdf (an
   image-only scan), which the seed stores as one of the demo user's uploads. OCR runs on
   the worker-ocr queue, the two LLM nodes on worker-llm (Gemini; needs GEMINI_API_KEY).
+- The template catalog (Morning Digest, Invoice Extractor, Email Triage, Job Alert
+  Filter; app.services.templates) is written to the templates table, as on API start.
 """
 
 import asyncio
-import hashlib
 import logging
 from typing import Any
 
@@ -27,7 +30,8 @@ from app.models.enums import WorkflowStatus
 from app.models.file import UploadedFile
 from app.models.user import User
 from app.models.workflow import Workflow
-from app.services.files import file_path, import_file
+from app.services.files import ensure_sample_file
+from app.services.templates import sync_templates
 from app.services.workflows import replace_graph
 
 DEMO_EMAIL = "demo@flowforge.ai"
@@ -40,7 +44,9 @@ SAMPLE_SCAN = "scanned-invoice.pdf"
 logger = logging.getLogger("app.seed")
 
 
-def demo_graph(recipient: str) -> dict[str, Any]:
+def demo_graph(recipient: str, fallback: list[str] | None = None) -> dict[str, Any]:
+    """Input -> Gemini -> Gmail -> Output. `fallback`: providers the Gemini node tries when
+    Gemini fails; only ones the server has keys for, or validation would fail."""
     return {
         "nodes": [
             {
@@ -53,6 +59,7 @@ def demo_graph(recipient: str) -> dict[str, Any]:
                 "description": "Three-sentence summary with Gemini",
                 "config": {
                     "provider": "gemini",
+                    "fallback": fallback or [],
                     "system_prompt": "You are a concise technical writer.",
                     "user_prompt": "Write a three-sentence summary of {{input.topic}}.",
                     "temperature": 0.4,
@@ -150,19 +157,7 @@ def document_graph(sample_file_id: str | None, fallback: list[str] | None = None
 
 async def sample_upload(session: Any, user: User) -> UploadedFile | None:
     """The sample scan as one of the user's uploads (reused if it's already there)."""
-    source = settings.samples_dir / SAMPLE_SCAN
-    if not source.is_file():
-        logger.warning("sample scan not found; the document pipeline has no default file", extra={"path": str(source)})
-        return None
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    existing = await session.scalar(
-        select(UploadedFile).where(UploadedFile.owner_id == user.id, UploadedFile.sha256 == digest)
-    )
-    if existing is not None and file_path(existing).is_file():
-        return existing
-    record = await import_file(session, user.id, source)
-    logger.info("sample scan stored", extra={"file_id": str(record.id)})
-    return record
+    return await ensure_sample_file(session, user.id, SAMPLE_SCAN)
 
 
 async def seed() -> None:
@@ -175,6 +170,8 @@ async def seed() -> None:
             logger.info("demo user created", extra={"email": DEMO_EMAIL})
         else:
             logger.info("demo user already exists", extra={"email": DEMO_EMAIL})
+        # Both pipelines' LLM nodes fall back to Groq, if the server has a key for it.
+        fallback = ["groq"] if settings.GROQ_API_KEY else []
 
         existing = await session.scalar(
             select(Workflow).where(Workflow.owner_id == user.id, Workflow.name == DEMO_PIPELINE)
@@ -190,7 +187,7 @@ async def seed() -> None:
             session.add(workflow)
             await session.flush()
             recipient = settings.SMTP_USER or "you@example.com"
-            await replace_graph(session, workflow, WorkflowGraph.model_validate(demo_graph(recipient)))
+            await replace_graph(session, workflow, WorkflowGraph.model_validate(demo_graph(recipient, fallback)))
             workflow.version = 1
             logger.info("demo pipeline created", extra={"workflow": DEMO_PIPELINE})
         else:
@@ -210,7 +207,6 @@ async def seed() -> None:
             )
             session.add(workflow)
             await session.flush()
-            fallback = ["groq"] if settings.GROQ_API_KEY else []
             graph = document_graph(str(sample.id) if sample else None, fallback)
             await replace_graph(session, workflow, WorkflowGraph.model_validate(graph))
             workflow.version = 1
@@ -218,6 +214,7 @@ async def seed() -> None:
         else:
             logger.info("document pipeline already exists", extra={"workflow": DOCUMENT_PIPELINE})
         await session.commit()
+        logger.info("templates synced", extra={"templates": await sync_templates(session)})
 
 
 async def main() -> None:

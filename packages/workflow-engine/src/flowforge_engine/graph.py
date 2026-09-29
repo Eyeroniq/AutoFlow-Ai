@@ -18,6 +18,7 @@ from flowforge_engine.models import (
 )
 from flowforge_engine.registry import NodeDefinition, NodeRegistry, default_registry
 from flowforge_engine.variables import (
+    ITEM_NAMESPACES,
     RESERVED_NAMESPACES,
     SYSTEM_KEYS,
     contains_reference,
@@ -216,8 +217,12 @@ def validate_graph(
     for node in nodes_by_id.values():
         if node.id not in definitions:
             continue
+        per_item = definitions[node.id].deferred_fields
         for field, expression in iter_references(node.config):
-            problem = _reference_problem(expression, node, nodes_by_id, definitions, ancestors, variable_keys)
+            in_item_field = field.split(".", 1)[0].split("[", 1)[0] in per_item
+            problem = _reference_problem(
+                expression, node, nodes_by_id, definitions, ancestors, variable_keys, item_field=in_item_field
+            )
             if problem:
                 issues.append(ValidationIssue(
                     code=IssueCode.UNRESOLVABLE_REFERENCE, node_id=node.id, field=field or None,
@@ -277,6 +282,8 @@ def _reference_problem(
     definitions: dict[str, NodeDefinition[Any]],
     ancestors: dict[str, set[str]],
     variable_keys: set[str],
+    *,
+    item_field: bool = False,
 ) -> str | None:
     try:
         path = parse_reference(expression)
@@ -284,6 +291,12 @@ def _reference_problem(
         return exc.reason
 
     root, rest = path[0], path[1:]
+    if item_field and root in ITEM_NAMESPACES:
+        if root == "index" and rest:
+            return "{{index}} is a number; it has no fields"
+        return None  # the item's shape is only known at run time
+    if root in ITEM_NAMESPACES and root not in nodes_by_id:
+        return f"{{{{{root}}}}} is only available in a list node's per-item template"
     if root == "vars":
         if not rest:
             return "name a variable, e.g. {{vars.my_key}}"

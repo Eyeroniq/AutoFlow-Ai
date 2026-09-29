@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +76,19 @@ class OpenRouterConfig(LLMConfig):
     provider: LLMProviderName = "openrouter"
 
 
+class MistralConfig(LLMConfig):
+    provider: LLMProviderName = "mistral"
+    temperature: float = Field(default=0.7, ge=0, le=1.5)
+
+
+class CerebrasConfig(LLMConfig):
+    provider: LLMProviderName = "cerebras"
+
+
+class CustomConfig(LLMConfig):
+    provider: LLMProviderName = "custom"
+
+
 class OllamaConfig(LLMConfig):
     provider: LLMProviderName = "ollama"
 
@@ -141,11 +156,20 @@ async def generate_with_fallback(
 
     Streams deltas to `context.on_token` when `stream` is set and someone is watching.
     Raises LLMChainFailed with every provider's error if none answers.
+
+    With a node deadline (set by the executor) and fallbacks left, a provider gets an equal
+    share of the remaining time, and the last one gets all that's left. So a provider that
+    is slow to fail (a Gemini "high demand" 503 can take a minute per attempt, and it's
+    retried) can't use up the node's timeout before the fallbacks get their turn.
     """
     chain = [(provider, model), *(parse_chain_entry(e) for e in fallback)]
     errors: list[dict[str, Any]] = []
-    for provider_name, requested_model in chain:
+    for index, (provider_name, requested_model) in enumerate(chain):
         chosen = requested_model or context.services.default_model(provider_name)
+        left = len(chain) - index
+        budget = None
+        if context.deadline is not None and left > 1:
+            budget = max(0.0, (context.deadline - time.monotonic()) / left)
         try:
             llm = context.services.llm(provider_name)
             request = {
@@ -156,9 +180,20 @@ async def generate_with_fallback(
                 "max_tokens": max_tokens,
             }
             if stream and context.on_token is not None:
-                text = await _collect_stream(llm, provider_name, request, context.on_token)
+                call = _collect_stream(llm, provider_name, request, context.on_token)
             else:
-                text = await llm.generate(**request)
+                call = llm.generate(**request)
+            text = await asyncio.wait_for(call, timeout=budget)
+        except TimeoutError:
+            if budget is None:  # not our budget running out
+                raise
+            error = f"{provider_name}: no answer within {budget:.0f}s, its share of the node's time"
+            errors.append({"provider": provider_name, "model": chosen, "error": error})
+            logger.warning(
+                "LLM provider too slow; trying the next one in the chain",
+                extra={"node_id": context.node_id, "provider": provider_name, "budget_seconds": round(budget, 1)},
+            )
+            continue
         except ProviderError as exc:
             errors.append({"provider": provider_name, "model": chosen, "error": str(exc)})
             if len(chain) > 1:
@@ -274,6 +309,30 @@ class OpenRouterNode(LLMNode):
     description = "Generates text with any OpenRouter model, including ':free' ones."
     icon = "route"
     config_schema = OpenRouterConfig
+
+
+@register_node("mistral")
+class MistralNode(LLMNode):
+    label = "Mistral"
+    description = "Generates text with Mistral models (free Experiment plan on La Plateforme)."
+    icon = "wind"
+    config_schema = MistralConfig
+
+
+@register_node("cerebras")
+class CerebrasNode(LLMNode):
+    label = "Cerebras"
+    description = "Generates text with open models on Cerebras Inference (free trial tier)."
+    icon = "gauge"
+    config_schema = CerebrasConfig
+
+
+@register_node("custom_llm")
+class CustomLLMNode(LLMNode):
+    label = "Custom LLM"
+    description = "Generates text with any OpenAI-compatible endpoint you configure (base URL, model, key)."
+    icon = "plug"
+    config_schema = CustomConfig
 
 
 @register_node("ollama")

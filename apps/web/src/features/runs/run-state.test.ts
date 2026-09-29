@@ -70,9 +70,10 @@ describe("reduceRun", () => {
 
   it("replaces everything with a snapshot (late join / reconnect)", () => {
     const execution: ExecutionDetail = {
-      id: "ex-1", workflow_id: "wf", status: "running", trigger: "manual", triggered_by_user_id: null, created_at: t(0),
+      id: "ex-1", workflow_id: "wf", status: "running", trigger: "manual", trigger_id: null,
+      triggered_by_user_id: null, created_at: t(0),
       started_at: t(0), finished_at: null, error_message: null, queue: "default", worker_hostname: "worker@a",
-      heartbeat_at: null, stop_requested_at: null, duration_ms: null, inputs: {}, final_output: null, segment: 0, handoff_at: null,
+      heartbeat_at: null, stop_requested_at: null, duration_ms: null, inputs: {}, final_output: null, segment: 0, handoff_at: null, deployment_id: null,
       node_executions: [
         { id: "1", node_id: null, node_key: "input", position: 0, node_type: "input", node_label: "Topic", status: "success", input: null, output: { value: 1 }, error_message: null, started_at: t(0), finished_at: t(1), duration_ms: 1, queue: "llm", worker_hostname: "worker-llm@a" },
         { id: "2", node_id: null, node_key: "gemini", position: 1, node_type: "gemini", node_label: "Summarize", status: "running", input: null, output: null, error_message: null, started_at: t(1), finished_at: null, duration_ms: null, queue: "llm", worker_hostname: "worker-llm@a" },
@@ -127,10 +128,11 @@ describe("helpers", () => {
 
   it("fromExecution works on a finished execution", () => {
     expect(fromExecution({
-      id: "e", workflow_id: "w", status: "success", trigger: "manual", triggered_by_user_id: null, created_at: t(0),
+      id: "e", workflow_id: "w", status: "success", trigger: "manual", trigger_id: null,
+      triggered_by_user_id: null, created_at: t(0),
       started_at: t(0),
       finished_at: t(1), error_message: null, queue: null, worker_hostname: null, heartbeat_at: null, stop_requested_at: null,
-      duration_ms: 1000, inputs: null, final_output: { result: 1 }, node_executions: [], segment: 0, handoff_at: null,
+      duration_ms: 1000, inputs: null, final_output: { result: 1 }, node_executions: [], segment: 0, handoff_at: null, deployment_id: null,
     }, idleRun)).toMatchObject({ executionId: "e", status: "success", finalOutput: { result: 1 }, durationMs: 1000 });
   });
 });

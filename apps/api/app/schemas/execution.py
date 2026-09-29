@@ -61,6 +61,12 @@ class ExecutionSummary(BaseModel):
     handoff_at: datetime | None = Field(
         default=None, description="Set while the run waits for a worker of `queue` after a hand-off."
     )
+    deployment_id: uuid.UUID | None = Field(
+        default=None, description="The deployment whose endpoint started the run (trigger `webhook`)."
+    )
+    trigger_id: uuid.UUID | None = Field(
+        default=None, description="The trigger (schedule, email, or webhook) that started the run; null for manual runs."
+    )
 
     @computed_field
     @property

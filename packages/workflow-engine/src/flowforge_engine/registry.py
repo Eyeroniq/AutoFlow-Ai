@@ -46,9 +46,17 @@ class NodeDefinition(ABC, Generic[ConfigT]):
     # Whether a stop request may cancel the node mid-run. Nodes with side effects that
     # can't be safely interrupted (sending an email) finish first; the run stops after.
     interruptible: ClassVar[bool] = True
+    # Per-item template fields (For Each's prompt, Join's template). The executor leaves
+    # them unresolved; the node resolves them once per list item, with {{item}} and
+    # {{index}} in scope next to everything else. Validation accepts those two roots there.
+    deferred_fields: ClassVar[frozenset[str]] = frozenset()
 
     @abstractmethod
     async def execute(self, context: NodeContext, config: ConfigT) -> NodeResult: ...
+
+    def timeout(self, config: ConfigT, default: float) -> float:
+        """Seconds this node may run (the executor's per-node timeout, unless overridden)."""
+        return default
 
     def required_providers(self, node: GraphNode) -> list[tuple[str, str]]:
         """(provider, config field) pairs whose credentials this node needs to run.
@@ -77,6 +85,7 @@ class NodeDefinition(ABC, Generic[ConfigT]):
             "queue": cls.queue,
             "portable": cls.portable,
             "interruptible": cls.interruptible,
+            "item_fields": sorted(cls.deferred_fields),
         }
 
 

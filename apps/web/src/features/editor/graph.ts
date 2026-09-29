@@ -168,27 +168,31 @@ export function outputKeysFor(node: Pick<FlowNode, "id" | "data">, catalog: Cata
   return catalog[node.data.nodeType]?.output_keys ?? [];
 }
 
-function preview(value: unknown, limit = 48): string {
+// Long enough to show whole values; the card truncates with CSS and its tooltip shows the
+// rest, so only runaway values (a pasted document) are cut here.
+const SUMMARY_VALUE_LIMIT = 600;
+
+function preview(value: unknown): string {
   if (value === undefined || value === null || value === "") return "";
   const text = typeof value === "string" ? value : JSON.stringify(value);
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+  return flat.length > SUMMARY_VALUE_LIMIT ? `${flat.slice(0, SUMMARY_VALUE_LIMIT - 1)}…` : flat;
 }
 
-/** The one-line config summary on a node card. */
+/** The one-line config summary on a node card: whole values, one line (the card truncates it). */
 export function configSummary(type: string, config: Record<string, unknown>, entry?: NodeType): string {
   const c = config;
   const str = (key: string) => (c[key] === undefined || c[key] === null ? "" : String(c[key]));
   switch (type) {
     case "input": {
       const hasDefault = c.default !== undefined && c.default !== null && c.default !== "";
-      const shown = c.input_type === "file" ? "a default file" : preview(c.default, 24);
+      const shown = c.input_type === "file" ? "a default file" : preview(c.default);
       return `${str("name") || "value"} · ${str("input_type") || "text"}${hasDefault ? ` = ${shown}` : ""}`;
     }
     case "pdf_extract":
-      return `${preview(c.file, 28) || "(no file)"} · pages ${str("pages") || "all"}`;
+      return `${preview(c.file) || "(no file)"} · pages ${str("pages") || "all"}`;
     case "ocr":
-      return `${preview(c.file, 22) || "(no file)"} · ${str("language") || "eng"} · ${str("dpi") || "300"} dpi`;
+      return `${preview(c.file) || "(no file)"} · ${str("language") || "eng"} · ${str("dpi") || "300"} dpi`;
     case "summarize":
       return `${str("length") || "medium"} · ${str("style") || "paragraph"} · ${str("provider") || "gemini"}`;
     case "extract_entities": {
@@ -201,15 +205,43 @@ export function configSummary(type: string, config: Record<string, unknown>, ent
     case "text":
       return preview(c.text) || "(empty)";
     case "condition":
-      return `${preview(c.left, 16) || "?"} ${str("operator").replace(/_/g, " ") || "?"} ${preview(c.right, 16) || "?"}`;
+      return `${preview(c.left) || "?"} ${str("operator").replace(/_/g, " ") || "?"} ${preview(c.right) || "?"}`;
     case "delay":
       return `wait ${str("seconds") || "?"}s`;
     case "http_request":
       return `${str("method") || "GET"} ${preview(c.url) || "(no url)"}`;
     case "gmail":
-      return `to ${preview(c.to, 36) || "(no recipient)"}${c.auth === "mock" ? " · mock" : ""}`;
+      return `to ${preview(c.to) || "(no recipient)"}${c.auth === "mock" ? " · mock" : ""}`;
     case "gmail_read":
       return `${str("folder") || "INBOX"} · ${c.unread_only === false ? "all" : "unread"} · max ${str("max_results") || "10"}`;
+    case "for_each": {
+      const mode = c.mode === "template" ? "template" : `${str("provider") || "gemini"} · ${str("concurrency") || "2"} at a time · ${str("rate_limit_per_minute") || "10"}/min`;
+      return `each of ${preview(c.items) || "(no list)"} · ${mode}`;
+    }
+    case "filter":
+      return `${str("field") || "item"} ${str("operator").replace(/_/g, " ") || "?"} ${preview(c.value)}`.trim();
+    case "join":
+      return `${preview(c.items) || "(no list)"} → ${preview(c.template) || "each item"}`;
+    case "rss":
+      return `${preview(c.url) || "(no feed)"} · ${str("max_items") || "10"} items${c.since_last_run ? " · new since last run" : ""}`;
+    case "web_page":
+      return preview(c.url) || "(no url)";
+    case "speech_to_text": {
+      const task = c.task === "translate" ? "translate → English" : `transcribe${c.language ? ` (${str("language")})` : ""}`;
+      return `${preview(c.file) || "(no file)"} · ${str("provider") || "groq"} · ${task}`;
+    }
+    case "web_search":
+      return `${preview(c.query) || "(no query)"} · ${str("provider") || "duckduckgo"} · ${str("max_results") || "5"} results${
+        Number(c.fetch_pages) > 0 ? ` · read ${str("fetch_pages")}` : ""
+      }`;
+    case "structured_output": {
+      const props = c.schema && typeof c.schema === "object" ? Object.keys((c.schema as { properties?: object }).properties ?? {}) : [];
+      return `${props.length ? `{${props.slice(0, 3).join(", ")}${props.length > 3 ? ", …" : ""}}` : "JSON"} · ${str("provider") || "gemini"}`;
+    }
+    case "telegram":
+      return `${c.chat_id ? `chat ${str("chat_id")}` : "default chat"} · ${preview(c.text) || "(empty)"}`;
+    case "discord_webhook":
+      return `${c.webhook_url ? "custom webhook" : "connected webhook"} · ${preview(c.content) || preview(c.embed_title) || "(empty)"}`;
     default: {
       if (entry?.category === "ai") {
         const provider = str("provider") || String(entry.config_schema.properties?.provider?.default ?? type);

@@ -32,3 +32,15 @@ anthropic==1.8.0
 pymupdf==1.28.2
 pytesseract==0.3.13
 pillow==12.3.0
+# Triggers: cron schedules (croniter) in IANA time zones (tzdata: the zone database on
+# systems without one, e.g. Windows).
+croniter==6.2.4
+tzdata==2026.4
+# Free data sources: RSS/Atom feeds and readable text from web pages.
+feedparser==6.0.14
+trafilatura==2.2.0
+# Speech to Text: local transcription on the CPU (the models download on first use into
+# WHISPER_MODELS_DIR). Groq's Whisper goes through httpx. ffmpeg is in the Dockerfile.
+faster-whisper==1.2.1
+# Web Search: DuckDuckGo without a key (Tavily goes through httpx).
+ddgs==9.16.0

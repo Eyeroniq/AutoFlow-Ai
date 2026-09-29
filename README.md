@@ -22,14 +22,41 @@ A visual AI workflow automation builder. This repository is being built in phase
   undo/redo, live validation with errors on the nodes, one-node test runs, and runs whose
   node and edge colors follow the WebSocket live. Plus a dashboard, execution history and
   detail pages, and an integrations page for connecting provider keys.
-- **Phase 3.5 (this state):** document AI and independent scaling. File uploads
+- **Phase 3.5:** document AI and independent scaling. File uploads
   (`POST /api/files`), Input nodes of type File, and four document nodes: PDF Extract
   (PyMuPDF), OCR (Tesseract), Summarize, and Entity Extraction (validated JSON). Workers are
   split per queue (`worker-default`, `worker-llm`, `worker-ocr`), and a run hands itself from
   queue to queue, so OCR and LLM capacity scale separately. Plus a Locust load test with
   measured results, and an SSRF guard on the HTTP Request node.
-
-Templates come in a later phase.
+- **Deployments:** **Deploy** in the editor publishes a pipeline as
+  `POST /api/v1/deployments/{deployment_id}/run`, authenticated with a per-deployment API key
+  that is shown once and stored hashed. Calls run through the same Celery path, either queued
+  (`202` + `execution_id`) or with `?wait=true` (the final output in the response), and are
+  rate limited per deployment. See [Deploying a pipeline](#deploying-a-pipeline). Plus UI
+  polish: no Next.js dev badge, wrapping final output, and node summaries that truncate
+  cleanly with the full text on hover.
+- **Phase 5:** day-to-day automation on free services.
+  [Triggers](#triggers) run pipelines without a click: a cron **schedule** in any time zone
+  (Celery beat, fired exactly once per fire time), **new email** in Gmail (one run per
+  message, de-duplicated by Message-ID), and the deployment endpoint as a **webhook**, with a
+  per-workflow runs-per-hour cap and automatic switch-off after repeated failures.
+  [List nodes](#lists-for-each-filter-join): **For Each** (a prompt or an LLM call per item,
+  with concurrency and per-minute rate limits, failures recorded per item), **Filter**, and
+  **Join / Format**. [Free data sources](#free-data-sources-rss-and-web-pages): **RSS Feed**
+  (with "since last run") and **Web Page** (readable text). [Notifications](#notifications-telegram-and-discord):
+  **Telegram** and **Discord Webhook** nodes with real connection tests. Four seeded
+  [templates](#templates) with one-click **Use template**: Morning Digest, Invoice Extractor
+  (with a CSV download), Email Triage, and Job Alert Filter.
+- **Phase 6 (this state):** audio, web search, and more free LLMs.
+  [Speech to Text](#audio-speech-to-text) transcribes audio and video (Groq's free Whisper, or
+  faster-whisper on the worker's CPU with no key), with ffmpeg splitting long recordings at
+  pauses and stitching the timestamps back together, on its own `audio` queue and
+  `worker-audio` service. The run form can **record** from the microphone or a tab, behind a
+  consent checkbox. [Web Search](#web-search) queries DuckDuckGo (no key) with automatic fallback
+  to Tavily, and can read the top pages. **Structured Output** returns JSON validated against a
+  schema. New LLM providers: **Mistral**, **Cerebras**, and **Custom (OpenAI-compatible)** with
+  the SSRF guard on its base URL (GitHub Models was retired by GitHub on 2026-07-30, so it
+  isn't offered). Two more templates: **Meeting Notes** and **Web Research**.
 
 ## Stack
 
@@ -108,8 +135,9 @@ What happens on `up`:
 1. `postgres` and `redis` start and wait until healthy.
 2. `api` runs `alembic upgrade head`, then starts uvicorn with `--reload`.
 3. The workers, `worker-default`, `worker-llm`, and `worker-ocr` (Celery, one per queue; see
-   [Workers: queues and scaling](#workers-queues-and-scaling)), and `web` (`next dev`) start
-   once the API healthcheck passes.
+   [Workers: queues and scaling](#workers-queues-and-scaling)), `beat` (Celery beat: the
+   one-minute [triggers](#triggers) tick), and `web` (`next dev`) start once the API
+   healthcheck passes.
 
 `api`, the workers, and `web` bind-mount their source directories, so edits hot-reload (the
 workers are restarted by `watchfiles`). The API and workers also mount `packages/workflow-engine`
@@ -151,8 +179,10 @@ Everything in the UI comes from the API; there is no mock data.
   starts; zoom controls and a minimap sit bottom-right.
 - **Node cards** show the category color, icon, title, a one-line config summary, input and
   output handles (true/false handles on Condition), a status dot, an issue badge, and streamed
-  LLM text while a node runs. Edges are gray before a run, blue and animated while their
-  target runs, green when both ends succeeded, and red when either failed.
+  LLM text while a node runs. A summary that doesn't fit ends in an ellipsis, and hovering it
+  shows the whole text in a tooltip (only when something was cut off). Edges are gray before
+  a run, blue and animated while their target runs, green when both ends succeeded, and red
+  when either failed.
 - **Config panel** (select a node): a form generated from the node's JSON Schema with React
   Hook Form + Zod (text, textarea, number, select for enums, checkbox, lists, JSON), required
   markers, and inline errors. LLM nodes get a provider select that shows which credential it
@@ -174,10 +204,13 @@ Everything in the UI comes from the API; there is no mock data.
 - **Running:** Run asks for the Input nodes' values, saves, and calls `POST /run` (`202`). The
   editor then follows the run over `WS /ws/executions/{id}` (the JWT is sent as the first
   message): node and edge colors, a run panel with a per-node timeline (status, duration,
-  input, output, error, streamed tokens), and the final output. Stop calls `/stop`. Dropped
-  connections reconnect with backoff, and the server's snapshot replays anything missed; a run
-  already in progress when you open the editor is joined the same way. A `4401` refreshes the
-  session once and then asks you to sign in; a `4404` says the run isn't yours.
+  input, output, error, streamed tokens), and the final output (long values wrap rather than
+  scroll sideways). Stop calls `/stop`. Dropped connections reconnect with backoff, and the
+  server's snapshot replays anything missed; a run already in progress when you open the
+  editor is joined the same way. A `4401` refreshes the session once and then asks you to
+  sign in; a `4404` says the run isn't yours.
+- **Deploying:** **Deploy** in the top bar publishes the pipeline as an API endpoint; see
+  [Deploying a pipeline](#deploying-a-pipeline).
 - **Other pages:** `/dashboard` (pipelines with status, last run, and last modified; create,
   open, run, duplicate, delete; recent executions), `/executions` (history filtered by
   pipeline and status, refreshing while runs are active), `/executions/{id}` (per-node
@@ -263,6 +296,489 @@ seven amounts with correct numeric values. The model mislabeled some amounts' `m
 can't check. Most of Summarize's and Entity Extraction's time was Gemini's retries with
 backoff before the fallback.
 
+## Deploying a pipeline
+
+![The Deploy dialog](docs/screenshots/deploy.png)
+
+**Deploy** in the editor's top bar opens a dialog with the pipeline's name, its Input nodes
+(name, type, required or optional), its Output nodes, and its endpoint. Deploying saves any
+unsaved edits, validates the graph with the same checks as Run (including `auth_missing`), and
+publishes it at:
+
+```
+POST /api/v1/deployments/{deployment_id}/run
+```
+
+- **A snapshot:** the endpoint runs the graph as it was when you deployed it. Editing the
+  pipeline doesn't change what callers get until you press **Redeploy**, and the dialog tells
+  you when the pipeline has changed since. A redeploy keeps the deployment id (so the URL
+  stays the same) and the API key.
+- **The API key** (`ffk_` plus 256 random bits) is shown once, in the dialog right after the
+  first deploy, with a copy button. The server stores only its SHA-256 hash and an
+  8-character prefix for recognizing it (`ffk_Ab12Cd34…`), and the response that carries it
+  is `Cache-Control: no-store`. A fast hash is enough because the key is random, not a
+  password someone chose. If the key is lost or leaked, **Generate new key** issues a new
+  one and revokes the old one at once. It doesn't redeploy, so unfinished edits stay
+  unpublished.
+- **Authentication:** send the key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+  A missing or wrong key, another deployment's key, a user's JWT, and an unknown deployment
+  id all get the same `401`, so deployment ids can't be probed.
+- **Runs** take the same path as the editor's Run: a pending execution (trigger `webhook`,
+  with its `deployment_id`; runs from before Phase 5 were renamed from `api`) is queued to the Celery queue its first node needs and recorded by the
+  workers. The owner sees it in the executions list and can watch it live. It uses the
+  owner's credentials, which the caller never sees, and the response carries only the
+  status, final output, and error, not the per-node details.
+- **Async (the default):** `202` with the `execution_id` and `links.status`. Poll that with
+  the same key.
+- **`?wait=true`:** the request waits on the execution's event channel (re-checking the
+  database every second) for up to `timeout` seconds (default
+  `DEPLOYMENT_WAIT_TIMEOUT_SECONDS`, 30; at most `DEPLOYMENT_MAX_WAIT_SECONDS`, 120) and
+  answers `200` with the final output. A run that fails also answers `200`, with
+  `status: "failed"` and the `error`. A run still going at the timeout answers `202`, as in
+  async mode.
+- **Rate limits** apply per deployment (every caller of one endpoint shares them) and count
+  only requests with a valid key: `DEPLOYMENT_RUN_RATE_LIMIT` (default `30/minute`) for runs
+  and `DEPLOYMENT_STATUS_RATE_LIMIT` (`240/minute`) for status polls. Over the limit: `429`.
+  Like the auth limits, they're kept in memory per API process.
+- **Other errors:** `422` for a body that isn't `{"inputs": {...}}`, a file input that isn't
+  one of the owner's uploads, or a deployed graph that no longer validates (a removed
+  credential, say: fix it and redeploy). `503` if the broker is down (the execution is
+  marked failed).
+
+Call it with the key from the dialog. The dialog's **Try it** box has this command filled in
+with your URL, key, and inputs:
+
+```bash
+export FLOWFORGE_API_KEY=ffk_...   # the key the dialog showed
+
+curl -X POST 'http://localhost:8000/api/v1/deployments/<deployment_id>/run?wait=true' \
+  -H "Authorization: Bearer $FLOWFORGE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs": {"topic": "the history of workflow automation"}}'
+```
+
+```json
+{
+  "execution_id": "7e6f0fa2-19c7-4393-ac35-6c6638c96c78",
+  "deployment_id": "4a635d66-5149-4ef1-a94f-cb423956ad8c",
+  "status": "success",
+  "final_output": {"result": {"summary": "Workflow automation began with ...", "email": "<...@mail.gmail.com>"}},
+  "error": null,
+  "created_at": "2026-09-28T16:02:11.402Z",
+  "started_at": "2026-09-28T16:02:11.480Z",
+  "finished_at": "2026-09-28T16:02:15.912Z",
+  "duration_ms": 4432,
+  "links": {"status": "/api/v1/deployments/4a635d66-5149-4ef1-a94f-cb423956ad8c/executions/7e6f0fa2-19c7-4393-ac35-6c6638c96c78"}
+}
+```
+
+Without `?wait=true`, the call returns at once and you poll:
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/deployments/<deployment_id>/run' \
+  -H "Authorization: Bearer $FLOWFORGE_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"inputs": {"topic": "tides"}}'
+# 202 {"execution_id": "...", "status": "pending", "links": {"status": "/api/v1/deployments/.../executions/..."}, ...}
+
+curl 'http://localhost:8000/api/v1/deployments/<deployment_id>/executions/<execution_id>' \
+  -H "Authorization: Bearer $FLOWFORGE_API_KEY"
+```
+
+In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`, so use Git Bash or WSL for
+the commands above, or:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/api/v1/deployments/<deployment_id>/run?wait=true' `
+  -Headers @{ Authorization = "Bearer $env:FLOWFORGE_API_KEY" } -ContentType 'application/json' `
+  -Body '{"inputs": {"topic": "the history of workflow automation"}}'
+```
+
+There's no undeploy yet: deleting the pipeline deletes its deployment, and rotating the key
+locks every caller out. The endpoint is also the pipeline's **webhook trigger**: switching the
+webhook off in the Triggers panel (or the failure limit doing so) makes it answer `409`, and
+calls count toward the pipeline's triggered runs per hour (`429` beyond). See [Triggers](#triggers).
+
+## Triggers
+
+![The Triggers panel](docs/screenshots/triggers.png)
+
+**Triggers** in the editor's top bar opens a panel with the pipeline's three triggers. Each
+has an on/off switch and shows its next run, its last run (status and a link), its
+consecutive failures, and anything that went wrong without producing a run. The button's dot
+is green when a trigger is on, amber when one is failing, and red when one was switched off
+by the failure limit. Triggers run the **saved** pipeline (autosave keeps it current), and
+every run records what started it: `trigger` is `manual`, `schedule`, `email`, or `webhook`,
+and `trigger_id` names the trigger. The executions list shows it as a badge and filters by it
+(`/executions?trigger=schedule`), and so does `GET /api/executions?trigger=...`. Triggered
+runs have no `triggered_by_user_id`; they use the owner's credentials.
+
+### Schedule
+
+A 5-field cron expression (`30 7 * * *` is 07:30 daily; `@daily`, `@hourly`, `@weekly`,
+`@monthly`, `@yearly` work too) read in an IANA time zone (`Asia/Kolkata`, `Europe/Berlin`,
+`UTC`; the panel suggests your browser's), plus optional run `inputs`. The panel previews the
+next fire times as you type (`POST /api/triggers/schedule-preview`).
+
+How it fires, and why it never fires twice:
+
+1. The `beat` service (Celery beat, exactly one) sends `flowforge.triggers_tick` on every
+   minute (`crontab()`, with a 55 s expiry so a tick stuck in the queue is dropped rather than
+   run late). `worker-default` runs it.
+2. The tick selects enabled schedules whose `next_fire_at` has passed. Each one is **claimed**
+   with a compare-and-set on that exact fire time:
+   `UPDATE workflow_triggers SET next_fire_at = <the next one> WHERE id = ? AND next_fire_at = <the time it read>`.
+   Postgres re-checks the `WHERE` after a concurrent update commits, so of any number of ticks
+   (two beats, a redelivered task, overlapping ticks) exactly one gets the row.
+3. The winner records the fire time in `trigger_events` under a unique
+   `(trigger_id, event_key)` (`schedule:2026-09-29T02:00:00+00:00`), a second guard, and
+   starts the run through the ordinary path: `create_execution` (validation included) and the
+   task queue, in the same transaction as the claim.
+4. The next fire time is computed from `max(now, fire time)`, so after downtime a schedule
+   fires once, not once per missed slot. A fire time older than
+   `TRIGGER_MISFIRE_GRACE_SECONDS` (1 h) when a tick sees it is skipped (the panel says so)
+   rather than run hours late.
+
+**Daylight saving time** follows classic cron. A fixed time (the hour field names hours, as
+in `30 1 * * *`) fires **once**: when clocks fall back and 01:30 happens twice, it fires on the
+first one. (Plain croniter fires on both, so FlowForge walks wall-clock times itself.) A time
+skipped when clocks spring forward (`30 2 * * *` in New York on DST day) runs at 03:30, the same
+offset after the jump. Intervals (the hour field is `*` or `*/n`, as in `*/15 * * * *`) follow
+real time, so they keep their spacing through the change.
+
+### New email
+
+Polls the Gmail account (the one under Integrations, or `SMTP_USER`) over IMAP every
+`poll_minutes` (at least `EMAIL_TRIGGER_MIN_POLL_MINUTES`) for **unread** mail in `folder`
+whose From and/or Subject contain the filters, and starts **one run per new email**, with the
+email as the run input named `input_name` (default `email`): an Input node of that name and
+type JSON receives `{from, from_address, to, cc, subject, date, body_text, snippet,
+message_id, attachments, folder}` (a text Input gets it as readable text). Use it as
+`{{email.value.subject}}`, `{{email.value.body_text}}`.
+
+- **From now on:** enabling the trigger reads the folder's `UIDVALIDITY` and `UIDNEXT` right
+  away (a mailbox it can't read is a `422` in the panel), and only messages with a higher UID
+  count. Mail already in the folder never floods the pipeline.
+- **Exactly once:** each poll asks the server for matching messages above the last UID it
+  looked at, oldest first, up to `max_per_poll` (the rest wait for the next poll), and records
+  each message's **Message-ID** as a unique trigger event before starting its run. However
+  often a message is seen again (a redelivered poll task, **Check now** while a poll is
+  running, the message moved back into the folder under a new UID, a lost position), it
+  never runs twice. A Redis lock keeps two polls of one trigger from overlapping, and a new
+  `UIDVALIDITY` (the server renumbered the folder) restarts from its end.
+- **Scheduling:** the tick claims due polls the same way as schedules (compare-and-set on
+  `next_fire_at`, aligned to the minute) and queues one `flowforge.poll_email_trigger` task
+  each, since IMAP can take a few seconds. **Check now** in the panel
+  (`POST /api/workflows/{id}/triggers/email/check`) runs a poll immediately.
+- **Gmail marks mail you send to yourself as read.** To test the trigger by emailing
+  yourself, turn off **Unread only** (keep a subject filter); mail from other people arrives
+  unread.
+
+### Webhook
+
+The pipeline's deployment endpoint (`POST /api/v1/deployments/{id}/run` with its API key; see
+[Deploying a pipeline](#deploying-a-pipeline)). The panel shows the URL, the key's prefix, and
+a curl example, or a **Deploy** button if the pipeline isn't deployed yet. It's on once
+deployed; switch it off to make the endpoint answer `409` without deleting the deployment.
+
+### Safety limits (per workflow)
+
+- **Triggered runs per hour** (`max_runs_per_hour`, default 30): schedule, email, and webhook
+  runs started in the last rolling hour. Beyond it a schedule or email run is skipped (the
+  trigger shows "Skipped: this workflow already started N triggered runs in the last hour")
+  and a webhook call gets `429`. The count is taken with the workflow row locked, so
+  concurrent triggers can't both slip past it. Manual runs don't count.
+- **Switch off after N failures** (`max_consecutive_failures`, default 3; 0 = never): every
+  way a run ends goes through `finish_execution`, which, in the same transaction, resets the
+  trigger's `consecutive_failures` on success and adds one on failure. At the limit the
+  trigger turns itself off and shows **"Disabled after 3 consecutive failed runs. Last error:
+  ... Fix the workflow, then turn the trigger back on."** in red, on the dashboard too. A run
+  stopped by you doesn't count. A triggered run that can't even start (the pipeline no longer
+  validates, say a removed credential) is recorded as a failed execution with its trigger, so
+  it's visible in the history and counts too. Turning the trigger back on clears the state.
+
+### Trigger API
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET | `/api/workflows/{id}/triggers` | All three triggers (`configured`, `enabled`, `config`, `next_run_at`, `upcoming`, `last_run`, `consecutive_failures`, `auto_disabled_at`, `disabled_reason`, `last_error`, `warnings`, `webhook`, `mailbox`), the limits, and `runs_last_hour` |
+| PUT | `/api/workflows/{id}/triggers/{schedule\|email\|webhook}` | `{enabled, config?}`: save and switch on or off. `422` for a bad cron, an unknown time zone, or a mailbox that can't be read |
+| PUT | `/api/workflows/{id}/trigger-settings` | `{max_runs_per_hour, max_consecutive_failures}` |
+| POST | `/api/workflows/{id}/triggers/email/check` | Poll the mailbox now: `{found, runs: [{outcome, execution_id, event_key}]}` |
+| POST | `/api/triggers/schedule-preview` | `{cron, timezone, count}` → `{valid, error, cron, interval, next: [...]}` |
+
+## Lists: For Each, Filter, Join
+
+Three nodes in the library's **Lists** group work on lists such as `{{gmail_read.emails}}` or
+`{{rss.items}}`. Their per-item fields (For Each's `prompt` and `system_prompt`, Join's
+`template`) are resolved once per item with **`{{item}}`** (the item; objects become JSON),
+**`{{item.title}}`** (one of its fields), and **`{{index}}`** (0-based) in scope, next to the
+usual references (`{{vars.resume}}`). The `{{` autocomplete offers them there, and
+validation accepts them only there. `flatten: true` merges nested lists one level, to combine
+sources: `items: ["{{gmail_read.emails}}", "{{rss.items}}"]`.
+
+- **For Each** (`for_each`, on the `llm` queue): `mode: llm` sends the prompt for each item to
+  an LLM (the usual provider / model / fallback chain) and collects the replies;
+  `mode: template` only renders the prompt per item. `output_format: json` parses each reply
+  as JSON, so later nodes can read `{{item.output.score}}`. Built for free tiers:
+  **`concurrency`** (default 2) items in flight at once, and **`rate_limit_per_minute`**
+  (default 10; 0 = none): at most that many calls start in any 60-second window (a sliding
+  window; the first calls go out at once, the rest wait). **Partial failures** are recorded per
+  item (`results[i]` has `ok`, `output`, and `error`) instead of failing the node; `fail_when`
+  (`all_failed` by default, `any_failed`, `never`) decides when the node itself fails.
+  `max_items` caps the list (the rest are `skipped`), each item gets `item_timeout_seconds`,
+  and the node gets `timeout_seconds` (600): items that can't start in time are marked not run,
+  and the others keep their results. Output: `results`, `outputs` (the successful outputs, in
+  order), `count`, `succeeded`, `failed`, `skipped`, `rate_limited_seconds`.
+- **Filter** (`filter`): keeps the items whose `field` (a path inside each item, such as
+  `output.score` or `subject`; blank = the item) matches `operator` and `value`: `equals`,
+  `not_equals`, `contains`, `not_contains`, `starts_with`, `ends_with`, `greater_than`,
+  `greater_or_equal`, `less_than`, `less_or_equal`, `is_empty`, `is_not_empty`, `matches`
+  (regex). Numeric text compares as numbers (`"70"` ≥ `70`), text compares case-insensitively
+  unless `case_sensitive`, and items missing the field are dropped. Output: `items`, `count`,
+  `removed`, and `errors` for items it couldn't compare. (Condition gained the same operators
+  and `case_sensitive`.)
+- **Join / Format** (`join`): one text block from a list: each item through `template` (blank
+  = the item itself), joined by `separator` (`\n` is a line break), with optional `numbered`,
+  `header`, `footer`, and `empty_text` for an empty list. Output: `text`, `count`, `truncated`.
+
+## Free data sources: RSS and web pages
+
+Both download through the same SSRF guard as the HTTP Request node (the URL and every
+redirect must reach a public address; see [Security](#security-outbound-requests-ssrf-guard)),
+with a browser-like User-Agent and a 5 MB cap.
+
+- **RSS Feed** (`rss`, feedparser): RSS 2.0, RSS 1.0, and Atom. The newest `max_items`
+  entries (sorted by date) as `{id, title, link, summary, published, author, tags}` (plus
+  `content` with `include_content`), and the feed's title and link. **`since_last_run`** returns
+  only entries this node hasn't returned in an earlier **successful** run: the node saves the
+  entry ids it saw (`node_states`, per workflow and node), and a run reads what the last
+  successful run saved, so if a later node fails the next run sees the same entries again.
+  A single-node **Test** reads the position without moving it.
+- **Web Page** (`web_page`, trafilatura): fetches a page and returns its main text (navigation,
+  footers, and ads removed) with `title`, `author`, `date`, `description`, and `site_name`,
+  cut to `max_chars`. Plain text is returned as is; PDFs and other binaries are refused (upload
+  them and use PDF Extract).
+
+## Audio: Speech to Text
+
+**Speech to Text** (`speech_to_text`, category Audio, queue `audio`) turns a recording into
+text with timestamps.
+
+![A Meeting Notes run: the transcript with timestamps](docs/screenshots/meeting-notes-run.png)
+
+| Config | Default | Meaning |
+| ------ | ------- | ------- |
+| `file` | required | An uploaded audio or video file: `{{input.recording}}`, or a file id |
+| `provider` | `groq` | `groq` (Whisper on Groq's free tier, needs `GROQ_API_KEY`) or `local` (faster-whisper on the worker's CPU, no key) |
+| `model` | blank | Blank = `whisper-large-v3-turbo` on Groq (`whisper-large-v3` when translating), `FASTER_WHISPER_MODEL` (`base`) locally: `tiny`, `base`, `small`, `medium`, `large-v3`, `turbo` |
+| `task` | `transcribe` | `translate` gives English text from any language (Groq: `whisper-large-v3`; turbo can't translate, and validation says so) |
+| `language` | blank | ISO code (`en`, `de`, ...) to skip detection; blank detects it |
+| `prompt` | blank | Spellings for names and jargon ("FlowForge, Groq"): Whisper copies their style |
+| `chunk_minutes` | `10` | The longest piece sent in one request (Groq only; shortened further so each piece stays under `GROQ_WHISPER_MAX_FILE_MB`) |
+| `max_duration_minutes` | `240` | Longer recordings are refused before any work |
+| `timeout_seconds` | `900` | The node's own time limit (the run's is `EXECUTION_TIME_LIMIT_SECONDS`, 30 minutes) |
+
+Output: `text`, `segments` (`[{id, start, end, text}]`, seconds from the start of the file),
+`language` (ISO code, by the most speech across chunks) and `language_name`,
+`duration_seconds`, `chunks`, `provider`, `model`, `task`, `source` (`audio` or `video`), and
+`filename`. There are **no speaker labels**: Whisper doesn't identify speakers, and the node
+doesn't pretend to. Prompts downstream (like the Meeting Notes template's) say so.
+
+**How a file is processed** (`flowforge_engine.media`, ffmpeg and ffprobe in the image):
+
+1. `ffprobe` reads the duration and streams. A video's audio track is used; a video without
+   one fails with "has no audio track".
+2. The audio is converted to 16 kHz mono (what Whisper uses internally).
+3. For Groq, if the file is longer than one chunk, `silencedetect` finds the pauses, and each
+   cut goes in the middle of the latest pause between 50% and 100% of the chunk length
+   (a hard cut only where there's no pause at all). Each piece is encoded as 32 kbps MP3
+   (~4 KB/s, so 10 minutes is ~2.4 MB, far below the 25 MB free-tier limit).
+4. Each piece is transcribed, and the segments are shifted by the piece's start time and
+   renumbered, so timestamps run continuously through the whole file.
+5. Low-confidence segments at the end of the audio, where Whisper tends to invent a
+   "Thank you" in the silence, are dropped (Whisper's own thresholds: `avg_logprob < -1` and
+   either `no_speech_prob > 0.6` or reaching the end of the audio), and segment ends are clamped
+   to the audio's length.
+
+Local faster-whisper takes the whole file in one pass (no upload limit) with its voice
+activity filter on. Its model is downloaded from Hugging Face on first use into
+`WHISPER_MODELS_DIR` (Compose: the `whisper_models` volume, shared by the API and the workers),
+so the first run of a model size waits for the download (`base` is ~140 MB).
+
+**Uploads.** `POST /api/files` accepts MP3, WAV, M4A/AAC, Ogg (Opus/Vorbis), FLAC, WebM, MP4,
+and MOV, detected from the bytes (the file name and the browser's type are ignored). Audio and
+video get their own limit, `MAX_MEDIA_UPLOAD_MB` (500), separate from `MAX_UPLOAD_MB` (25) for
+documents and images.
+
+**The audio queue.** Speech to Text runs on `worker-audio` (queue `audio`,
+`WORKER_AUDIO_CONCURRENCY` = 2 processes, `AUDIO_THREADS_PER_TASK` = 2 CPU threads each for local
+transcription), so a long transcription never holds up LLM calls or OCR. A run moves to the
+audio worker for this node and on to the next queue after it, like OCR.
+
+### Recording in the browser (and consent)
+
+For a file input, the **Run** form has **Upload** and **Record**. Record opens a small
+recorder:
+
+- **"Everyone being recorded has been informed"** must be ticked before **Start recording**
+  is enabled. Nothing is captured, and the browser doesn't even ask for the microphone,
+  until then.
+- **Microphone** uses `getUserMedia`. **Tab or screen audio** uses `getDisplayMedia` where the
+  browser supports it (Chrome and Edge on desktop): pick a tab and tick "Share tab audio". The
+  video track is dropped at once; only audio is recorded.
+- The recording (`MediaRecorder`, WebM/Opus where supported, else Ogg or MP4) is uploaded when
+  you press **Stop and upload**, with the same progress bar and cancel button as an upload,
+  and selected as the input.
+- Clear messages instead of failures: permission denied ("Microphone access was blocked.
+  Allow it from the icon in the address bar"), no microphone, the device in use by another
+  app, a shared tab without audio, an insecure page (recording needs https or localhost), and
+  browsers without `MediaRecorder` or `getDisplayMedia`.
+
+## Web Search
+
+**Web Search** (`web_search`, category Sources) returns `results`: `[{position, title, url,
+snippet, source}]`.
+
+| Config | Default | Meaning |
+| ------ | ------- | ------- |
+| `query` | required | Supports `{{variables}}`, e.g. `{{question.value}}` |
+| `provider` | `duckduckgo` | `duckduckgo` (the `ddgs` library, no key) or `tavily` (`TAVILY_API_KEY`) |
+| `fallback` | `true` | When the provider fails or rate limits, try the other one (if it has credentials) |
+| `max_results` | `5` | 1-20 |
+| `fetch_pages` | `0` | Also read the first N result pages (0-10) through the Web Page reader (trafilatura, SSRF-guarded): those results get `page_title` and `page_text`, or `page_error` |
+| `max_page_chars` | `4000` | Per page |
+| `region`, `safe_search`, `time_range` | `wt-wt`, `moderate`, `any` | Passed to the provider (`time_range`: day, week, month, year) |
+| `fail_when_empty` | `true` | Fail when nothing is found, so later nodes don't read an empty list |
+| `timeout_seconds` | `20` | Per provider |
+
+Output also has `provider_used` and `fallback_errors`. Errors say what happened and what to do:
+DuckDuckGo rate limits (`HTTP 429`) say "wait a minute, or set TAVILY_API_KEY so searches fall
+back to Tavily"; Tavily's `401` (bad key), `429`, `432` (plan credits used up), and `433`
+(pay-as-you-go limit) are named; timeouts and 5xx are retried. A page that can't be read
+(`fetch_pages`) is reported per page instead of failing the search. **Integrations → Web
+search → Tavily** stores a key; **Test connection** calls Tavily's `/usage` (it proves the key
+and shows the credits used, without spending one).
+
+## Notifications: Telegram and Discord
+
+Both split messages over the service's limit into several (Telegram 4,096 characters, Discord
+2,000), honor `429` rate limits (Telegram's `parameters.retry_after`, Discord's `retry_after`
+or `Retry-After`) by waiting that long and retrying, and can't be interrupted mid-send, so it's
+never unclear whether a message went out. Secrets (the bot token, the webhook URL) are
+redacted from every error.
+
+- **Telegram** (`telegram`): `text`, `chat_id` (blank = the integration's default chat),
+  `format`: `markdown` (default: the Markdown LLMs write, with bold, italics, headings, lists,
+  links, and code, becomes Telegram's HTML, with everything else escaped; if Telegram still
+  rejects the markup, the words are sent as plain text), `html`, or `text`. Also
+  `disable_link_preview` and `silent`.
+- **Discord Webhook** (`discord_webhook`): `content` (Discord Markdown), an optional embed
+  (`embed_title`, `embed_description`, `embed_url`, `embed_color` like `#5865F2`,
+  `embed_footer`), `username`, `avatar_url`, `thread_id`. `@everyone` and other mentions don't
+  ping unless `allow_mentions`. The webhook comes from the Discord integration, or
+  `webhook_url` on the node (it must be a `discord.com/api/webhooks/...` URL).
+
+Credentials go under **Integrations → Notifications**, encrypted like the others, or in `.env`
+as server-wide defaults (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DISCORD_WEBHOOK_URL`). A
+user's own Telegram credential replaces the server's entirely, chat included. **Test
+connection** makes real calls that send nothing: Telegram `getMe` (the token works) and
+`getChat` on the default chat (the bot can reach it); Discord a `GET` of the webhook.
+
+### Create a Telegram bot and find your chat id
+
+1. In Telegram, open a chat with **@BotFather**, send `/newbot`, and pick a display name and a
+   username ending in `bot`. BotFather replies with the token (`123456789:AAE...`). Treat it
+   as a password.
+2. Open your new bot (the `t.me/<username>` link BotFather gives you) and press **Start**, or
+   send it any message. A bot can't message you first.
+3. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser. Your message is in
+   `result[0].message`, and `message.chat.id` is your chat id (a number such as `858327745`).
+   For a group, add the bot to the group, send a message there, and use that chat's id (it
+   starts with `-`).
+4. Put them in `.env` (`TELEGRAM_BOT_TOKEN=...`, `TELEGRAM_CHAT_ID=...`, then
+   `docker compose up -d` to recreate the containers), or paste them under Integrations →
+   Telegram bot. Press **Test connection**: it should name your bot and your chat.
+
+### Create a Discord webhook
+
+1. In Discord, open the server's channel settings (the gear next to the channel) → **Integrations** →
+   **Webhooks** → **New Webhook**. You need the Manage Webhooks permission.
+2. Name it, optionally pick an avatar, and press **Copy Webhook URL**
+   (`https://discord.com/api/webhooks/<id>/<token>`). Anyone with it can post to the channel.
+3. Paste it under Integrations → Discord webhook (or `DISCORD_WEBHOOK_URL` in `.env`) and
+   press **Test connection**.
+
+## Templates
+
+![Templates on the dashboard](docs/screenshots/templates.png)
+
+The dashboard's **Templates** section lists six ready-made pipelines. Each card shows its
+steps and the credentials it needs, with a check or a warning for each and the provider that
+would be used. **Use template** creates an editable copy you own and opens it in the editor.
+LLM steps use the first free provider you have a key for (Gemini, then Groq, then OpenRouter),
+with the others as fallbacks. A Telegram step becomes a Discord Webhook step if you only have
+Discord, or a Gmail step to your own address if you only have Gmail. Speech to Text uses Groq
+with a Groq key and local faster-whisper without one. The template's trigger is created switched off, with a schedule in your browser's
+time zone. The catalog lives in [`app/services/templates.py`](apps/api/app/services/templates.py)
+and is written to the `templates` table on API start and by the seed
+(`GET /api/templates`, `POST /api/templates/{slug}/use`).
+
+| Template | Steps | Needs |
+| -------- | ----- | ----- |
+| **Morning Digest** | Schedule (07:30) → Gmail Read (unread, last day) + RSS Feed (BBC Technology, new since the last digest) → For Each (one-line summary each, 2 at a time, 10/min) → Join → Gemini (the digest, in Markdown) → Telegram → Output | Gmail App Password, an LLM key, Telegram (or Discord) |
+| **Invoice Extractor** | Input (file; defaults to the sample scan) → OCR (the text layer where a PDF page has one, Tesseract for scanned pages) → Entity Extraction (parties, dates, amounts, invoice number, vendor, customer, due date, total due) → Output (JSON). **Download JSON / CSV** on the run: the CSV has one row per entity | An LLM key |
+| **Email Triage** | New email → Gemini (urgent / normal / spam, temperature 0) → Condition (contains "urgent", ignoring case) → Telegram only for urgent → Output. The Input has a sample urgent email for manual runs | Gmail App Password, an LLM key, Telegram (or Discord) |
+| **Meeting Notes** | Input (audio/video file; defaults to [`samples/team-meeting.mp3`](samples/team-meeting.mp3), or record in the Run form) → Speech to Text (Groq Whisper, vocabulary prompt from `{{vars.vocabulary}}`) → Structured Output (`summary`, `decisions[]`, `action_items[{task, owner, due}]`, validated against a JSON Schema, one retry with the problems if the reply doesn't match; `owner` "unassigned" and `due` "not set" when not said) → Join ×2 → Telegram (or Discord, or Gmail) → Output (the notes, the transcript, and the timestamped segments) | Groq key (or local faster-whisper, no key), an LLM key, Telegram / Discord / Gmail |
+| **Web Research** | Input (a question) → Web Search (DuckDuckGo, 5 results, Tavily fallback) → Web Page (the top result's text; a site that blocks readers gives empty text instead of failing) → Join (numbered sources) → Gemini (answers only from the sources, citing `[1]`, `[2]`, ... and ending with a `Sources:` list of `[n] Title - URL`) → Output (the answer and the sources) | An LLM key (Tavily optional) |
+| **Job Alert Filter** | Schedule (every 6 h) → RSS Feed (We Work Remotely, programming; new since the last run) → For Each (score 0-100 against `{{vars.resume}}`, as JSON) → Filter (`output.score` ≥ `{{vars.threshold}}`, 70) → Condition (any?) → Join → Telegram → Output | An LLM key, Telegram (or Discord) |
+
+Edit the variables (`feed_url`, `resume`, `threshold`) in the **Variables** panel. **Download
+JSON / CSV** is on every run with a final output (the run panel and the execution page;
+`GET /api/executions/{id}/output?format=csv`): the CSV turns any JSON into rows, one per object
+in any list, with a `group` column saying where each row came from.
+
+## Free-tier rate limits
+
+Free tiers change without notice, so nothing in FlowForge hardcodes a quota; these are the
+levers:
+
+- **For Each** is where calls multiply: keep `rate_limit_per_minute` under your provider's
+  free-tier requests-per-minute limit (check its rate-limits page; the templates use 10) and
+  `concurrency` low (2). A Morning Digest of 18
+  items took 67 s, 53 of them spent waiting on the limit. The limit applies per node per run:
+  two pipelines running at once each get their own budget.
+- **Fallbacks:** every LLM step can fall back to another provider (templates add the ones you
+  have keys for), so a `429` or an overloaded model moves to the next one instead of failing
+  the item.
+- **Retries:** `429`s and `5xx`s from LLMs, Telegram, and Discord are retried with backoff,
+  honoring the service's `Retry-After`, up to `LLM_MAX_RETRIES` and waiting at most
+  `LLM_RETRY_MAX_DELAY_SECONDS` (a longer requested wait gives up at once, so a fallback can
+  answer).
+- **Triggers:** `max_runs_per_hour` caps how often a schedule, the inbox, or webhook callers
+  can start a pipeline, and a trigger that keeps failing (for example on an exhausted daily
+  quota) switches itself off after `max_consecutive_failures` instead of burning the quota
+  all day.
+- **Daily quotas:** Gemini's free tier also has requests-per-day limits per model. An
+  every-minute schedule on an LLM pipeline uses them up quickly, so prefer hourly or daily
+  crons for LLM work, and `GEMINI_MODEL` for a model with more free quota.
+- **Groq Whisper** (free, when checked): 20 requests a minute, 2,000 a day, 7,200 audio
+  seconds an hour, and 28,800 a day, 25 MB per file. So about 2 hours of audio per hour: a
+  1-hour meeting is 6 chunks of 10 minutes and one-sixth of the daily audio. A `429` names
+  these limits; switch the node to `local` (no quota, slower) for bulk work. Details:
+  <https://console.groq.com/docs/speech-to-text> and <https://console.groq.com/docs/rate-limits>.
+- **faster-whisper** (local) has no quota: it's bound by the worker's CPU. On this machine
+  `base` transcribed the 100-second sample in 6.9 s; `small` and larger are more accurate and
+  several times slower.
+- **DuckDuckGo** has no documented quota but rate limits bursts (the error says so). Set
+  `TAVILY_API_KEY` (free: 1,000 credits a month, 1 per basic search) and searches fall back to
+  Tavily automatically.
+- **Mistral**'s free "Experiment" plan needs phone verification and has low rate limits;
+  **Cerebras**'s free tier allowed 5 requests a minute and 1M tokens a day when checked. Keep
+  For Each's `rate_limit_per_minute` at or below those.
+- **Telegram** asks bots to send at most about one message per second to a chat, and
+  **Discord** rate-limits each webhook. Both answer `429` with the time to wait, which the
+  nodes honor.
+
 ## Tests
 
 ### Backend
@@ -335,6 +851,70 @@ suite in a loop.
   a redirect to an internal host is refused, that the socket goes to the checked address,
   and that `HTTP_ALLOW_PRIVATE_NETWORKS` turns the guard off.
 
+**Deployment tests** (`test_deployments.py`):
+
+- **Keys:** the key is returned once, the row holds its SHA-256 and prefix (the key itself
+  appears in no column and no log line), listings never include it, and the response is
+  `no-store`. A redeploy keeps the id and key. Rotating revokes the old key at once and
+  leaves the deployed graph alone.
+- **Snapshot:** runs use the deployed graph until a redeploy, and an invalid graph isn't
+  deployed. Deleting the workflow removes the deployment.
+- **Auth and ownership:** no key, a wrong key, a key off by one character, another
+  deployment's key, a user's JWT, Basic auth, and an unknown deployment all get the same
+  `401`. Other users can't deploy, rotate, list, or see the runs, and a key can't read
+  another deployment's runs or the owner's manual runs.
+- **Async and wait modes:** async answers `202` and queues on the right queue, and the
+  status link follows the run to its final output. For `?wait=true`, a task queue starts
+  the run in-process as soon as it's queued, so the request really waits: `200` with the
+  output, `200` with `failed` and the error, `202` at the timeout, the timeout's upper
+  bound, and the database-polling fallback when Redis events are unavailable.
+- **Errors and limits:** bad inputs, someone else's file, a graph that no longer validates
+  (`422`), a broker outage (`503`), and the per-deployment rate limits on runs and on status
+  polls (another deployment keeps its own budget, and requests with a bad key don't count).
+
+**Phase 5 tests:**
+
+- `apps/api/tests/test_triggers.py`: schedule math (a time zone, fixed times firing once when
+  clocks fall back, intervals keeping their spacing, a time skipped by spring forward, invalid
+  crons and zones, a cron that never fires); a fire time starting exactly one run when two
+  ticks see it; the unique event key as a second guard; **a real race**: four sessions on
+  separate database connections claiming one committed fire time, with exactly one run;
+  scheduled runs in the history with `trigger=schedule`; misfires skipped instead of run late;
+  the hourly cap; three failures switching a trigger off (and turning it back on clearing
+  that), a success resetting the count, and a run that can't start being recorded as failed.
+  The email trigger against an in-memory mailbox with real UID semantics: enabling starts at
+  the folder's end; a new email runs **exactly once** through repeated polls, a lost position,
+  and the same message under a new UID; filters, oldest-first backlog with `max_per_poll`, a
+  text input, a renumbered folder, an unreadable mailbox, **Check now**, and claiming each
+  poll once on the minute. The webhook: runs recorded as `webhook`, `409` when off, `429` over
+  the cap.
+- `apps/api/tests/test_templates.py`: the catalog and its requirements, every template graph
+  validating, **Use template** (an editable copy, triggers off, the time zone, unique names,
+  the sample invoice as the default file), fitting providers (Groq-only, Discord-only), node
+  state moving only with successful runs, the CSV/JSON download, and Telegram/Discord
+  credentials (masked, validated, the user's bot replacing the server's).
+- `packages/workflow-engine/tests/test_lists.py`: For Each concurrency never exceeding its
+  limit; the rate limit on a fake clock (bursts at t = 0, 60, 120 s, never more than N starts
+  in a 60 s window); partial failures per item and `fail_when`; JSON replies; `{{item}}`
+  fields and variables; template mode, `flatten`, `max_items`; the time budget; Filter and
+  Join; and `{{item}}` being valid only in per-item fields.
+- `packages/workflow-engine/tests/test_feeds.py`: RSS 2.0 and Atom parsing, newest first,
+  "since last run" (and a test run not moving it), non-feeds, `404`s, the SSRF guard for both
+  nodes, and Web Page extraction, truncation, and refused binaries.
+- `packages/workflow-engine/tests/test_notify.py`: the exact Telegram `sendMessage` and
+  Discord payloads; Markdown to Telegram HTML (and escaping); the default chat; `429` waiting
+  `retry_after` then succeeding (Telegram's `parameters.retry_after`, Discord's body and
+  `Retry-After` header); giving up when asked to wait too long; the plain-text fallback when
+  Telegram rejects the markup; splitting long messages with nothing lost; helpful errors
+  (`401`, chat not found, bot blocked); the token and webhook never appearing in errors; the
+  connection checks; and credential validation.
+- `packages/workflow-engine/tests/test_documents.py` also covers OCR's `prefer_text_layer`.
+
+**Fallback timing** (`packages/workflow-engine/tests/test_nodes.py`): a provider that would
+answer long after its share of the node's timeout is given up on, and the fallback answers
+(with and without streaming) in about half the timeout. Without fallbacks a provider keeps
+the whole timeout, and in a chain of three the last provider gets all the time that's left.
+
 Locally (venv, with the dockerized Postgres and Redis running): `cd apps/api && pytest`. The
 document tests need Tesseract installed (they skip without it); the Docker image has it.
 
@@ -350,9 +930,12 @@ They cover the editor store (add, delete, duplicate, connect, undo/redo and coal
 save state machine: debounced revisions, one save in flight, re-saving edits made during a
 save, ignoring stale responses, errors), `{{` reference suggestions and insertion, the JSON
 Schema → form mapping and its Zod rules (checked against the backend's messages), graph
-conversion and placement, the run-state reducer (snapshots, seq de-duplication, token
-streaming), and the WebSocket client (first-message auth, 4401 refresh-once, 4404, reconnect
-backoff).
+conversion and placement, node config summaries (whole values, cut only by the card), the
+run-state reducer (snapshots, seq de-duplication, token streaming), the WebSocket client
+(first-message auth, 4401 refresh-once, 4404, reconnect backoff), and the Deploy dialog's
+helpers (Input/Output listing, example inputs, shell quoting, the curl command), and the
+Triggers panel's helpers (trigger states, times in a schedule's own zone, `{{item}}`
+suggestions, the new nodes' summaries).
 
 ### End-to-end tests (Playwright)
 
@@ -374,7 +957,8 @@ npx playwright test                 # E2E_BASE_URL / E2E_API_URL override the de
   nodes.
 - `e2e/run.spec.ts` opens the seeded pipeline, edits the prompt and turns on streaming
   (autosaved), runs it, and watches the nodes turn blue and then green over the WebSocket,
-  asserting that Gemini's tokens reached the browser. It confirms the **real email** arrived by
+  asserting that the LLM's tokens (Gemini's, or Groq's as the fallback) reached the browser.
+  It confirms the **real email** arrived by
   reading the inbox over IMAP with a Gmail Read node, then opens the execution detail page;
   the seeded graph is restored afterwards. It also stops a running workflow and joins one
   that's already in progress.
@@ -384,13 +968,74 @@ npx playwright test                 # E2E_BASE_URL / E2E_API_URL override the de
   moves to the LLM workers. The run panel must show OCR on `worker-ocr@...` and Summarize and
   Entity Extraction on `worker-llm@...`, the OCR text as readable text, and the entities
   (people, the invoice number, the total) as lists. The uploaded copy is deleted afterwards.
+- `e2e/deploy.spec.ts` opens the seeded pipeline, checks the Deploy dialog's name, inputs,
+  and outputs, and deploys it (or, if an earlier run deployed it, redeploys and generates a
+  new key, since the old one can't be shown again). It checks the curl command and its Copy
+  button, then calls the endpoint from outside the browser: `401` without the key or with a
+  wrong one, then `?wait=true` with the key, which must return `200` with Gemini's summary and
+  the Gmail receipt. The status link answers with the same key, the run is in the owner's
+  history with trigger `webhook`, and the reopened dialog shows only the key's prefix. The
+  pipeline stays deployed, but the key the test used is revoked at the end.
+- `e2e/triggers.spec.ts` checks the dashboard's templates and their requirements, **Use
+  template** opening an editable copy with its schedule off, the Triggers panel saving a
+  schedule in `Asia/Kolkata` (the server's preview and the stored next fire time both 07:30
+  IST), switching it off, the email trigger's setup, and the executions list's trigger badges
+  and filter.
+- `e2e/audio.spec.ts` creates a Meeting Notes copy with **Use template**, uploads
+  `samples/team-meeting.mp3` through the run form, and runs it for real: Speech to Text must run
+  on `worker-audio@...`, the transcript and its timestamped segments must show, the validated
+  notes must name Elena and Marcus, and the notes are posted to Telegram. The recorder tests
+  use Chromium's fake microphone: **Start recording** stays disabled until the consent box is
+  ticked, a recording of a few seconds is uploaded as `audio/webm`, and a page whose
+  Permissions-Policy blocks the microphone shows "Microphone access was blocked". The copies
+  and uploads are deleted afterwards.
 - `e2e/pages.spec.ts` covers the dashboard, execution history filters and detail, the
   socket's 4401/4404 closes, and the integrations page: real tests of the server's Gemini and
   Gmail credentials, and connecting then disconnecting a throwaway key on a provider you
   haven't stored one for.
 
-The run test calls Gemini and sends one email, so it needs `GEMINI_API_KEY`, `SMTP_USER`, and
-`SMTP_PASSWORD`. Screenshots are written to [`docs/screenshots`](docs/screenshots).
+The run and deploy tests each call Gemini and send one email, so they need `GEMINI_API_KEY`,
+`SMTP_USER`, and `SMTP_PASSWORD`. With `GROQ_API_KEY` too, the seeded pipelines fall back to
+Groq when Gemini is overloaded, so they pass through Gemini outages. Before running a seeded
+pipeline, the specs check that it validates, and fail at once with the backend's reasons if
+it doesn't. Screenshots are written to [`docs/screenshots`](docs/screenshots). The dev server
+runs with `devIndicators: false`, so the Next.js badge isn't in them.
+
+### Phase 5 verification on real services
+
+Run against the stack above (demo account; Gemini with Groq as fallback, the Gmail App
+Password, a real Telegram bot), with nothing mocked:
+
+| Check | Result |
+| ----- | ------ |
+| A schedule fires on its own | An every-minute schedule on a Text → Output pipeline fired at 18:50:00, 18:51:00, ... 18:56:00: 7 runs, one per minute, all `success`, each with `trigger: schedule`, its `trigger_id`, and no user, in the executions list with the schedule filter |
+| A real email triggers exactly one run | An email to the Gmail account with a unique subject, filtered on by an Email Triage trigger: the next poll found it and started **one** run (event key = its Message-ID); **Check now** and three later polls found nothing new, with one `trigger_events` row and one execution. Gemini classified it `urgent` and the Telegram alert was delivered. (Gmail marks mail sent to yourself as read, so the test trigger had Unread only off; the first test email, sent while it was on, was correctly never run) |
+| Telegram | **Test connection** in Integrations: `getMe` named the bot and `getChat` the private chat; every template's Telegram step delivered a real message (`mock: false`) |
+| Morning Digest from the inbox and a real feed | Created with **Use template** and fired by its schedule: 10 unread emails + 8 BBC News stories → For Each (18 items, 0 failed, 53 s of rate-limit waits) → a Gemini digest with Inbox and News sections → delivered to Telegram, run `success`, `trigger: schedule` |
+| The other templates | Invoice Extractor on the sample scan: OCR on `worker-ocr`, entities on `worker-llm` (vendor, customer, invoice number HF-2026-0417, total due EUR 4,389.20, due date), CSV download. Job Alert Filter on the live We Work Remotely feed: 15 postings scored, 2 at ≥ 70 sent to Telegram |
+
+### Phase 6 verification on real services
+
+Same stack and account, nothing mocked. The sample recording,
+[`samples/team-meeting.mp3`](samples/team-meeting.mp3) (100 s, 602 KB), is a made-up planning
+meeting written for this repository and spoken by the Windows text-to-speech voices (Zira,
+David, Hazel) with [`samples/make_meeting_sample.ps1`](samples/make_meeting_sample.ps1), so it
+can be used freely.
+
+| Check | Result |
+| ----- | ------ |
+| Groq Whisper on the sample | 1 chunk, 1.5 s on `worker-audio`, language `en`, 10 segments from 00:00 to 01:38 with the speakers' pauses between them, plus the hallucinated "Thank you" below. The vocabulary prompt fixed "Groq" and "docs" (heard as "Grok" and "docks" without it) |
+| Chunking and stitching on real audio | The same file through the node with `chunk_minutes` 0.75 (3 chunks, 1.8 s) and 0.5 (4 chunks, 2.0 s): each cut fell in a pause between sentences, and the segments ran on continuously from 00:00 to 01:38 across the cuts, matching the one-chunk timings to within a second. The engine tests do the same on a generated tone with known silences (cuts at 18.5 s and 38.5 s) |
+| A Whisper hallucination | Groq returned a trailing "Thank you" (another time "Terima kasih", 100.08-130.06 s on a 100.3 s file, `avg_logprob` -1.07): now dropped by Whisper's confidence rule (see [Speech to Text](#audio-speech-to-text)) |
+| Local faster-whisper | `base` on the worker's CPU: 6.9 s for the 100 s file (model downloaded into the `whisper_models` volume on first use), language `en` (p = 0.999) |
+| Meeting Notes end to end | **Use template** → run: Speech to Text on `worker-audio`, Structured Output on `worker-llm` (Gemini, valid on the first attempt: 2 decisions, 3 action items with owners Elena and Marcus and due dates Friday, Monday, today), Telegram on `worker-default`: delivered to the chat (`mock: false`), run `success` in 6.2 s |
+| Web Research end to end | "What changed between HTTP/2 and HTTP/3, and why does HTTP/3 run over UDP?": DuckDuckGo returned 5 results (dev.to, bigiron.cc, speedtesthq.com, statuscodefyi.com, panelica.com), the top page was read (trafilatura), and Gemini answered in two paragraphs citing [1]-[3] with a `Sources:` list of titles and URLs; run `success` in 6.1 s |
+| New LLM providers | Custom (OpenAI-compatible) pointed at Groq's endpoint (`https://api.groq.com/openai/v1`, `openai/gpt-oss-20b`): a real answer in 880 ms, `provider_used: custom`. A Custom base URL of `http://169.254.169.254/v1` was refused ("Blocked"). Mistral, Cerebras, and Tavily had no key here, so their live tests skip with "MISTRAL_API_KEY is blank; set it in .env to run this live test" |
+| E2E | `e2e/audio.spec.ts`: 3 passed (Meeting Notes from an upload, the recorder with the consent gate, a blocked microphone) |
+
+Re-run the provider checks with `docker compose exec api pytest -m live -s
+/packages/workflow-engine/tests/test_live_providers.py`; each test without its key skips and
+names the variable.
 
 ## Database migrations
 
@@ -420,7 +1065,10 @@ docker compose exec postgres psql -U flowforge -d flowforge -c "\dt"
 `demo@flowforge.ai` / `demo1234` and a ready pipeline, **Demo: Summarize and email**: Input
 (`topic`) → Gemini (streams its answer) → Gmail (to `{{vars.recipient}}`, set to `SMTP_USER`)
 → Output. It uses the real providers, so it validates and runs from the UI once the keys are
-in `.env`. It also stores `samples/scanned-invoice.pdf` as one of the demo user's uploads and
+in `.env`. With `GROQ_API_KEY` set, its Gemini node falls back to Groq, as the document
+pipeline's LLM nodes do: Gemini's free tier answers 429 or "high demand" 503 at times. A
+demo pipeline seeded before that has no fallback; add `groq` to the Gemini node's
+**Fallback** in the editor. It also stores `samples/scanned-invoice.pdf` as one of the demo user's uploads and
 creates **Demo: Scanned invoice to entities** (Input(File) → OCR → Summarize → Entity
 Extraction → Output; see [Document AI](#document-ai)), whose file input defaults to it. The
 seed is idempotent (pipelines are matched by owner and name, the sample by its checksum), so
@@ -453,6 +1101,8 @@ python -m app.db.seed
 uvicorn app.main:app --reload --port 8000
 # and a worker for every queue (add --pool=threads on Windows):
 celery -A app.worker.celery_app:celery_app worker -Q default,llm,ocr
+# and, for triggers, exactly one scheduler:
+celery -A app.worker.celery_app:celery_app beat
 ```
 
 OCR needs the `tesseract` binary on your PATH (for example `apt install tesseract-ocr`,
@@ -480,6 +1130,9 @@ optional `model` (blank = the provider's default below), `system_prompt`, `user_
 | Gemini       | `gemini`     | google-genai (AI Studio) | `gemini-3.5-flash-lite`              | `GEMINI_API_KEY` (free)  |
 | Groq         | `groq`       | OpenAI-compatible        | `openai/gpt-oss-20b`                 | `GROQ_API_KEY` (free)    |
 | OpenRouter   | `openrouter` | OpenAI-compatible        | `openrouter/free` (any `…:free` model works) | `OPENROUTER_API_KEY` (free) |
+| Mistral      | `mistral`    | OpenAI-compatible        | `mistral-small-latest`               | `MISTRAL_API_KEY` (free plan) |
+| Cerebras     | `cerebras`   | OpenAI-compatible        | `qwen-3.8-27b` (or `gpt-oss-120b`)   | `CEREBRAS_API_KEY` (free) |
+| Custom       | `custom_llm` | OpenAI-compatible        | `CUSTOM_OPENAI_MODEL` (required)     | `CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY` |
 | Ollama       | `ollama`     | OpenAI-compatible        | `llama3.2`                           | none (local)             |
 | OpenAI       | `openai`     | OpenAI-compatible        | `gpt-4.1-mini`                       | `OPENAI_API_KEY` (paid)  |
 | Anthropic    | `anthropic`  | anthropic SDK            | `claude-opus-5`                      | `ANTHROPIC_API_KEY` (paid) |
@@ -502,6 +1155,24 @@ connection** there checks a key with a real, minimal call.
   <https://openrouter.ai/settings/keys>, and set `OPENROUTER_API_KEY`. Free models end in
   `:free` (for example `google/gemma-4-31b-it:free`). The default `openrouter/free` picks one of
   whichever free models are available. The list: <https://openrouter.ai/models?max_price=0>.
+- **Mistral:** sign in at <https://console.mistral.ai>, choose the free **Experiment** plan
+  (it asks to verify a phone number), create a key at <https://console.mistral.ai/api-keys>, and
+  set `MISTRAL_API_KEY`. Base URL `https://api.mistral.ai/v1`; models:
+  <https://docs.mistral.ai/getting-started/models/>.
+- **Cerebras:** sign up at <https://cloud.cerebras.ai>, create a key, and set
+  `CEREBRAS_API_KEY`. Base URL `https://api.cerebras.ai/v1`; the free tier's models were
+  `gpt-oss-120b` and `qwen-3.8-27b` when checked (<https://inference-docs.cerebras.ai/models/overview>).
+- **Custom (OpenAI-compatible):** any server with `/v1/chat/completions`, e.g. Together,
+  Fireworks, DeepInfra, a vLLM or LM Studio server. Set `CUSTOM_OPENAI_BASE_URL` (e.g.
+  `https://api.together.xyz/v1`) and `CUSTOM_OPENAI_MODEL`, plus `CUSTOM_OPENAI_API_KEY` if
+  it needs one, or connect it under Integrations (base URL and model required, key optional).
+  The base URL goes through the [SSRF guard](#security-outbound-requests-ssrf-guard): it must
+  resolve to a public address, and so must every request, so it can't be pointed at
+  `localhost`, a private network, Docker services, or cloud metadata. For a server on your
+  own machine use Ollama's provider, or `HTTP_ALLOW_PRIVATE_NETWORKS=true` in development.
+- **GitHub Models:** not offered. GitHub retired it on 2026-07-30
+  (<https://github.blog/changelog/2026-07-30-github-models-is-now-retired/>); use Custom for
+  another OpenAI-compatible endpoint.
 - **Ollama (no key):** install it from <https://ollama.com/download>, then pull a model and
   make sure the server is running:
 
@@ -532,7 +1203,13 @@ Mocks are used only by the test suite (`TESTING=true`) or when a node explicitly
 tries each provider (optionally `provider:model`) in order when the one before it fails. The
 node output reports `provider` (configured), `provider_used` (who answered), `model`, `mock`,
 and `fallback_errors` (what failed on the way), and the API logs which provider answered.
-Providers in the chain are credential-checked at validation time too.
+Providers in the chain are credential-checked at validation time too. The node's timeout
+(`WORKFLOW_NODE_TIMEOUT_SECONDS`) is shared out along the chain: each provider with fallbacks
+after it gets an equal share of the time left, and the last one gets all of it. Without that,
+a provider that is slow to fail would use up the whole timeout. An overloaded Gemini can take
+a minute per attempt to answer 503 or 504, and those are retried. In that case it's given up
+with `gemini: no answer within 60s, its share of the node's time` in `fallback_errors`. A
+node without fallbacks still gets the whole timeout.
 
 **Rate limits and errors.** HTTP 429, 408, 5xx, and network errors are retried with
 exponential backoff and jitter (`LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECONDS`,
@@ -764,6 +1441,7 @@ healthcheck based on `celery inspect ping`:
 | `worker-default` | `default` | HTTP Request, Gmail, Gmail Read, Delay    | `WORKER_DEFAULT_CONCURRENCY` = 4 |
 | `worker-llm`     | `llm`     | LLM nodes, Summarize, Entity Extraction   | `WORKER_LLM_CONCURRENCY` = 8 (I/O-bound) |
 | `worker-ocr`     | `ocr`     | OCR, PDF Extract                          | `WORKER_OCR_CONCURRENCY` = 2 (CPU-bound; `OMP_THREAD_LIMIT=1`) |
+| `worker-audio`   | `audio`   | Speech to Text (ffmpeg + Whisper)         | `WORKER_AUDIO_CONCURRENCY` = 2 (`OMP_NUM_THREADS` = `AUDIO_THREADS_PER_TASK`, 2) |
 
 ```bash
 docker compose up -d --scale worker-ocr=3          # three OCR containers, 6 OCR processes
@@ -800,7 +1478,8 @@ test and shows in each node row's `queue` and `worker_hostname`.
   and waits up to `stop_grace_period` (30 s) for running ones; anything still running is
   killed and marked failed when the worker comes back (or by the API's sweep).
 - **Outside Docker:** from `apps/api` with the venv active and Redis/Postgres up, run
-  `celery -A app.worker.celery_app:celery_app worker -Q default,llm,ocr`. One worker on every
+  `celery -A app.worker.celery_app:celery_app worker -Q default,llm,ocr,audio` (and install
+  ffmpeg). One worker on every
   queue never hands off. On Windows add `--pool=threads`, since prefork needs fork.
 
 ### Watching a run from the command line
@@ -1016,9 +1695,13 @@ is a `404`).
 | POST   | `/api/workflows/{id}/nodes/{node_key}/test` | Run one saved node in isolation with `{config?, upstream_outputs, variables, inputs}` → `{status, input, output, error, duration_ms}`. Real providers: an LLM node calls the model and a Gmail node sends |
 | POST   | `/api/workflows/{id}/run`             | Queue a run with `{inputs}` → `202 {execution_id, status: "pending", queue, links}`; `?sync=true` runs it in-request → `200` with the full execution; `503` if the broker is down |
 | GET    | `/api/workflows/{id}/executions`      | Past executions, newest first (`limit`, `offset`)                  |
-| GET    | `/api/executions`                     | All your executions, newest first, with `workflow_name` (`limit`, `offset`, `status`, `workflow_id`) |
+| GET    | `/api/executions`                     | All your executions, newest first, with `workflow_name` (`limit`, `offset`, `status`, `workflow_id`, `trigger`) |
 | GET    | `/api/executions/{id}`                | One execution with every node's resolved input, output, and timing |
+| GET    | `/api/executions/{id}/output`         | Download the final output: `?format=json` (default) or `csv` (one row per object in any list, e.g. per entity) |
 | POST   | `/api/executions/{id}/stop`           | Stop a pending/running execution → `200` final state, `202` stop pending; `409` if finished |
+| GET    | `/api/templates`                      | The template catalog with each requirement's `satisfied` / `using` and `ready` |
+| POST   | `/api/templates/{slug}/use`           | `{timezone?}` → `201` a new workflow from the template (its triggers switched off) |
+| …      | `/api/workflows/{id}/triggers`, …     | Triggers: see [Trigger API](#trigger-api) |
 | WS     | `/ws/executions/{id}`                 | Snapshot + live events (see [Real-time events](#real-time-events-websocket)) |
 
 Notes:
@@ -1050,14 +1733,27 @@ Owner-only (others get `404`). Use the `id` as the value of an Input node of typ
 Execution rows now also carry `segment` and `handoff_at`, node rows their `queue` and
 `worker_hostname`, and node types in `GET /api/nodes` their `queue` and `portable`.
 
+### Deployments
+
+| Method | Path | Auth | Description |
+| ------ | ---- | ---- | ----------- |
+| POST | `/api/deployments` | Bearer (JWT) | `{workflow_id}`: validate and deploy the saved graph → `201` with `api_key` (shown once); again → `200`, a redeploy of the current graph with the same id and key (`api_key: null`). `404` not yours, `422` invalid graph (`detail.errors`) |
+| GET | `/api/deployments` | Bearer (JWT) | Your deployments, most recently deployed first (`?workflow_id=`): `endpoint`, `api_key_prefix`, `inputs`, `outputs`, `version`, `workflow_version`; never the key |
+| POST | `/api/deployments/{id}/rotate-key` | Bearer (JWT) | A new key in `api_key`; the old one stops working at once. The deployed graph is unchanged |
+| POST | `/api/v1/deployments/{id}/run` | API key | `{inputs}` → `202 {execution_id, status, links.status}`; `?wait=true[&timeout=s]` → `200` with `final_output` once finished (`202` at the timeout). `401`, `422`, `429`, `503` |
+| GET | `/api/v1/deployments/{id}/executions/{execution_id}` | API key | A run this deployment started: `status`, `final_output`, `error`, timings. `404` for any other run |
+
+The API-key routes take `Authorization: Bearer <key>` or `X-API-Key: <key>`. Details in
+[Deploying a pipeline](#deploying-a-pipeline). Executions now also carry `deployment_id`.
+
 ### Integrations (credentials)
 
 | Method | Path                                   | Description                                                        |
 | ------ | -------------------------------------- | ------------------------------------------------------------------ |
 | GET    | `/api/integrations`                    | Every provider: `connected` (you stored a credential), `source` (`user` / `server` / `none`: what a run would use), `status`, masked values, `last_test`, default model, where to get a key |
-| POST   | `/api/integrations/{provider}/connect` | Store or replace your credential: `{api_key, model?}` for gemini/groq/openrouter/anthropic, `{api_key, base_url?, model?}` for openai, `{base_url?, model?}` for ollama, `{email, app_password, smtp_*?, imap_*?}` for gmail |
+| POST   | `/api/integrations/{provider}/connect` | Store or replace your credential: `{api_key, model?}` for gemini/groq/openrouter/anthropic, `{api_key, base_url?, model?}` for openai, `{base_url?, model?}` for ollama, `{email, app_password, smtp_*?, imap_*?}` for gmail, `{bot_token, chat_id?}` for telegram, `{webhook_url}` for discord |
 | DELETE | `/api/integrations/{provider}`         | Remove your credential (runs fall back to the server key, if any)  |
-| POST   | `/api/integrations/{provider}/test`    | A real, minimal call with the credential a run would use: model metadata / list-models for LLMs (no tokens generated), SMTP + IMAP login for gmail. Returns `{success, source, latency_ms, error, details}` |
+| POST   | `/api/integrations/{provider}/test`    | A real, minimal call with the credential a run would use: model metadata / list-models for LLMs (no tokens generated), SMTP + IMAP login for gmail, `getMe` + `getChat` for telegram, a `GET` of the webhook for discord (nothing is sent). Returns `{success, source, latency_ms, error, details}` |
 
 - **Encryption at rest:** credential values are stored as Fernet ciphertext
   (`credentials.encrypted_value`) using `ENCRYPTION_KEY`. It may hold several comma-separated
@@ -1110,6 +1806,17 @@ mutations show a toast unless they opt out with `meta: { silent: true }`.
   upload progress). The run form, the Input node's default, and the document nodes' `file`
   field use it. `runs/output-view.tsx` shows node output readably (text blocks, entity
   lists, fact chips) with raw JSON on request.
+- **Deploy:** `editor/deploy-dialog.tsx` saves, deploys, and rotates keys through
+  `api.deployments`. The key it receives lives only in the dialog's state, so it's gone when
+  the dialog closes. `editor/deploy.ts` has the pure parts (the Input/Output listing, example
+  inputs, the curl command). `components/ui/truncated-text.tsx` is the one-line text with a
+  full-text tooltip used for node summaries. It renders into `<body>` so other nodes can't
+  cover it, and it stays readable at any zoom.
+- **Triggers:** `editor/triggers-panel.tsx` (the panel; `useTriggers` also feeds the top
+  bar's dot) and `editor/triggers.ts` (pure helpers). `features/dashboard/templates.tsx` is
+  the Templates section, `components/ui/trigger-badge.tsx` the trigger badge, and
+  `runs/output-downloads.tsx` the JSON/CSV buttons (`downloadAuthed` fetches with the token,
+  since a plain link can't carry it).
 - **Routes:** `/pipelines/[id]` (editor), `/dashboard`, `/executions`, `/executions/[id]`,
   `/integrations`, `/login`, and `/register`.
 
@@ -1128,9 +1835,15 @@ every node's config. In short:
   its type.
 - **Nodes:** `input` (text, number, JSON, or file), `output`, `text`, `condition` (routes via
   `true`/`false` edge handles), `delay`, `gemini`, `groq`, `openrouter`, `ollama`, `openai`,
-  `anthropic`, `gmail`, `gmail_read`, `http_request`, and the document nodes `pdf_extract`,
-  `ocr`, `summarize`, `extract_entities`. `default_registry.describe()` lists them with their
-  JSON config schemas, `queue`, and `portable`.
+  `anthropic`, `gmail`, `gmail_read`, `http_request`, the document nodes `pdf_extract`,
+  `ocr`, `summarize`, `extract_entities`, the list nodes `for_each`, `filter`, `join`, the
+  sources `rss` and `web_page`, and `telegram` and `discord_webhook`.
+  `default_registry.describe()` lists them with their JSON config schemas, `queue`,
+  `portable`, and `item_fields` (per-item template fields, which the executor leaves for the
+  node to resolve with `{{item}}` and `{{index}}`).
+- **Node state:** `ExecutionServices.state` (`flowforge_engine.state.NodeStateStore`) keeps
+  what a node remembers between runs; the API's store reads what the last successful run
+  saved.
 - **Queues:** each node type's `queue` (`default`, `llm`, `ocr`) says which workers run it, and
   `portable` nodes run anywhere. `execute_graph(..., accepts=..., completed=...)` pauses at
   the first node its caller can't run (result status `handoff`, `next_queue`) and resumes
@@ -1177,16 +1890,20 @@ All tables use UUID primary keys, `timestamptz` timestamps, and JSONB for JSON c
 | Table                 | Notes                                                                             |
 | --------------------- | --------------------------------------------------------------------------------- |
 | `users`               | unique, indexed `email`                                                           |
-| `workflows`           | `status` enum (draft/active/archived), `version`, `graph_json` (React Flow graph) |
+| `workflows`           | `status` enum (draft/active/archived), `version`, `graph_json` (React Flow graph), trigger limits `max_runs_per_hour` and `max_consecutive_failures` |
 | `workflow_nodes`      | `node_key` (the graph id, unique per workflow), `node_type`, `label`, position, `config_json` |
 | `workflow_edges`      | source/target node FKs, optional handles                                          |
 | `workflow_variables`  | `key`, `value`, `var_type` enum                                                   |
-| `workflow_executions` | `status` and `trigger` enums, `created_at`, timings, `final_output_json`, `error_message`; for async runs `inputs_json` + `graph_json` (what was queued), `queue`, `celery_task_id`, `worker_hostname`, `heartbeat_at`, `stop_requested_at`; for queue hand-offs `segment` and `handoff_at` |
+| `workflow_executions` | `status` and `trigger` enums, `created_at`, timings, `final_output_json`, `error_message`; for async runs `inputs_json` + `graph_json` (what was queued), `queue`, `celery_task_id`, `worker_hostname`, `heartbeat_at`, `stop_requested_at`; for queue hand-offs `segment` and `handoff_at`; `deployment_id` for runs started through a deployment (`SET NULL`); `trigger_id` for triggered runs (`SET NULL`) |
+| `workflow_triggers`   | one per (workflow, `type` enum schedule/email/webhook): `enabled`, `config_json`, `state_json` (email: the mailbox position), `next_fire_at` (claimed with a compare-and-set), `last_fired_at`, `consecutive_failures`, `auto_disabled_at`, `disabled_reason`, `last_error` |
+| `trigger_events`      | every fire time or Message-ID a trigger acted on, unique per (`trigger_id`, `event_key`), with its `outcome` (started / skipped / rejected / missed / duplicate) and `execution_id` |
+| `node_states`         | what a node saved in a run (`workflow_id`, `node_key`, `execution_id`, `state_json`); readers take the newest from a successful run |
+| `deployments`         | one per workflow (unique `workflow_id`): `owner_id`, the deployed `name` and `graph_json` snapshot, `workflow_version`, `version` (redeploys), `api_key_hash` (SHA-256 hex, never the key), `api_key_prefix`, `key_created_at`, `deployed_at` |
 | `node_executions`     | per-node status, `position` (execution order), input/output JSON, timings, `duration_ms`, the `queue` and `worker_hostname` that ran it; `node_id` is nullable, plus a `node_key`/`node_type`/`node_label` snapshot |
 | `credentials`         | per-user provider secrets: Fernet-encrypted JSON in `encrypted_value`; unique per (user, provider) |
 | `files`               | uploads: `owner_id`, sanitized `filename`, detected `content_type`, `size_bytes`, `sha256`, `storage_key` (`<owner>/<id>` under `FILES_DIR`) |
 | `integrations`        | per-user connection `status` enum and non-secret metadata (masked values, last test); unique per (user, provider) |
-| `templates`           | `name`, `category`, starter `graph_json`                                          |
+| `templates`           | `slug` (unique), `name`, `category`, starter `graph_json`, `requirements_json`, `triggers_json`, `sort_order`; synced from the catalog |
 
 Child rows cascade on delete: deleting a workflow removes its nodes, edges, variables, and
 executions. Deleting a single node does **not** delete its history: `node_executions.node_id`
@@ -1195,8 +1912,10 @@ is `ON DELETE SET NULL`, and the snapshot columns keep the row readable.
 
 Migrations: `initial schema` → `preserve node execution history` (node_id SET NULL +
 snapshot) → `graph node keys` → `unique credential per provider` → `async execution columns` →
-`files and queue handoff`. The downgrade of the second one deletes history rows whose
-node is gone, since those can't satisfy the old NOT NULL constraint.
+`files and queue handoff` → `deployments` → `triggers and templates` (which also adds
+`email` to the trigger enum and renames deployment runs' trigger `api` to `webhook`). The downgrade of the second one deletes history
+rows whose node is gone, since those can't satisfy the old NOT NULL constraint. Deleting a
+workflow deletes its deployment too.
 
 ## Environment variables
 
@@ -1213,31 +1932,45 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `REFRESH_TOKEN_EXPIRE_DAYS`     | `7`                              | API                  |
 | `CORS_ORIGINS`                  | `http://localhost:3000,http://127.0.0.1:3000` | API     |
 | `AUTH_RATE_LIMIT`               | `10/minute`                      | API                  |
+| `DEPLOYMENT_RUN_RATE_LIMIT`, `DEPLOYMENT_STATUS_RATE_LIMIT` | `30/minute`, `240/minute` | API: per-deployment limits on runs and status polls |
+| `DEPLOYMENT_WAIT_TIMEOUT_SECONDS`, `DEPLOYMENT_MAX_WAIT_SECONDS` | `30`, `120` | API: how long `?wait=true` waits by default / at most |
 | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL` | blank, `gemini-3.5-flash-lite`, `gemini-embedding-2` | Gemini nodes |
 | `GROQ_API_KEY`, `GROQ_MODEL`    | blank, `openai/gpt-oss-20b`      | Groq nodes           |
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | blank, `openrouter/free` | OpenRouter nodes     |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBEDDING_MODEL` | `http://host.docker.internal:11434/v1` (`.env.example`), `llama3.2`, `nomic-embed-text` | Ollama nodes |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | blank, `gpt-4.1-mini`           | OpenAI nodes         |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | blank, `claude-opus-5`    | Claude nodes         |
+| `MISTRAL_API_KEY`, `MISTRAL_MODEL` | blank, `mistral-small-latest` | Mistral nodes      |
+| `CEREBRAS_API_KEY`, `CEREBRAS_MODEL` | blank, `qwen-3.8-27b`       | Cerebras nodes       |
+| `CUSTOM_OPENAI_BASE_URL`, `CUSTOM_OPENAI_API_KEY`, `CUSTOM_OPENAI_MODEL` | blank | Custom LLM nodes (base URL + model required) |
+| `GROQ_WHISPER_MODEL`, `GROQ_WHISPER_TRANSLATE_MODEL`, `GROQ_WHISPER_MAX_FILE_MB` | `whisper-large-v3-turbo`, `whisper-large-v3`, `25` | Speech to Text on Groq |
+| `FASTER_WHISPER_MODEL`, `FASTER_WHISPER_COMPUTE_TYPE`, `WHISPER_MODELS_DIR` | `base`, `int8`, `~/.cache/flowforge-whisper` (Docker: `/data/models`) | Speech to Text, local |
+| `TAVILY_API_KEY`                | blank                            | Web Search (Tavily, and the DuckDuckGo fallback) |
 | `SMTP_USER`, `SMTP_PASSWORD`    | blank (Gmail address + App Password) | Gmail / Gmail Read nodes |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_FROM_NAME` | `smtp.gmail.com`, `587`, `auto`, blank | Gmail node |
 | `IMAP_HOST`, `IMAP_PORT`        | `imap.gmail.com`, `993`          | Gmail Read node      |
-| `LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECONDS`, `LLM_RETRY_MAX_DELAY_SECONDS` | `3`, `1`, `30` | backoff for 429/5xx/network errors |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | blank | Telegram node: the bot and the default chat |
+| `DISCORD_WEBHOOK_URL`           | blank                            | Discord Webhook node |
+| `TRIGGER_MISFIRE_GRACE_SECONDS` | `3600`                           | worker: a schedule seen later than this after its fire time is skipped |
+| `EMAIL_TRIGGER_MIN_POLL_MINUTES`, `EMAIL_POLL_LOCK_SECONDS` | `1`, `300` | email triggers: the shortest poll interval; how long one poll may hold its lock |
+| `LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECONDS`, `LLM_RETRY_MAX_DELAY_SECONDS` | `3`, `1`, `30` | backoff for 429/5xx/network errors (LLMs, Telegram, Discord) |
 | `LLM_REQUEST_TIMEOUT_SECONDS`   | `60`                             | per provider request |
 | `WORKFLOW_NODE_TIMEOUT_SECONDS` | `120`                            | per-node limit during a run |
 | `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | blank (= `REDIS_URL`) | API + worker |
-| `EXECUTION_TIME_LIMIT_SECONDS`  | `600`                            | worker: whole-run limit (Celery limits +30/+60 s) |
+| `EXECUTION_TIME_LIMIT_SECONDS`  | `1800`                           | worker: whole-run limit (Celery limits +30/+60 s) |
 | `CELERY_TASK_MAX_RETRIES`       | `3`                              | worker: retries for infrastructure errors before a run starts |
 | `EXECUTION_HEARTBEAT_SECONDS`, `EXECUTION_STALE_AFTER_SECONDS` | `5`, `30` | crash detection |
 | `EXECUTION_RECOVERY_INTERVAL_SECONDS` | `15`                       | API: stale-execution sweep |
 | `EXECUTION_PENDING_TIMEOUT_SECONDS` | `3600`                       | pending runs no worker picked up |
 | `EXECUTION_STOP_WAIT_SECONDS`, `EXECUTION_STOP_POLL_SECONDS` | `5`, `0.25` | stop endpoint wait; worker's stop-flag poll |
-| `WORKER_DEFAULT_CONCURRENCY`, `WORKER_LLM_CONCURRENCY`, `WORKER_OCR_CONCURRENCY` | `4`, `8`, `2` | Compose: processes per worker container |
+| `WORKER_DEFAULT_CONCURRENCY`, `WORKER_LLM_CONCURRENCY`, `WORKER_OCR_CONCURRENCY`, `WORKER_AUDIO_CONCURRENCY` | `4`, `8`, `2`, `2` | Compose: processes per worker container |
+| `AUDIO_THREADS_PER_TASK`        | `2`                              | Compose `worker-audio`: CPU threads per local transcription |
 | `OCR_THREADS_PER_TASK`          | `1`                              | Compose `worker-ocr`: `OMP_THREAD_LIMIT` for Tesseract |
 | `FILES_DIR`                     | `apps/api/.data/files` (Docker: `/data/files`, the `files_data` volume) | API + workers: uploads |
-| `MAX_UPLOAD_MB`                 | `25`                             | API: upload limit    |
+| `MAX_UPLOAD_MB`                 | `25`                             | API: upload limit (documents, images) |
+| `MAX_MEDIA_UPLOAD_MB`           | `500`                            | API: upload limit for audio and video |
 | `SAMPLES_DIR`                   | the repo's `samples/` (Docker: `/samples`) | seed: the sample scan |
-| `HTTP_ALLOW_PRIVATE_NETWORKS`   | `false`                          | HTTP Request node: turn the SSRF guard off (development only) |
+| `HTTP_ALLOW_PRIVATE_NETWORKS`   | `false`                          | HTTP Request, Web Page, Web Search, and Custom LLM: turn the SSRF guard off (development only) |
 | `TESSERACT_LANGS` (build arg)   | `deu fra spa ita por` (plus `eng`) | image: OCR language data |
 | `LOADTEST_INFLIGHT`, `LOADTEST_MIX`, `LOADTEST_LLM_PROVIDER` | `2`, `ocr`, `groq` | Compose `locust` (load test) |
 | `WS_HEARTBEAT_SECONDS`, `WS_AUTH_TIMEOUT_SECONDS`, `WS_DB_CHECK_SECONDS` | `15`, `10`, `10` | WebSocket |
@@ -1258,7 +1991,7 @@ dotenv parser accepts trailing `# comments`.
 ├── compose.yaml                  # root entrypoint → includes infrastructure/docker-compose.yml
 ├── .env.example
 ├── infrastructure/
-│   └── docker-compose.yml        # postgres, redis, api, worker-default/-llm/-ocr, web; locust (profile)
+│   └── docker-compose.yml        # postgres, redis, api, worker-default/-llm/-ocr, beat, web; locust (profile)
 ├── apps/
 │   ├── api/                      # FastAPI backend
 │   │   ├── alembic.ini
@@ -1273,8 +2006,9 @@ dotenv parser accepts trailing `# comments`.
 │   │       ├── db/               # declarative base, async session, seed
 │   │       ├── models/           # SQLAlchemy models + enums
 │   │       ├── schemas/          # Pydantic request/response models
-│   │       ├── services/         # graph sync, runs (create/claim/run/record), stop + recovery, events, task queue, credentials
-│   │       ├── worker/           # Celery app + task (the `worker` service runs this)
+│   │       ├── services/         # graph sync, runs (create/claim/run/record), stop + recovery, events, task queue, credentials,
+│   │       │                     #   triggers + schedule + trigger_outcomes, templates, node_state, exports (CSV)
+│   │       ├── worker/           # Celery app (+ beat schedule) and tasks: runs, the triggers tick, email polls
 │   │       ├── api/              # deps (get_current_user) + routes
 │   │       └── alembic/          # env.py + versions/
 │   ├── web/                      # Next.js frontend (see apps/web/README.md)
@@ -1319,6 +2053,13 @@ dotenv parser accepts trailing `# comments`.
 - **Gemini `429 ... quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier=N`.** The
   free daily quota for that model is used up. Wait for the reset, switch `GEMINI_MODEL` to a
   model with more free quota, or add a `fallback` chain.
+- **Gemini `503 ... currently experiencing high demand` (or `504`).** Google is overloaded;
+  it passes. A `fallback` chain (the seeded pipelines use Groq when `GROQ_API_KEY` is set)
+  answers meanwhile.
+- **E2E: `"Demo: ..." must validate before these tests can run it`.** A seeded pipeline was
+  edited into a state that can't run, often a node added by accident (a stray click in the
+  library adds one at the center). The message lists the backend's reasons. Fix it in the
+  editor, or delete the pipeline and run the seed again.
 - **Runs stay `pending`, or `running` with "Handed off: waiting for a ... worker".** No worker
   consumes that queue: `docker compose ps` (is `worker-ocr` / `worker-llm` / `worker-default`
   up and healthy?), then `docker compose logs worker-ocr`. After

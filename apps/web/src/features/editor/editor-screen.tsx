@@ -12,6 +12,7 @@ import { ApiError, api } from "@/lib/api";
 
 import { Canvas } from "./canvas";
 import { ConfigPanel, MultiSelectionPanel } from "./config-panel";
+import { DeployDialog } from "./deploy-dialog";
 import { useAutosave, useKeyboardShortcuts, useLiveValidation } from "./hooks";
 import { NodeLibrary } from "./node-library";
 import { RunControllerProvider, useRun } from "./run-controller";
@@ -19,6 +20,7 @@ import { RunInputsDialog, RunPanel } from "./run-panel";
 import { ValidationPanel, VariablesPanel } from "./side-panels";
 import { getEditorStore, useEditor } from "./store";
 import { FloatingRunButton, TopBar } from "./top-bar";
+import { TriggersPanel } from "./triggers-panel";
 import { useEditorUi } from "./ui-store";
 
 export function EditorScreen({ workflowId }: { workflowId: string }) {
@@ -85,7 +87,7 @@ function EditorLoader({ workflowId }: { workflowId: string }) {
   }
   return (
     <RunControllerProvider workflowId={workflowId}>
-      <EditorLayout />
+      <EditorLayout workflowId={workflowId} />
     </RunControllerProvider>
   );
 }
@@ -96,12 +98,13 @@ function RightPanel({ onValidate }: { onValidate: () => void }) {
   const ids = selected ? selected.split(",") : [];
   if (rightPanel === "variables") return <VariablesPanel />;
   if (rightPanel === "validation") return <ValidationPanel onValidate={onValidate} />;
+  if (rightPanel === "triggers") return <TriggersPanel />;
   if (ids.length === 1) return <ConfigPanel key={ids[0]} nodeId={ids[0]} />;
   if (ids.length > 1) return <MultiSelectionPanel ids={ids} />;
   return null;
 }
 
-function EditorLayout() {
+function EditorLayout({ workflowId }: { workflowId: string }) {
   useAutosave();
   useKeyboardShortcuts();
   const validateNow = useLiveValidation();
@@ -133,6 +136,7 @@ function EditorLayout() {
         <RightPanel onValidate={onValidate} />
       </div>
       <RunInputsDialog />
+      <DeployDialog workflowId={workflowId} />
     </div>
   );
 }

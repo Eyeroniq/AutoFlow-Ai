@@ -4,17 +4,26 @@ Start a worker (the `worker` Compose service does this):
 
     celery -A app.worker.celery_app:celery_app worker -Q default --hostname worker@%h
 
+and the scheduler (the `beat` Compose service; run exactly one), which sends the
+triggers tick every minute:
+
+    celery -A app.worker.celery_app:celery_app beat
+
 The API imports this module only to *send* tasks by name; the task code lives in
 app.worker.tasks, which only workers load (via `include`).
 """
 
 from celery import Celery, signals
+from celery.schedules import crontab
 from flowforge_engine import DEFAULT_QUEUE
 
 from app.core.config import settings
 from app.core.logging import register_secret, setup_logging
 
 RUN_EXECUTION_TASK = "flowforge.run_execution"
+# Every minute: fire due schedules and queue due mailbox checks (app.services.triggers).
+TRIGGERS_TICK_TASK = "flowforge.triggers_tick"
+POLL_EMAIL_TASK = "flowforge.poll_email_trigger"
 
 celery_app = Celery(
     "flowforge",
@@ -49,6 +58,16 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     result_expires=24 * 3600,
     worker_hijack_root_logger=False,
+    # On the minute, so a 07:30 schedule fires at 07:30:0x. A tick that waited in the
+    # queue for most of a minute is dropped (the next one covers the same work): due
+    # schedules are claimed by their fire time, so nothing is lost or doubled.
+    beat_schedule={
+        "triggers-tick": {
+            "task": TRIGGERS_TICK_TASK,
+            "schedule": crontab(),
+            "options": {"queue": DEFAULT_QUEUE, "expires": 55},
+        },
+    },
 )
 
 

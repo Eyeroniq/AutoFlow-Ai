@@ -189,6 +189,10 @@ class OCRConfig(NodeConfig):
     dpi: int = Field(default=300, ge=72, le=600, description="Resolution PDF pages are rendered at before OCR.")
     psm: int = Field(default=3, ge=0, le=13, description="Tesseract page segmentation mode (3 = automatic).")
     max_pages: int = Field(default=50, ge=1, le=500, description="Refuse documents with more pages than this.")
+    prefer_text_layer: bool = Field(
+        default=False,
+        description="PDFs: read pages that already have a text layer directly (like PDF Extract) and OCR only the scanned ones.",
+    )
 
     @field_validator("pages")
     @classmethod
@@ -196,11 +200,17 @@ class OCRConfig(NodeConfig):
         return _check_page_spec(value)
 
 
+# A PDF page with at least this much text in its text layer isn't treated as a scan.
+MIN_TEXT_LAYER_CHARS = 25
+
+
 class OCRPage(BaseModel):
     page: int
     text: str
     chars: int
     confidence: float | None
+    # "ocr", or "text_layer" when prefer_text_layer read the PDF's own text.
+    method: str = "ocr"
 
 
 class OCRResult(BaseModel):
@@ -264,10 +274,16 @@ def _run_ocr(stored: StoredFile, config: OCRConfig, cancel: threading.Event) -> 
             for index in indexes:
                 if cancel.is_set():
                     raise _Cancelled
+                if config.prefer_text_layer:
+                    layer = document[index].get_text("text").strip()
+                    if len(layer) >= MIN_TEXT_LAYER_CHARS:
+                        pages.append({"page": index + 1, "text": layer, "chars": len(layer), "confidence": None,
+                                      "method": "text_layer"})
+                        continue
                 pixmap = document[index].get_pixmap(dpi=config.dpi, colorspace=pymupdf.csGRAY)
                 image = Image.frombytes("L", (pixmap.width, pixmap.height), pixmap.samples)
                 text, confidence = _ocr_image(image, config.language, config.psm)
-                pages.append({"page": index + 1, "text": text, "chars": len(text), "confidence": confidence})
+                pages.append({"page": index + 1, "text": text, "chars": len(text), "confidence": confidence, "method": "ocr"})
     else:
         source = "image"
         with Image.open(stored.path) as image:
@@ -280,7 +296,7 @@ def _run_ocr(stored: StoredFile, config: OCRConfig, cancel: threading.Event) -> 
             if cancel.is_set():
                 raise _Cancelled
             text, confidence = _ocr_image(frames[index].convert("L"), config.language, config.psm)
-            pages.append({"page": index + 1, "text": text, "chars": len(text), "confidence": confidence})
+            pages.append({"page": index + 1, "text": text, "chars": len(text), "confidence": confidence, "method": "ocr"})
 
     scored = [p["confidence"] for p in pages if p["confidence"] is not None]
     return {

@@ -10,10 +10,12 @@ import { ErrorAlert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status";
 import { toast } from "@/components/ui/toast";
+import { TriggerBadge } from "@/components/ui/trigger-badge";
 import { ApiError, api } from "@/lib/api";
 import { formatDateTime, formatDuration, prettyJson } from "@/lib/format";
 
 import { NodeTimeline } from "../runs/node-timeline";
+import { OutputDownloads } from "../runs/output-downloads";
 import { isTerminal } from "../runs/run-state";
 import { type LiveExecution, useLiveExecution } from "../runs/use-live-execution";
 
@@ -26,14 +28,17 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function JsonCard({ title, value, testId }: { title: string; value: unknown; testId?: string }) {
+function JsonCard({ title, value, testId, actions }: { title: string; value: unknown; testId?: string; actions?: ReactNode }) {
   return (
     <section className="rounded-xl border border-slate-200 bg-white">
-      <h2 className="border-b border-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-900">{title}</h2>
+      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5">
+        <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+        {actions}
+      </div>
       {value === null || value === undefined || (typeof value === "object" && !Object.keys(value).length) ? (
         <p className="px-4 py-3 text-sm text-slate-400">None</p>
       ) : (
-        <pre className="max-h-80 overflow-auto p-4 text-xs leading-5 text-slate-800" data-testid={testId}>
+        <pre className="max-h-80 overflow-y-auto whitespace-pre-wrap wrap-anywhere p-4 text-xs leading-5 text-slate-800" data-testid={testId}>
           {prettyJson(value)}
         </pre>
       )}
@@ -144,7 +149,9 @@ function ExecutionDetail({ executionId }: { executionId: string }) {
         <Fact label="Started">{formatDateTime(run.startedAt ?? execution.started_at)}</Fact>
         <Fact label="Finished">{formatDateTime(run.finishedAt ?? execution.finished_at)}</Fact>
         <Fact label="Duration">{formatDuration(run.durationMs ?? execution.duration_ms)}</Fact>
-        <Fact label="Trigger">{execution.trigger}</Fact>
+        <Fact label="Trigger">
+          <TriggerBadge trigger={execution.trigger} />
+        </Fact>
         <Fact label="Queue">{execution.queue ?? "—"}</Fact>
         <Fact label="Worker">{run.worker ?? execution.worker_hostname ?? "—"}</Fact>
       </dl>
@@ -160,9 +167,14 @@ function ExecutionDetail({ executionId }: { executionId: string }) {
           <h2 className="mb-2 text-sm font-semibold text-slate-900">Nodes</h2>
           <NodeTimeline run={run} />
         </section>
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <JsonCard title="Inputs" value={execution.inputs} />
-          <JsonCard title="Final output" value={run.finalOutput} testId="execution-output" />
+          <JsonCard
+            title="Final output"
+            value={run.finalOutput}
+            testId="execution-output"
+            actions={run.finalOutput && isTerminal(run.status) ? <OutputDownloads executionId={execution.id} /> : undefined}
+          />
         </div>
       </div>
     </div>

@@ -9,10 +9,11 @@ provider named "mock".
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from flowforge_engine.errors import MissingCredentialsError
 from flowforge_engine.providers.base import EmailProvider, LLMProvider, MailboxProvider
-from flowforge_engine.providers.mock import MockEmailProvider, MockLLMProvider
+from flowforge_engine.providers.mock import MockDiscordProvider, MockEmailProvider, MockLLMProvider, MockTelegramProvider
 from flowforge_engine.providers.settings import (
     EMAIL_PROVIDER_NAMES,
     EMAIL_PROVIDERS,
@@ -29,9 +30,13 @@ __all__ = [
     "EMAIL_PROVIDER_NAMES",
     "LLM_PROVIDER_NAMES",
     "ProviderSettings",
+    "get_discord_provider",
     "get_email_provider",
     "get_llm_provider",
     "get_mailbox_provider",
+    "get_search_provider",
+    "get_telegram_provider",
+    "get_transcriber",
 ]
 
 
@@ -78,6 +83,7 @@ def get_llm_provider(provider_name: str, settings: ProviderSettings | None = Non
         api_key=api_key,
         base_url=settings.base_url(name),
         embedding_model=settings.embedding_model(name),
+        allow_private_network=settings.allow_private_network,
         **common,
     )
 
@@ -113,3 +119,84 @@ def get_mailbox_provider(provider_name: str, settings: ProviderSettings | None =
     from flowforge_engine.providers.imap_provider import IMAPEmailProvider
 
     return IMAPEmailProvider(account, name=name, retry=settings.retry)
+
+
+def get_telegram_provider(provider_name: str = "telegram", settings: ProviderSettings | None = None) -> Any:
+    """TelegramProvider with TELEGRAM_BOT_TOKEN or the user's stored bot token."""
+    settings = settings if settings is not None else ProviderSettings.from_env()
+    name = provider_name.lower()
+    if name not in ("telegram", "mock"):
+        raise ValueError(f"Unknown Telegram provider '{provider_name}' (known: telegram, mock)")
+    if name == "mock" or settings.testing:
+        return MockTelegramProvider(name)
+    if not settings.has_credentials("telegram"):
+        raise MissingCredentialsError("telegram", missing_credentials_hint("telegram"))
+    from flowforge_engine.providers.telegram_provider import TelegramProvider
+
+    token = settings.telegram.bot_token
+    assert token is not None
+    return TelegramProvider(token.get_secret_value(), name=name, retry=settings.retry)
+
+
+def get_discord_provider(
+    provider_name: str = "discord", settings: ProviderSettings | None = None, *, webhook_url: str | None = None
+) -> Any:
+    """DiscordWebhookProvider for `webhook_url`, or the configured one (DISCORD_WEBHOOK_URL or
+    the user's stored webhook). Raises ValueError for a URL that isn't a Discord webhook."""
+    settings = settings if settings is not None else ProviderSettings.from_env()
+    name = provider_name.lower()
+    if name not in ("discord", "mock"):
+        raise ValueError(f"Unknown Discord provider '{provider_name}' (known: discord, mock)")
+    if name == "mock" or settings.testing:
+        if webhook_url:
+            from flowforge_engine.providers.discord_provider import parse_webhook_url
+
+            parse_webhook_url(webhook_url)  # same URL check as for real
+        return MockDiscordProvider(name)
+    if not webhook_url:
+        if not settings.has_credentials("discord"):
+            raise MissingCredentialsError("discord", missing_credentials_hint("discord"))
+        assert settings.discord.webhook_url is not None
+        webhook_url = settings.discord.webhook_url.get_secret_value()
+    from flowforge_engine.providers.discord_provider import DiscordWebhookProvider
+
+    return DiscordWebhookProvider(webhook_url, name=name, retry=settings.retry)
+
+
+def get_transcriber(provider_name: str = "groq", settings: ProviderSettings | None = None) -> Any:
+    """Speech-to-text: "groq" (Whisper API, the groq account's key) or "local" (faster-whisper)."""
+    settings = settings if settings is not None else ProviderSettings.from_env()
+    name = provider_name.lower()
+    if name not in ("groq", "local", "mock"):
+        raise ValueError(f"Unknown speech-to-text provider '{provider_name}' (known: groq, local)")
+    from flowforge_engine.providers.transcription import GroqTranscriber, LocalWhisperTranscriber, MockTranscriber
+
+    if name == "mock" or settings.testing:
+        return MockTranscriber(name)
+    speech = settings.speech
+    if name == "local":
+        return LocalWhisperTranscriber(model=speech.local_model, models_dir=speech.models_dir, compute_type=speech.local_compute_type)
+    if not settings.has_credentials("groq"):
+        raise MissingCredentialsError("groq", missing_credentials_hint("groq"))
+    key = settings.groq.api_key
+    assert key is not None
+    return GroqTranscriber(key.get_secret_value(), retry=settings.retry, max_file_mb=speech.groq_max_file_mb)
+
+
+def get_search_provider(provider_name: str = "duckduckgo", settings: ProviderSettings | None = None) -> Any:
+    """Web search: "duckduckgo" (no key) or "tavily" (TAVILY_API_KEY or the user's key)."""
+    settings = settings if settings is not None else ProviderSettings.from_env()
+    name = provider_name.lower()
+    if name not in ("duckduckgo", "tavily", "mock"):
+        raise ValueError(f"Unknown search provider '{provider_name}' (known: duckduckgo, tavily)")
+    from flowforge_engine.providers.search import DuckDuckGoSearch, MockSearch, TavilySearch
+
+    if name == "mock" or settings.testing:
+        return MockSearch(name)
+    if name == "duckduckgo":
+        return DuckDuckGoSearch()
+    if not settings.has_credentials("tavily"):
+        raise MissingCredentialsError("tavily", missing_credentials_hint("tavily"))
+    key = settings.tavily.api_key
+    assert key is not None
+    return TavilySearch(key.get_secret_value(), retry=settings.retry)

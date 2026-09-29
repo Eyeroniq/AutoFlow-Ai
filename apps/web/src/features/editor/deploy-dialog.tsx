@@ -1,12 +1,12 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, CircleAlert, Copy, KeyRound, LogIn, LogOut, Rocket, TriangleAlert } from "lucide-react";
+import { Check, CircleAlert, CloudOff, Copy, KeyRound, LogIn, LogOut, Rocket, TriangleAlert } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 
 import { ErrorAlert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Dialog } from "@/components/ui/dialog";
+import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
 import { toast } from "@/components/ui/toast";
 import { api, runIssues } from "@/lib/api";
 import { API_URL } from "@/lib/config";
@@ -140,14 +140,73 @@ export function DeployDialog({ workflowId }: { workflowId: string }) {
   return <DeployDialogBody workflowId={workflowId} onClose={() => setUi({ deployOpen: false })} />;
 }
 
-function DeployDialogBody({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const queryKey = ["deployment", workflowId];
-  const existing = useQuery({
-    queryKey,
+/** The workflow's live deployment (null when it isn't deployed), shared by Deploy and Undeploy. */
+function useDeployment(workflowId: string) {
+  return useQuery({
+    queryKey: ["deployment", workflowId],
     queryFn: async () => (await api.deployments.list({ workflow_id: workflowId }))[0] ?? null,
     meta: { silent: true },
   });
+}
+
+/** "Undeploy" next to Deploy, shown while the pipeline is deployed. Takes the endpoint down
+ * after a confirmation; the deployment is kept (revoked) for history. */
+export function UndeployButton({ workflowId, className }: { workflowId: string; className: string }) {
+  const queryClient = useQueryClient();
+  const deployment = useDeployment(workflowId).data ?? null;
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (!deployment) return null;
+  const confirm = async () => {
+    setBusy(true);
+    try {
+      await api.deployments.undeploy(deployment.id);
+      queryClient.setQueryData(["deployment", workflowId], null);
+      void queryClient.invalidateQueries({ queryKey: ["triggers", workflowId] });
+      setConfirming(false);
+      toast.success("Undeployed", "The endpoint now answers 404 and its API key no longer works.");
+    } catch (error) {
+      toast.error("Couldn't undeploy", error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className={className}
+        onClick={() => setConfirming(true)}
+        title="Take the API endpoint down"
+        data-testid="undeploy-button"
+      >
+        <CloudOff className="size-4" aria-hidden /> Undeploy
+      </button>
+      <ConfirmDialog
+        open={confirming}
+        title="Undeploy this pipeline?"
+        message={
+          <>
+            <p>
+              The endpoint <code className="rounded bg-slate-100 px-1 text-xs">{deployment.endpoint}</code> will answer 404 and the API key
+              (<code className="rounded bg-slate-100 px-1 text-xs">{deployment.api_key_prefix}…</code>) will stop working at once.
+            </p>
+            <p className="mt-2">Past runs stay in the history. Deploying again creates a new API key.</p>
+          </>
+        }
+        confirmLabel="Undeploy"
+        busy={busy}
+        onConfirm={() => void confirm()}
+        onClose={() => setConfirming(false)}
+      />
+    </>
+  );
+}
+
+function DeployDialogBody({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["deployment", workflowId];
+  const existing = useDeployment(workflowId);
   const name = useEditor((s) => s.name);
   const nodes = useEditor((s) => s.nodes);
   const edges = useEditor((s) => s.edges);

@@ -13,6 +13,7 @@ class ConnectRequest(BaseModel):
     - openai: `api_key`, optional `base_url` and `model`
     - custom (any OpenAI-compatible endpoint): `base_url` and `model` (required), `api_key` if it needs one
     - tavily: `api_key`
+    - notion (an internal integration token) / airtable (a personal access token): `api_key`
     - ollama: optional `base_url` and `model` (no key)
     - gmail: `email` and `app_password` (a Google App Password), optional SMTP/IMAP overrides
     - telegram: `bot_token` (from @BotFather), optional `chat_id` (where Telegram nodes send by default)
@@ -57,7 +58,7 @@ class ConnectRequest(BaseModel):
 class IntegrationRead(BaseModel):
     provider: str
     label: str
-    kind: Literal["llm", "email", "messaging", "search"]
+    kind: Literal["llm", "email", "messaging", "search", "workspace"]
     # True when *you* have stored a credential (it takes priority over the server's).
     connected: bool
     # Which credential a run would use right now.

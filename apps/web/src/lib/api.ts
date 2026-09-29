@@ -333,6 +333,8 @@ export const api = {
     /** A new API key (in `api_key`); the old one is revoked. The deployed graph doesn't change. */
     rotateKey: (deploymentId: string) =>
       authed<DeploymentWithKey>(`/api/deployments/${enc(deploymentId)}/rotate-key`, { method: "POST" }),
+    /** Take the endpoint down (404 from now on); the deployment is kept for history. */
+    undeploy: (deploymentId: string) => authed<Deployment>(`/api/deployments/${enc(deploymentId)}`, { method: "DELETE" }),
   },
   files: {
     list: () => authed<UploadedFile[]>("/api/files"),

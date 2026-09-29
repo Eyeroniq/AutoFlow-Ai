@@ -33,3 +33,6 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     api_key_prefix: Mapped[str] = mapped_column(String(16))
     key_created_at: Mapped[datetime]
     deployed_at: Mapped[datetime]
+    # Set by undeploy (DELETE /api/deployments/{id}): the endpoint answers 404 and the key is
+    # dead. The row stays for history; deploying again reactivates it with a new key.
+    revoked_at: Mapped[datetime | None] = mapped_column(default=None)

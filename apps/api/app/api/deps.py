@@ -81,6 +81,9 @@ async def get_deployment_for_key(
     valid = verify_api_key(key, deployment.api_key_hash if deployment else _DUMMY_KEY_HASH)
     if deployment is None or not valid:
         raise _unauthorized("Invalid deployment or API key")
+    # Only a caller with the key learns the deployment existed and was undeployed.
+    if deployment.revoked_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="This deployment was undeployed")
     return deployment
 
 

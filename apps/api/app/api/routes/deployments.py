@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentUser, DbSession
 from app.models.deployment import Deployment
 from app.schemas.deployment import DeploymentCreate, DeploymentRead, DeploymentWithKey
-from app.services.deployments import deploy_workflow, deployment_read, rotate_api_key
+from app.services.deployments import deploy_workflow, deployment_read, rotate_api_key, undeploy
 from app.services.providers import get_execution_services
 from app.services.runs import InvalidWorkflowGraph
 from app.services.workflows import get_owned_workflow
@@ -75,6 +75,14 @@ def _with_key(deployment: Deployment, key: str | None, status_code: int) -> JSON
     responses={404: {"description": "Deployment not found (or not yours)"}},
 )
 async def rotate_key(deployment_id: uuid.UUID, db: DbSession, user: CurrentUser) -> JSONResponse:
+    deployment = await _owned(db, user, deployment_id)
+    if deployment.revoked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="This deployment was undeployed; deploy it again for a new key")
+    key = await rotate_api_key(db, deployment)
+    return _with_key(deployment, key, status.HTTP_200_OK)
+
+
+async def _owned(db: DbSession, user: CurrentUser, deployment_id: uuid.UUID) -> Deployment:
     deployment = await db.scalar(
         select(Deployment)
         .where(Deployment.id == deployment_id, Deployment.owner_id == user.id)
@@ -83,20 +91,42 @@ async def rotate_key(deployment_id: uuid.UUID, db: DbSession, user: CurrentUser)
     )
     if deployment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Deployment not found")
-    key = await rotate_api_key(db, deployment)
-    return _with_key(deployment, key, status.HTTP_200_OK)
+    return deployment
+
+
+@router.delete(
+    "/{deployment_id}",
+    response_model=DeploymentRead,
+    summary="Undeploy (revoke) a deployment",
+    description=(
+        "Takes the endpoint down: from now on it answers **404**, even with the deployment's key, "
+        "and the key never works again (deploying the workflow again issues a new one). The "
+        "deployment isn't deleted: it stays, with `revoked_at` set, for history, and its runs stay "
+        "in the executions list. Undeploying an undeployed deployment changes nothing."
+    ),
+    responses={404: {"description": "Deployment not found (or not yours)"}},
+)
+async def undeploy_deployment(deployment_id: uuid.UUID, db: DbSession, user: CurrentUser) -> DeploymentRead:
+    deployment = await _owned(db, user, deployment_id)
+    await undeploy(db, deployment)
+    return deployment_read(deployment)
 
 
 @router.get(
     "",
     response_model=list[DeploymentRead],
     summary="List your deployments (most recently deployed first)",
-    description="Never includes API keys, only their `api_key_prefix`. Filter with `workflow_id`.",
+    description=(
+        "Never includes API keys, only their `api_key_prefix`. Filter with `workflow_id`; undeployed ones "
+        "are left out unless `include_revoked=true`."
+    ),
 )
 async def list_deployments(
-    db: DbSession, user: CurrentUser, workflow_id: uuid.UUID | None = None
+    db: DbSession, user: CurrentUser, workflow_id: uuid.UUID | None = None, include_revoked: bool = False
 ) -> list[DeploymentRead]:
     query = select(Deployment).where(Deployment.owner_id == user.id)
+    if not include_revoked:
+        query = query.where(Deployment.revoked_at.is_(None))
     if workflow_id is not None:
         query = query.where(Deployment.workflow_id == workflow_id)
     rows = await db.scalars(query.order_by(Deployment.deployed_at.desc()).execution_options(populate_existing=True))

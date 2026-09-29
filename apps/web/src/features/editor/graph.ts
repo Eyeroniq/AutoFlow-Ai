@@ -234,6 +234,16 @@ export function configSummary(type: string, config: Record<string, unknown>, ent
       return `${preview(c.query) || "(no query)"} · ${str("provider") || "duckduckgo"} · ${str("max_results") || "5"} results${
         Number(c.fetch_pages) > 0 ? ` · read ${str("fetch_pages")}` : ""
       }`;
+    case "vision":
+      return `${preview(c.image) || "(no image)"} · ${c.schema ? "JSON" : "text"} · gemini`;
+    case "notion_create_page":
+      return `${preview(c.title) || "(no title)"} → ${preview(c.database_id) || "(no database)"}`;
+    case "notion_query_database":
+      return `${preview(c.database_id) || "(no database)"}${c.filter_property ? ` · ${str("filter_property")} ${str("filter_operator") || "equals"} ${preview(c.filter_value)}` : ""}`;
+    case "airtable_create_record":
+      return `${str("table_name") || "(no table)"} · ${c.fields && typeof c.fields === "object" ? Object.keys(c.fields).length : 0} fields`;
+    case "airtable_list_records":
+      return `${str("table_name") || "(no table)"}${c.filter_formula ? ` · ${preview(c.filter_formula)}` : ""} · max ${str("max_records") || "100"}`;
     case "structured_output": {
       const props = c.schema && typeof c.schema === "object" ? Object.keys((c.schema as { properties?: object }).properties ?? {}) : [];
       return `${props.length ? `{${props.slice(0, 3).join(", ")}${props.length > 3 ? ", …" : ""}}` : "JSON"} · ${str("provider") || "gemini"}`;

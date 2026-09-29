@@ -46,7 +46,7 @@ async def test_listing_masks_and_reports_sources(client, user):
     listing = by_provider(response.json())
     assert set(listing) == {
         "gemini", "groq", "openrouter", "mistral", "cerebras", "ollama", "openai", "custom", "anthropic", "gmail", "telegram",
-        "discord", "tavily",
+        "discord", "tavily", "notion", "airtable",
     }
     assert listing["telegram"]["kind"] == listing["discord"]["kind"] == "messaging"
     assert listing["groq"]["connected"] is True and listing["groq"]["masked"] == {"api_key": "gsk...cdef"}
@@ -87,6 +87,8 @@ async def test_gmail_credentials(client, user):
         ("custom", {"model": "m"}, "custom needs a 'base_url'"),
         ("tavily", {}, "tavily needs an 'api_key'"),
         ("tavily", {"api_key": "tvly-x", "model": "m"}, "doesn't take model"),
+        ("notion", {}, "notion needs an 'api_key' (its token)"),
+        ("airtable", {"api_key": "pat_x", "base_url": "https://x"}, "doesn't take base_url"),
     ],
 )
 async def test_connect_validation(client, user, provider, body, message):
@@ -204,7 +206,7 @@ def test_log_formatter_redacts_registered_secrets():
 
 async def test_new_providers_are_listed(client, user):
     listing = by_provider((await client.get("/api/integrations", headers=user.headers)).json())
-    assert listing["mistral"]["kind"] == "llm" and listing["mistral"]["default_model"] == "mistral-small-latest"
+    assert listing["mistral"]["kind"] == "llm" and listing["mistral"]["default_model"] == "ministral-8b-latest"
     assert listing["cerebras"]["kind"] == "llm" and listing["cerebras"]["get_key_url"].startswith("https://cloud.cerebras.ai")
     assert listing["custom"]["label"] == "Custom (OpenAI-compatible)"
     assert listing["tavily"]["kind"] == "search"
@@ -266,3 +268,30 @@ async def test_tavily_connect_and_test(client, user):
     result = (await client.post("/api/integrations/tavily/test", headers=user.headers)).json()
     assert result["success"] is True and result["source"] == "user" and result["details"] == {"mock": True}
     assert (await client.delete("/api/integrations/tavily", headers=user.headers)).status_code == 204
+
+
+@pytest.mark.parametrize(
+    ("provider", "token", "get_key_url"),
+    [
+        ("notion", "ntn_fake_integration_token_0123456789", "https://www.notion.so/profile/integrations"),
+        ("airtable", "patFakeAirtable.0123456789abcdef", "https://airtable.com/create/tokens"),
+    ],
+)
+async def test_workspace_app_tokens_connect_masked_and_test(client, user, provider, token, get_key_url):
+    listing = by_provider((await client.get("/api/integrations", headers=user.headers)).json())
+    assert listing[provider]["kind"] == "workspace" and listing[provider]["get_key_url"] == get_key_url
+    assert listing[provider]["connected"] is False
+    connected = await client.post(f"/api/integrations/{provider}/connect", json={"api_key": token}, headers=user.headers)
+    assert connected.status_code == 200, connected.text
+    assert token not in connected.text and connected.json()["source"] == "user"
+    result = (await client.post(f"/api/integrations/{provider}/test", headers=user.headers)).json()
+    assert result["success"] is True and result["source"] == "user" and result["details"] == {"mock": True}
+    assert (await client.delete(f"/api/integrations/{provider}", headers=user.headers)).status_code == 204
+
+
+async def test_workspace_test_without_a_token_says_authentication_missing(client, user, monkeypatch):
+    monkeypatch.setattr(settings, "TESTING", False)
+    monkeypatch.setattr(settings, "NOTION_API_KEY", None)
+    result = (await client.post("/api/integrations/notion/test", headers=user.headers)).json()
+    assert result["success"] is False and result["source"] == "none"
+    assert result["error"].startswith("Authentication missing for provider 'notion'") and "NOTION_API_KEY" in result["error"]

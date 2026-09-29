@@ -39,6 +39,11 @@ class MockLLMProvider:
     ) -> str:
         return self.response_for(user_prompt)
 
+    async def generate_with_image(
+        self, system_prompt: str, user_prompt: str, image: bytes, mime_type: str, model: str, temperature: float, max_tokens: int,
+    ) -> str:
+        return self.response_for(f"[image {mime_type}, {len(image)} bytes] {user_prompt}")
+
     async def stream(
         self,
         system_prompt: str,

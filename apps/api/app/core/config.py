@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     # to by default), and a Discord channel webhook URL. Users can store their own instead.
     # Web search: Tavily (optional; DuckDuckGo needs no key).
     TAVILY_API_KEY: SecretStr | None = None
+    # Workspace apps: a Notion internal integration token and an Airtable personal access
+    # token. Users can connect their own under Integrations instead.
+    NOTION_API_KEY: SecretStr | None = None
+    AIRTABLE_API_KEY: SecretStr | None = None
 
     # Speech-to-text. Groq Whisper uses GROQ_API_KEY; faster-whisper runs locally and keeps
     # its models in WHISPER_MODELS_DIR (a volume in Docker).
@@ -212,7 +216,7 @@ class Settings(BaseSettings):
             "ANTHROPIC_MODEL", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USER", "SMTP_PASSWORD",
             "SMTP_FROM_NAME", "IMAP_HOST", "IMAP_PORT", "LLM_MAX_RETRIES", "LLM_RETRY_BASE_DELAY_SECONDS",
             "LLM_RETRY_MAX_DELAY_SECONDS", "LLM_REQUEST_TIMEOUT_SECONDS", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
-            "DISCORD_WEBHOOK_URL",
+            "DISCORD_WEBHOOK_URL", "NOTION_API_KEY", "AIRTABLE_API_KEY",
         )
         env: dict[str, Any] = {}
         for name in names:
@@ -227,7 +231,8 @@ class Settings(BaseSettings):
         secrets = [self.JWT_SECRET, *self.ENCRYPTION_KEY.get_secret_value().split(",")]
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
                      "ANTHROPIC_API_KEY", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL",
-                     "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "CUSTOM_OPENAI_API_KEY", "TAVILY_API_KEY"):
+                     "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "CUSTOM_OPENAI_API_KEY", "TAVILY_API_KEY",
+                     "NOTION_API_KEY", "AIRTABLE_API_KEY"):
             value = getattr(self, name)
             if value is not None:
                 secrets.append(value.get_secret_value())

@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, CircleAlert, CircleCheck, ExternalLink, KeyRound, Mail, MessageSquare, PlugZap, Search, Send, Unplug } from "lucide-react";
+import { Blocks, Bot, CircleAlert, CircleCheck, ExternalLink, KeyRound, Mail, MessageSquare, PlugZap, Search, Send, Unplug } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -71,12 +71,12 @@ function schemaFor(integration: Integration) {
   if (integration.kind === "email") return emailSchema;
   if (integration.provider === "telegram") return telegramSchema;
   if (integration.provider === "discord") return discordSchema;
-  if (integration.kind === "search") return searchSchema;
+  if (integration.kind === "search" || integration.kind === "workspace") return searchSchema;
   return llmSchema(integration.provider);
 }
 
-const ICONS = { llm: Bot, email: Mail, search: Search, telegram: Send, discord: MessageSquare } as const;
-const TINTS = { llm: "bg-violet-50 text-violet-600", email: "bg-sky-50 text-sky-600", messaging: "bg-teal-50 text-teal-600", search: "bg-amber-50 text-amber-700" } as const;
+const ICONS = { llm: Bot, email: Mail, search: Search, workspace: Blocks, telegram: Send, discord: MessageSquare } as const;
+const TINTS = { llm: "bg-violet-50 text-violet-600", email: "bg-sky-50 text-sky-600", messaging: "bg-teal-50 text-teal-600", search: "bg-amber-50 text-amber-700", workspace: "bg-slate-100 text-slate-700" } as const;
 
 type FormValues = Record<string, string | undefined>;
 
@@ -124,6 +124,14 @@ function ConnectForm({ integration, onDone }: { integration: Integration; onDone
         <FormField label="Webhook URL" {...secret} placeholder="https://discord.com/api/webhooks/..." registration={form.register("webhook_url")} error={errors.webhook_url} />
       ) : integration.kind === "search" ? (
         <FormField label="API key" {...secret} placeholder="tvly-..." registration={form.register("api_key")} error={errors.api_key} />
+      ) : integration.kind === "workspace" ? (
+        <FormField
+          label={integration.provider === "notion" ? "Integration token" : "Personal access token"}
+          {...secret}
+          placeholder={integration.provider === "notion" ? "ntn_..." : "pat..."}
+          registration={form.register("api_key")}
+          error={errors.api_key}
+        />
       ) : email ? (
         <>
           <FormField label="Gmail address" type="email" autoComplete="off" placeholder="you@gmail.com" registration={form.register("email")} error={errors.email} />
@@ -279,7 +287,9 @@ function IntegrationCard({ integration }: { integration: Integration }) {
                   ? "Create a bot"
                   : integration.provider === "discord"
                     ? "Create a webhook"
-                    : "Get a key"}{" "}
+                    : integration.kind === "workspace"
+                      ? "Get a token"
+                      : "Get a key"}{" "}
             <ExternalLink className="size-3" />
           </a>
         )}
@@ -382,6 +392,7 @@ function Integrations() {
     ["Email", integrations.data.filter((i) => i.kind === "email")],
     ["Notifications", integrations.data.filter((i) => i.kind === "messaging")],
     ["Web search", integrations.data.filter((i) => i.kind === "search")],
+    ["Workspace apps", integrations.data.filter((i) => i.kind === "workspace")],
   ];
   return (
     <div className="space-y-8">

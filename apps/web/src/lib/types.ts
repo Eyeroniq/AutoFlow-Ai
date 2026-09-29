@@ -352,6 +352,8 @@ export interface Deployment {
   outputs: DeploymentOutput[];
   key_created_at: string;
   deployed_at: string;
+  /** Set once undeployed: the endpoint answers 404. Undeployed ones are left out of lists by default. */
+  revoked_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -366,7 +368,7 @@ export interface DeploymentWithKey extends Deployment {
 export interface Integration {
   provider: string;
   label: string;
-  kind: "llm" | "email" | "messaging" | "search";
+  kind: "llm" | "email" | "messaging" | "search" | "workspace";
   connected: boolean;
   source: "user" | "server" | "none";
   status: "connected" | "disconnected" | "error";

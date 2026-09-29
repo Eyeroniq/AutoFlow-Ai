@@ -661,6 +661,95 @@ back to Tavily"; Tavily's `401` (bad key), `429`, `432` (plan credits used up), 
 search → Tavily** stores a key; **Test connection** calls Tavily's `/usage` (it proves the key
 and shows the credits used, without spending one).
 
+## Vision, Notion, and Airtable
+
+### Vision
+
+**Vision** (`vision`, LLM group, queue `llm`) asks Gemini about an uploaded image, with
+`GEMINI_API_KEY` (or your Gemini credential).
+
+| Config | Default | Meaning |
+| ------ | ------- | ------- |
+| `image` | required | An uploaded image: `{{input.photo}}` (an Input node of type file) or a file id. PNG, JPEG, and WebP go as they are; TIFF, BMP, and GIF are converted to PNG (a GIF's first frame). Up to 18 MB |
+| `prompt` | required | What to do, e.g. "List every item and price on this receipt" |
+| `schema` | blank | Optional JSON Schema. The reply must be JSON matching it, with the same instruction, validation, and one retry as the Structured Output node; the parsed value is in `data` |
+| `model`, `system_prompt`, `temperature`, `max_tokens` | blank (`GEMINI_MODEL`), blank, `0.2`, `2048` | As on the LLM nodes |
+
+Output: `text` (the reply), `data` (with a schema), `attempts`, `filename`, `content_type`,
+`converted`, `model`, `mock`. Seen working: a generated label reading "ORDER 4217" with a
+one-field schema returned `{"order_number": "4217"}` on the first attempt
+(`gemini-3.5-flash-lite`).
+
+### Notion
+
+Connect a token under **Integrations → Workspace apps → Notion** (or `NOTION_API_KEY` in
+`.env`). **Test connection** calls `GET /v1/users/me` and shows the integration's name and
+workspace; nothing changes. The nodes use Notion-Version `2026-03-11` and a database's first
+data source (Notion's model since 2025-09-03).
+
+- **Notion: Create Page** (`notion_create_page`): `database_id` (the id, or the database's
+  URL), `title` (goes in the database's title property, whatever it's called), `content`: one
+  block per line, with `# `, `## `, `### ` headings, `- ` / `* ` bullets, `1. ` numbered items,
+  `- [ ] ` / `- [x] ` to-dos, `> ` quotes, and paragraphs for the rest (long bodies are sent in
+  batches of 100 blocks). Returns `page_id`, `url`, `blocks`.
+- **Notion: Query Database** (`notion_query_database`): `database_id`, an optional
+  `filter_property` with `filter_operator` (`equals` or `contains`) and `filter_value`, and
+  `max_results` (100, up to 1,000; pages of 100 are followed). The filter is written for the
+  property's type: text-like properties (title, text, URL, email, phone) take either operator;
+  select and status `equals`; multi-select checks that it contains the value; numbers and
+  checkboxes `equals`. Returns `pages`: `[{id, url, created_time, last_edited_time,
+  properties}]` with each property as plain JSON (text, a number, a list of names, a date
+  `{start, end}`), and `count`.
+
+**Get a Notion integration token and share a database with it:**
+
+1. Open <https://www.notion.so/profile/integrations> (Settings → Connections → Develop or
+   manage integrations), **New integration**, pick the workspace, type **Internal**, and save.
+2. Under **Configuration**, copy the **Internal Integration Secret** (`ntn_...`). Leave the
+   capabilities Read, Update, and Insert content on.
+3. An integration sees nothing until it's invited: open the database as a full page, click
+   **•••** (top right) → **Connections** → your integration → **Confirm**. Pages under it are
+   shared too.
+4. The database id is in its URL: `notion.so/<workspace>/<32 characters>?v=...`. Paste the whole
+   URL into `database_id` if you like.
+
+A database that isn't shared answers `404`; the node says to add the integration under
+Connections.
+
+### Airtable
+
+Connect a token under **Integrations → Workspace apps → Airtable** (or `AIRTABLE_API_KEY`).
+**Test connection** calls `GET /v0/meta/whoami` and shows the token's user and scopes.
+
+- **Airtable: Create Record** (`airtable_create_record`): `base_id` (`app...`), `table_name`
+  (name or `tbl...` id), `fields` (a JSON object by field name, references allowed, e.g.
+  `{"Name": "{{input.name}}", "Score": 7}`), `typecast` (let Airtable convert values, such as
+  text to a new select option). Returns `record_id`, `created_time`, `fields`.
+- **Airtable: List Records** (`airtable_list_records`): `base_id`, `table_name`, an optional
+  `filter_formula` (Airtable formula, e.g. `{Status} = 'Open'` or `FIND('urgent', {Notes})`), an
+  optional `view`, and `max_records` (100, up to 1,000; pages of 100 are followed). Returns
+  `records`: `[{id, created_time, fields}]`, and `count`.
+
+Errors say what to fix: a rejected token (`401`), a base or table the token can't reach
+(`403`/`404`), or a field name or value that doesn't match the table (`422`, with Airtable's
+message, e.g. `UNKNOWN_FIELD_NAME`). Airtable allows 5 requests a second per base; a `429` is
+retried after the wait.
+
+**Get an Airtable personal access token:**
+
+1. Open <https://airtable.com/create/tokens> → **Create token**, and name it.
+2. Scopes: **data.records:read** and **data.records:write** (add `schema.bases:read` only if
+   you'll need it elsewhere; these nodes don't).
+3. Access: add the bases the token may use (or all current and future bases in a workspace),
+   then **Create token** and copy it (`pat...`). It's shown once.
+4. The base id is in the base's URL: `airtable.com/appXXXXXXXXXXXXXX/tbl.../viw...`.
+
+**Live tests.** With `NOTION_API_KEY` and `NOTION_TEST_DATABASE_ID`, `pytest -m live` creates a
+page titled "FlowForge live test <time>" in that database and finds it again with Query
+Database. With `AIRTABLE_API_KEY`, `AIRTABLE_TEST_BASE_ID`, and `AIRTABLE_TEST_TABLE` (and
+`AIRTABLE_TEST_FIELD`, a text field, default `Name`), it creates a record and lists it back with
+a formula. Without them the tests skip and name the missing variables.
+
 ## Notifications: Telegram and Discord
 
 Both split messages over the service's limit into several (Telegram 4,096 characters, Discord
@@ -1132,7 +1221,7 @@ optional `model` (blank = the provider's default below), `system_prompt`, `user_
 | Gemini       | `gemini`     | google-genai (AI Studio) | `gemini-3.5-flash-lite`              | `GEMINI_API_KEY` (free)  |
 | Groq         | `groq`       | OpenAI-compatible        | `openai/gpt-oss-20b`                 | `GROQ_API_KEY` (free)    |
 | OpenRouter   | `openrouter` | OpenAI-compatible        | `openrouter/free` (any `…:free` model works) | `OPENROUTER_API_KEY` (free) |
-| Mistral      | `mistral`    | OpenAI-compatible        | `mistral-small-latest`               | `MISTRAL_API_KEY` (free plan) |
+| Mistral      | `mistral`    | OpenAI-compatible        | `ministral-8b-latest`                | `MISTRAL_API_KEY` (free plan) |
 | Cerebras     | `cerebras`   | OpenAI-compatible        | `qwen-3.8-27b` (or `gpt-oss-120b`)   | `CEREBRAS_API_KEY` (free) |
 | Custom       | `custom_llm` | OpenAI-compatible        | `CUSTOM_OPENAI_MODEL` (required)     | `CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY` |
 | Ollama       | `ollama`     | OpenAI-compatible        | `llama3.2`                           | none (local)             |
@@ -1742,6 +1831,7 @@ Execution rows now also carry `segment` and `handoff_at`, node rows their `queue
 | POST | `/api/deployments` | Bearer (JWT) | `{workflow_id}`: validate and deploy the saved graph → `201` with `api_key` (shown once); again → `200`, a redeploy of the current graph with the same id and key (`api_key: null`). `404` not yours, `422` invalid graph (`detail.errors`) |
 | GET | `/api/deployments` | Bearer (JWT) | Your deployments, most recently deployed first (`?workflow_id=`): `endpoint`, `api_key_prefix`, `inputs`, `outputs`, `version`, `workflow_version`; never the key |
 | POST | `/api/deployments/{id}/rotate-key` | Bearer (JWT) | A new key in `api_key`; the old one stops working at once. The deployed graph is unchanged |
+| DELETE | `/api/deployments/{id}` | Bearer (JWT) | **Undeploy**: the endpoint answers `404` from now on, even with its key. The row is kept with `revoked_at` set (list it with `?include_revoked=true`), and its runs stay in the history. Deploying again reactivates it with a new key. Also the **Undeploy** button next to Deploy in the editor, after a confirmation |
 | POST | `/api/v1/deployments/{id}/run` | API key | `{inputs}` → `202 {execution_id, status, links.status}`; `?wait=true[&timeout=s]` → `200` with `final_output` once finished (`202` at the timeout). `401`, `422`, `429`, `503` |
 | GET | `/api/v1/deployments/{id}/executions/{execution_id}` | API key | A run this deployment started: `status`, `final_output`, `error`, timings. `404` for any other run |
 
@@ -1942,12 +2032,13 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBEDDING_MODEL` | `http://host.docker.internal:11434/v1` (`.env.example`), `llama3.2`, `nomic-embed-text` | Ollama nodes |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | blank, `gpt-4.1-mini`           | OpenAI nodes         |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | blank, `claude-opus-5`    | Claude nodes         |
-| `MISTRAL_API_KEY`, `MISTRAL_MODEL` | blank, `mistral-small-latest` | Mistral nodes      |
+| `MISTRAL_API_KEY`, `MISTRAL_MODEL` | blank, `ministral-8b-latest` | Mistral nodes      |
 | `CEREBRAS_API_KEY`, `CEREBRAS_MODEL` | blank, `qwen-3.8-27b`       | Cerebras nodes       |
 | `CUSTOM_OPENAI_BASE_URL`, `CUSTOM_OPENAI_API_KEY`, `CUSTOM_OPENAI_MODEL` | blank | Custom LLM nodes (base URL + model required) |
 | `GROQ_WHISPER_MODEL`, `GROQ_WHISPER_TRANSLATE_MODEL`, `GROQ_WHISPER_MAX_FILE_MB` | `whisper-large-v3-turbo`, `whisper-large-v3`, `25` | Speech to Text on Groq |
 | `FASTER_WHISPER_MODEL`, `FASTER_WHISPER_COMPUTE_TYPE`, `WHISPER_MODELS_DIR` | `base`, `int8`, `~/.cache/flowforge-whisper` (Docker: `/data/models`) | Speech to Text, local |
 | `TAVILY_API_KEY`                | blank                            | Web Search (Tavily, and the DuckDuckGo fallback) |
+| `NOTION_API_KEY`, `AIRTABLE_API_KEY` | blank                       | Notion and Airtable nodes (a Notion integration token, an Airtable personal access token) |
 | `SMTP_USER`, `SMTP_PASSWORD`    | blank (Gmail address + App Password) | Gmail / Gmail Read nodes |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_FROM_NAME` | `smtp.gmail.com`, `587`, `auto`, blank | Gmail node |
 | `IMAP_HOST`, `IMAP_PORT`        | `imap.gmail.com`, `993`          | Gmail Read node      |

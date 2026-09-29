@@ -146,6 +146,34 @@ class GeminiProvider:
             raise ProviderError(self.name, f"no text in response ({self._empty_reason(response)})")
         return text
 
+    async def generate_with_image(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: bytes,
+        mime_type: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Like generate(), with an image sent inline before the prompt (Gemini vision)."""
+        from google.genai import errors, types
+
+        config = self._config(system_prompt, temperature, max_tokens)
+        contents = [types.Part.from_bytes(data=image, mime_type=mime_type), user_prompt]
+
+        async def call() -> Any:
+            try:
+                return await self._client.aio.models.generate_content(model=model, contents=contents, config=config)
+            except (errors.APIError, *_transport_errors()) as exc:
+                raise self._error(exc) from exc
+
+        response = await with_retries(call, self._retry)
+        text = response.text
+        if not text:
+            raise ProviderError(self.name, f"no text in response ({self._empty_reason(response)})")
+        return text
+
     @staticmethod
     def _empty_reason(response: Any) -> str:
         if response.candidates:

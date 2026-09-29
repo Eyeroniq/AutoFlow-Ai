@@ -104,3 +104,55 @@ test("deploys the demo pipeline and runs it through its endpoint with the genera
     expect(status).toBe(200);
   }
 });
+
+// Undeploy on a scratch pipeline (Input -> Text -> Output: no providers, nothing sent).
+test("Undeploy takes the endpoint down after a confirmation, and the old key gets 404", async ({ page, request }) => {
+  const api = await Api.login(request);
+  const workflow = await api.createWorkflow("E2E undeploy", {
+    nodes: [
+      { id: "input", type: "input", label: "Topic", position: { x: 0, y: 0 }, config: { name: "topic", input_type: "text" } },
+      { id: "text", type: "text", label: "Text", position: { x: 300, y: 0 }, config: { text: "Hello {{input.topic}}" } },
+      { id: "out", type: "output", label: "Result", position: { x: 600, y: 0 }, config: { name: "result", value: "{{text.text}}" } },
+    ],
+    edges: [
+      { id: "e1", source: "input", target: "text" },
+      { id: "e2", source: "text", target: "out" },
+    ],
+    variables: [],
+  });
+  try {
+    const deployed = await api.call<{ id: string; endpoint: string; api_key: string }>("POST", "/api/deployments", { workflow_id: workflow.id });
+    expect(deployed.status).toBe(201);
+    const { endpoint, api_key: key } = deployed.body;
+    const runIt = () => request.post(`${API_URL}${endpoint}`, { data: { inputs: { topic: "x" } }, headers: { Authorization: `Bearer ${key}` } });
+    expect((await runIt()).status()).toBe(202);
+
+    await signIn(page, api);
+    await openEditor(page, workflow.id);
+    const undeploy = page.getByTestId("undeploy-button");
+    await expect(undeploy).toBeVisible();
+
+    // Cancel changes nothing.
+    await undeploy.click();
+    const confirm = page.getByRole("dialog", { name: "Undeploy this pipeline?" });
+    await expect(confirm).toContainText(endpoint);
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toHaveCount(0);
+    expect((await runIt()).status()).toBe(202);
+
+    // Confirm: the button goes away and the same key now gets 404.
+    await undeploy.click();
+    await confirm.getByRole("button", { name: "Undeploy" }).click();
+    await expect(page.getByTestId("undeploy-button")).toHaveCount(0);
+    const gone = await runIt();
+    expect(gone.status()).toBe(404);
+    expect(await gone.json()).toEqual({ detail: "This deployment was undeployed" });
+
+    // Kept for history.
+    const history = await api.call<{ id: string; revoked_at: string | null }[]>(
+      "GET", `/api/deployments?workflow_id=${workflow.id}&include_revoked=true`);
+    expect(history.body.map((d) => [d.id, Boolean(d.revoked_at)])).toEqual([[deployed.body.id, true]]);
+  } finally {
+    await api.remove(workflow.id);
+  }
+});

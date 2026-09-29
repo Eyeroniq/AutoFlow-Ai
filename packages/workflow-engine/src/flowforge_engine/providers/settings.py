@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from flowforge_engine.providers.retry import RetryPolicy
 
-ProviderKind = Literal["llm", "email", "messaging", "search"]
+ProviderKind = Literal["llm", "email", "messaging", "search", "workspace"]
 
 
 @dataclass(frozen=True)
@@ -61,10 +61,11 @@ LLM_PROVIDERS: dict[str, ProviderInfo] = {
             default_model="openrouter/free",
             env_vars=("OPENROUTER_API_KEY",), get_key_url="https://openrouter.ai/settings/keys",
         ),
-        # Mistral La Plateforme: its free "Experiment" plan covers every model (rate limited).
+        # Mistral La Plateforme, free "Experiment" plan. Limits are per model: a free account was
+        # given 0 requests/min on mistral-small-latest and 188/min on ministral-8b (2026-09).
         ProviderInfo(
             "mistral", "Mistral", "llm", base_url="https://api.mistral.ai/v1",
-            default_model="mistral-small-latest",
+            default_model="ministral-8b-latest",
             env_vars=("MISTRAL_API_KEY",), get_key_url="https://console.mistral.ai/api-keys",
         ),
         # Cerebras Inference: free trial tier, 5 requests per minute per model (checked 2026-09).
@@ -139,6 +140,18 @@ LLMProviderName = Literal[
     "gemini", "groq", "openrouter", "mistral", "cerebras", "ollama", "openai", "anthropic", "custom", "mock"
 ]
 SearchProviderName = Literal["duckduckgo", "tavily"]
+
+# Workspace apps: a token each, stored like any other credential.
+WORKSPACE_PROVIDERS: dict[str, ProviderInfo] = {
+    "notion": ProviderInfo(
+        "notion", "Notion", "workspace", base_url="https://api.notion.com/v1",
+        env_vars=("NOTION_API_KEY",), get_key_url="https://www.notion.so/profile/integrations",
+    ),
+    "airtable": ProviderInfo(
+        "airtable", "Airtable", "workspace", base_url="https://api.airtable.com/v0",
+        env_vars=("AIRTABLE_API_KEY",), get_key_url="https://airtable.com/create/tokens",
+    ),
+}
 EmailProviderName = Literal["gmail", "mock"]
 TelegramProviderName = Literal["telegram", "mock"]
 DiscordProviderName = Literal["discord", "mock"]
@@ -285,6 +298,9 @@ class ProviderSettings(BaseModel):
     telegram: TelegramAccount = Field(default_factory=TelegramAccount)
     discord: DiscordAccount = Field(default_factory=DiscordAccount)
     tavily: SearchAccount = Field(default_factory=SearchAccount)
+    # Workspace apps (a token in api_key, like Tavily's key).
+    notion: SearchAccount = Field(default_factory=SearchAccount)
+    airtable: SearchAccount = Field(default_factory=SearchAccount)
     speech: SpeechSettings = Field(default_factory=SpeechSettings)
     # The SSRF guard for user-supplied endpoints (the custom LLM's base URL), like the HTTP
     # Request node's: on unless HTTP_ALLOW_PRIVATE_NETWORKS is true.
@@ -335,6 +351,8 @@ class ProviderSettings(BaseModel):
             return True
         if name == "tavily":
             return self.tavily.api_key is not None
+        if name in WORKSPACE_PROVIDERS:
+            return getattr(self, name).api_key is not None
         return False
 
     def with_account(self, name: str, **fields: Any) -> ProviderSettings:
@@ -398,6 +416,8 @@ class ProviderSettings(BaseModel):
                 "model": get("CUSTOM_OPENAI_MODEL"),
             },
             "tavily": {"api_key": get("TAVILY_API_KEY")},
+            "notion": {"api_key": get("NOTION_API_KEY")},
+            "airtable": {"api_key": get("AIRTABLE_API_KEY")},
             "speech": {
                 "groq_model": get("GROQ_WHISPER_MODEL"),
                 "groq_translate_model": get("GROQ_WHISPER_TRANSLATE_MODEL"),
@@ -430,6 +450,17 @@ def missing_credentials_hint(name: str) -> str:
         )
     if name == "tavily":
         return "no API key configured. Set TAVILY_API_KEY on the server, or connect a tavily credential under Integrations"
+    if name == "notion":
+        return (
+            "no integration token configured. Create an internal integration at notion.so/profile/integrations, "
+            "share the database with it, then set NOTION_API_KEY on the server or connect a notion credential under Integrations"
+        )
+    if name == "airtable":
+        return (
+            "no personal access token configured. Create one at airtable.com/create/tokens (scopes data.records:read "
+            "and data.records:write, with the base added), then set AIRTABLE_API_KEY on the server or connect an "
+            "airtable credential under Integrations"
+        )
     if name == "telegram":
         return (
             "no bot token configured. Create a bot with @BotFather, then set TELEGRAM_BOT_TOKEN on the "

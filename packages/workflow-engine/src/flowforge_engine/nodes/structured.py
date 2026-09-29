@@ -27,6 +27,31 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 2
 
 
+def schema_request(prompt: str, schema: dict[str, Any]) -> str:
+    """`prompt` plus the instruction to reply with JSON matching `schema` (also used by Vision)."""
+    return (
+        f"{prompt}\n\nReply with a single JSON value that matches this JSON Schema exactly, with no prose and no "
+        f"code fences. Include every required field; use empty lists when there is nothing to list.\n"
+        f"{json.dumps(schema, ensure_ascii=False)}"
+    )
+
+
+def retry_request(request: str, problems: list[str]) -> str:
+    return (
+        f"{request}\n\nYour previous reply didn't match the schema: {'; '.join(problems[:10])}. "
+        "Reply again with only the corrected JSON."
+    )
+
+
+def check_reply(reply: str, schema: dict[str, Any]) -> tuple[Any, list[str]]:
+    """(parsed JSON, problems): problems is empty when the reply parses and matches `schema`."""
+    try:
+        data = parse_json_reply(reply)
+    except ValueError as exc:
+        return None, [str(exc)]
+    return data, validate(data, schema)
+
+
 class StructuredOutputConfig(LLMChainConfig):
     prompt: str = Field(min_length=1, description="Instructions and input, e.g. 'Write meeting notes from this transcript: {{stt.text}}'.")
     schema_: dict[str, Any] = Field(
@@ -70,20 +95,13 @@ class StructuredOutputNode(_LLMDocumentNode, NodeDefinition[StructuredOutputConf
 
     async def execute(self, context: NodeContext, config: StructuredOutputConfig) -> NodeResult:
         prompt, truncated = _clip(config.prompt.strip(), config.max_input_chars)
-        schema_text = json.dumps(config.schema_, ensure_ascii=False)
-        request = (
-            f"{prompt}\n\nReply with a single JSON value that matches this JSON Schema exactly, with no prose and no "
-            f"code fences. Include every required field; use empty lists when there is nothing to list.\n{schema_text}"
-        )
+        request = schema_request(prompt, config.schema_)
         system = " ".join(filter(None, [config.system_prompt.strip(), "You reply with JSON only."]))
         fallback_errors: list[dict[str, Any]] = []
         problems: list[str] = []
         reply = ""
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            user_prompt = request if attempt == 1 else (
-                f"{request}\n\nYour previous reply didn't match the schema: {'; '.join(problems[:10])}. "
-                "Reply again with only the corrected JSON."
-            )
+            user_prompt = request if attempt == 1 else retry_request(request, problems)
             try:
                 answer = await generate_with_fallback(
                     context, provider=config.provider, model=config.model, fallback=config.fallback,
@@ -93,18 +111,13 @@ class StructuredOutputNode(_LLMDocumentNode, NodeDefinition[StructuredOutputConf
                 return NodeResult.fail(str(exc), fallback_errors=fallback_errors + exc.errors, attempts=attempt)
             fallback_errors += answer.fallback_errors
             reply = answer.text
-            try:
-                data = parse_json_reply(reply)
-            except ValueError as exc:
-                problems = [str(exc)]
-            else:
-                problems = validate(data, config.schema_)
-                if not problems:
-                    return NodeResult.ok(
-                        data=data, attempts=attempt, input_chars=len(prompt), truncated=truncated,
-                        provider=config.provider, provider_used=answer.provider_used, model=answer.model,
-                        mock=answer.mock, fallback_errors=fallback_errors,
-                    )
+            data, problems = check_reply(reply, config.schema_)
+            if not problems:
+                return NodeResult.ok(
+                    data=data, attempts=attempt, input_chars=len(prompt), truncated=truncated,
+                    provider=config.provider, provider_used=answer.provider_used, model=answer.model,
+                    mock=answer.mock, fallback_errors=fallback_errors,
+                )
             logger.warning("structured reply didn't match the schema", extra={
                 "node_id": context.node_id, "attempt": attempt, "problems": problems[:5],
             })

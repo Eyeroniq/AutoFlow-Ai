@@ -35,6 +35,7 @@ __all__ = [
     "get_llm_provider",
     "get_mailbox_provider",
     "get_search_provider",
+    "get_workspace_client",
     "get_telegram_provider",
     "get_transcriber",
 ]
@@ -181,6 +182,25 @@ def get_transcriber(provider_name: str = "groq", settings: ProviderSettings | No
     key = settings.groq.api_key
     assert key is not None
     return GroqTranscriber(key.get_secret_value(), retry=settings.retry, max_file_mb=speech.groq_max_file_mb)
+
+
+def get_workspace_client(provider_name: str, settings: ProviderSettings | None = None) -> Any:
+    """Notion ("notion", NOTION_API_KEY or the user's token) or Airtable ("airtable",
+    AIRTABLE_API_KEY or the user's token). Raises MissingCredentialsError without a token."""
+    settings = settings if settings is not None else ProviderSettings.from_env()
+    name = provider_name.lower()
+    if name not in ("notion", "airtable"):
+        raise ValueError(f"Unknown workspace app '{provider_name}' (known: notion, airtable)")
+    from flowforge_engine.providers.workspace import AirtableClient, MockAirtable, MockNotion, NotionClient
+
+    if settings.testing:
+        return MockNotion() if name == "notion" else MockAirtable()
+    if not settings.has_credentials(name):
+        raise MissingCredentialsError(name, missing_credentials_hint(name))
+    token = getattr(settings, name).api_key
+    assert token is not None
+    cls = NotionClient if name == "notion" else AirtableClient
+    return cls(token.get_secret_value(), retry=settings.retry)
 
 
 def get_search_provider(provider_name: str = "duckduckgo", settings: ProviderSettings | None = None) -> Any:

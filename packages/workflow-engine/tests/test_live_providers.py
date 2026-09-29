@@ -181,6 +181,62 @@ class TestAudioAndSearch:
         assert results
 
 
+class TestVisionAndWorkspaceApps:
+    async def test_gemini_vision_reads_text_in_an_image(self, tmp_path):
+        require("GEMINI_API_KEY")
+        from PIL import Image, ImageDraw
+
+        from flowforge_engine import LocalFileStore, NodeStatus, execute_node
+
+        path = tmp_path / "label.png"
+        image = Image.new("RGB", (160, 40), "white")
+        ImageDraw.Draw(image).text((8, 12), "ORDER 4217", fill="black")
+        image.resize((640, 160)).save(path)
+        store = LocalFileStore()
+        stored = store.add(path, content_type="image/png")
+        services = ExecutionServices(provider_settings=live_settings(), files=store)
+        schema = {"type": "object", "required": ["order_number"], "properties": {"order_number": {"type": "string"}}}
+        result = await execute_node(
+            node("v", "vision", image=stored.id, prompt="What order number is printed in this image?", schema=schema),
+            make_context(services=services),
+        )
+        assert result.status is NodeStatus.SUCCESS, result.error
+        report("gemini vision", model=result.output["model"], data=result.output["data"], attempts=result.output["attempts"])
+        assert "4217" in result.output["data"]["order_number"]
+
+    async def test_notion_token_create_and_query(self):
+        """Creates a page in NOTION_TEST_DATABASE_ID (shared with the integration), then finds it."""
+        require("NOTION_API_KEY", "NOTION_TEST_DATABASE_ID")
+        from flowforge_engine.providers import get_workspace_client
+
+        notion = get_workspace_client("notion", live_settings())
+        report("notion verify", **await notion.verify())
+        marker = f"FlowForge live test {int(time.time())}"
+        page = await notion.create_page(live_env()["NOTION_TEST_DATABASE_ID"], marker, "# Live test\n- created by pytest -m live")
+        report("notion page", page_id=page["page_id"], url=page["url"], title_property=page["title_property"])
+        found = await notion.query(live_env()["NOTION_TEST_DATABASE_ID"], prop=page["title_property"], operator="equals", value=marker)
+        report("notion query", count=len(found["pages"]), ids=[p["id"] for p in found["pages"]])
+        assert page["page_id"] in [p["id"] for p in found["pages"]]
+
+    async def test_airtable_token_create_and_list(self):
+        """Creates a record in AIRTABLE_TEST_BASE_ID / AIRTABLE_TEST_TABLE (text field
+        AIRTABLE_TEST_FIELD, default "Name"), then lists it back with a formula."""
+        require("AIRTABLE_API_KEY", "AIRTABLE_TEST_BASE_ID", "AIRTABLE_TEST_TABLE")
+        from flowforge_engine.providers import get_workspace_client
+
+        env = live_env()
+        field = env.get("AIRTABLE_TEST_FIELD") or "Name"
+        airtable = get_workspace_client("airtable", live_settings())
+        report("airtable verify", **await airtable.verify())
+        marker = f"FlowForge live test {int(time.time())}"
+        record = await airtable.create_record(env["AIRTABLE_TEST_BASE_ID"], env["AIRTABLE_TEST_TABLE"], {field: marker})
+        report("airtable record", id=record["id"], fields=record["fields"])
+        found = await airtable.list_records(
+            env["AIRTABLE_TEST_BASE_ID"], env["AIRTABLE_TEST_TABLE"], formula=f"{{{field}}} = '{marker}'", max_records=5)
+        report("airtable list", count=len(found), ids=[r["id"] for r in found])
+        assert record["id"] in [r["id"] for r in found]
+
+
 async def test_fallback_chain_reports_the_provider_that_answered():
     """Primary 'ollama' (usually not running here) falls back to Gemini; provider_used says who answered."""
     require("GEMINI_API_KEY")

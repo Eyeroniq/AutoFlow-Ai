@@ -713,7 +713,10 @@ async def list_triggers(db: AsyncSession, workflow: Workflow, *, now: datetime |
         )
     }
     graph = WorkflowGraph.model_validate(workflow.graph_json)
-    deployment = await db.scalar(select(Deployment).where(Deployment.workflow_id == workflow.id))
+    # An undeployed (revoked) deployment is no webhook.
+    deployment = await db.scalar(
+        select(Deployment).where(Deployment.workflow_id == workflow.id, Deployment.revoked_at.is_(None))
+    )
     views = []
     for trigger_type in (TriggerType.SCHEDULE, TriggerType.EMAIL, TriggerType.WEBHOOK):
         row = rows.get(trigger_type)

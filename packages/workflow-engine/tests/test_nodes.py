@@ -178,7 +178,7 @@ class TestLLMNodes:
             "gemini": "gemini-3.5-flash-lite",
             "groq": "openai/gpt-oss-20b",
             "openrouter": "openrouter/free",
-            "mistral": "mistral-small-latest",
+            "mistral": "ministral-8b-latest",
             "cerebras": "qwen-3.8-27b",
             "ollama": "llama3.2",
             "openai": "gpt-4.1-mini",

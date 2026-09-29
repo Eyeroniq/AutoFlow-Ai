@@ -44,6 +44,9 @@ class DeploymentRead(BaseModel):
     outputs: list[DeploymentOutput]
     key_created_at: datetime
     deployed_at: datetime
+    revoked_at: datetime | None = Field(
+        default=None, description="When it was undeployed (the endpoint answers 404); null while it's live."
+    )
     created_at: datetime
     updated_at: datetime
 

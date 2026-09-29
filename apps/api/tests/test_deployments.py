@@ -189,6 +189,73 @@ async def test_rotating_the_key_revokes_the_old_one_and_publishes_nothing(client
     assert "api_key" not in listed[0] and listed[0]["api_key_prefix"] == new_key[:12]
 
 
+# --- undeploying ------------------------------------------------------------------------------
+
+
+async def undeploy(client, user, deployment_id: str):
+    return await client.delete(f"/api/deployments/{deployment_id}", headers=user.headers)
+
+
+async def test_undeploy_revokes_the_endpoint_but_keeps_the_row(client, user, task_queue, shared_session):
+    wid, created = await deployed(client, user)
+    execution_id = (await call(client, created, created["api_key"], {"topic": "x"})).json()["execution_id"]
+
+    response = await undeploy(client, user, created["id"])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == created["id"] and body["revoked_at"] is not None and "api_key" not in body
+
+    # The key that worked a moment ago now gets 404, on both the run and the status endpoint.
+    gone = await call(client, created, created["api_key"], {"topic": "x"})
+    assert gone.status_code == 404 and gone.json()["detail"] == "This deployment was undeployed"
+    status_path = f"/api/v1/deployments/{created['id']}/executions/{execution_id}"
+    assert (await client.get(status_path, headers=key_headers(created["api_key"]))).status_code == 404
+    # Without the key it's the same 401 as any unknown deployment: nothing to probe.
+    assert (await call(client, created, "ffk_wrong", {"topic": "x"})).status_code == 401
+
+    # The row and its run stay for history; the default listing leaves it out.
+    row = await shared_session.get(Deployment, uuid.UUID(created["id"]), populate_existing=True)
+    assert row is not None and row.revoked_at is not None
+    assert (await client.get("/api/deployments", headers=user.headers)).json() == []
+    history = (await client.get(f"/api/deployments?workflow_id={wid}&include_revoked=true", headers=user.headers)).json()
+    assert [d["id"] for d in history] == [created["id"]] and history[0]["revoked_at"] == body["revoked_at"]
+    [execution] = (await client.get("/api/executions", headers=user.headers)).json()
+    assert execution["id"] == execution_id and execution["deployment_id"] == created["id"]
+    # The Triggers panel no longer offers it as the webhook.
+    triggers = (await client.get(f"/api/workflows/{wid}/triggers", headers=user.headers)).json()
+    webhook = next(t for t in triggers["triggers"] if t["type"] == "webhook")
+    assert webhook["webhook"] is None
+    assert any(w.startswith("Deploy the workflow") for w in webhook["warnings"])
+
+    # Undeploying again changes nothing; rotating a revoked deployment's key is refused.
+    again = await undeploy(client, user, created["id"])
+    assert again.status_code == 200 and again.json()["revoked_at"] == body["revoked_at"]
+    assert (await rotate(client, user, created["id"])).status_code == 409
+
+
+async def test_deploying_again_after_undeploy_issues_a_new_key(client, user, task_queue):
+    wid, created = await deployed(client, user)
+    await undeploy(client, user, created["id"])
+    response = await client.post("/api/deployments", json={"workflow_id": wid}, headers=user.headers)
+    assert response.status_code == 200, response.text
+    redeployed = response.json()
+    assert redeployed["id"] == created["id"] and redeployed["revoked_at"] is None
+    assert redeployed["api_key"] and redeployed["api_key"] != created["api_key"]
+    assert redeployed["version"] == created["version"] + 1
+    # The revoked key never comes back; the new one works.
+    assert (await call(client, redeployed, created["api_key"], {"topic": "x"})).status_code == 401
+    assert (await call(client, redeployed, redeployed["api_key"], {"topic": "x"})).status_code == 202
+
+
+async def test_undeploy_is_owner_only(client, user_factory):
+    owner, intruder = await user_factory(), await user_factory()
+    _, created = await deployed(client, owner)
+    assert (await undeploy(client, intruder, created["id"])).status_code == 404
+    assert (await client.delete(f"/api/deployments/{created['id']}")).status_code == 401
+    assert (await undeploy(client, owner, str(uuid.uuid4()))).status_code == 404
+    assert (await call(client, created, created["api_key"], {"topic": "x"})).status_code == 202
+
+
 async def test_an_invalid_graph_is_not_deployed(client, user):
     wid = await create_workflow(client, user, {"nodes": [{"id": "x", "type": "nope"}]})
     response = await client.post("/api/deployments", json={"workflow_id": wid}, headers=user.headers)

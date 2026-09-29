@@ -97,6 +97,7 @@ def deployment_read(deployment: Deployment) -> DeploymentRead:
         outputs=outputs,
         key_created_at=deployment.key_created_at,
         deployed_at=deployment.deployed_at,
+        revoked_at=deployment.revoked_at,
         created_at=deployment.created_at,
         updated_at=deployment.updated_at,
     )
@@ -135,6 +136,12 @@ async def deploy_workflow(
         deployment = Deployment(id=uuid.uuid4(), workflow_id=workflow.id, owner_id=workflow.owner_id, version=1)
         key = _issue_key(deployment)
         db.add(deployment)
+    elif deployment.revoked_at is not None:
+        # Deploying an undeployed workflow brings the endpoint back with a new key: the key
+        # that was revoked never works again.
+        deployment.version += 1
+        deployment.revoked_at = None
+        key = _issue_key(deployment)
     else:
         deployment.version += 1
     deployment.name = workflow.name
@@ -148,6 +155,17 @@ async def deploy_workflow(
         "new_key": key is not None,
     })
     return deployment, key, created
+
+
+async def undeploy(db: AsyncSession, deployment: Deployment) -> None:
+    """Revoke the deployment: from this commit on its endpoint answers 404, even with its key
+    (redeploying issues a new key, so the old one never works again). The row, its
+    snapshot, and its runs stay for history. Undeploying twice is a no-op."""
+    if deployment.revoked_at is None:
+        deployment.revoked_at = utcnow()
+        await db.commit()
+        await db.refresh(deployment)
+        logger.info("workflow undeployed", extra={"deployment_id": str(deployment.id), "workflow_id": str(deployment.workflow_id)})
 
 
 async def rotate_api_key(db: AsyncSession, deployment: Deployment) -> str:

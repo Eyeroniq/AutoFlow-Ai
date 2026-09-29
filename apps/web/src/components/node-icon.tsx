@@ -2,6 +2,7 @@ import {
   AudioLines,
   Bot,
   Braces,
+  Eye,
   Box,
   Brain,
   Cpu,
@@ -18,6 +19,8 @@ import {
   Mail,
   MessageSquare,
   Newspaper,
+  NotebookPen,
+  NotebookTabs,
   Plug,
   Repeat,
   Route,
@@ -26,6 +29,8 @@ import {
   Search,
   Send,
   Sparkles,
+  Table,
+  TableProperties,
   Tags,
   TextQuote,
   Timer,
@@ -67,6 +72,11 @@ const ICONS: Record<string, LucideIcon> = {
   wind: Wind,
   gauge: Gauge,
   plug: Plug,
+  eye: Eye,
+  "notebook-pen": NotebookPen,
+  "notebook-tabs": NotebookTabs,
+  table: Table,
+  "table-properties": TableProperties,
 };
 
 export function NodeIcon({ name, className = "size-4" }: { name?: string; className?: string }) {

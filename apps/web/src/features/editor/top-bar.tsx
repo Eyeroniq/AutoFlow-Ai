@@ -11,6 +11,7 @@ import { useRun } from "./run-controller";
 import { getEditorStore, useEditor } from "./store";
 import { overallTone, type TriggerTone } from "./triggers";
 import { useTriggers } from "./triggers-panel";
+import { UndeployButton } from "./deploy-dialog";
 import { useEditorUi } from "./ui-store";
 
 const TRIGGER_DOT: Record<TriggerTone, string> = {
@@ -126,6 +127,7 @@ export function TopBar({ onValidate, onRun }: { onValidate: () => void; onRun: (
   const setUi = useEditorUi((s) => s.set);
   const { stop } = useRun();
   const active = runStatus === "pending" || runStatus === "running";
+  const workflowId = useEditor((s) => s.workflowId);
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 bg-indigo-700 px-3 text-white">
@@ -185,6 +187,7 @@ export function TopBar({ onValidate, onRun }: { onValidate: () => void; onRun: (
         >
           <Rocket className="size-4" aria-hidden /> Deploy
         </button>
+        {workflowId && <UndeployButton workflowId={workflowId} className={barButton} />}
         {active ? (
           <button
             type="button"

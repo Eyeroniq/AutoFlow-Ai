@@ -15,6 +15,7 @@ from flowforge_engine.providers.factory import (
     get_llm_provider,
     get_mailbox_provider,
     get_search_provider,
+    get_workspace_client,
     get_telegram_provider,
     get_transcriber,
 )
@@ -42,6 +43,7 @@ class ExecutionServices:
         messaging_providers: Mapping[str, Any] | None = None,
         transcribers: Mapping[str, Any] | None = None,
         search_providers: Mapping[str, Any] | None = None,
+        workspace_clients: Mapping[str, Any] | None = None,
         http_transport: httpx.AsyncBaseTransport | None = None,
         files: FileStore | None = None,
         allow_private_network: bool | None = None,
@@ -56,9 +58,11 @@ class ExecutionServices:
         # Speech-to-text ("groq", "local") and web search ("duckduckgo", "tavily").
         self._transcribers: dict[str, Any] = dict(transcribers or {})
         self._search: dict[str, Any] = dict(search_providers or {})
+        # Notion ("notion") and Airtable ("airtable").
+        self._workspace: dict[str, Any] = dict(workspace_clients or {})
         self._injected = (
             set(self._llm) | set(self._email) | set(self._mailbox) | set(self._messaging)
-            | set(self._transcribers) | set(self._search)
+            | set(self._transcribers) | set(self._search) | set(self._workspace)
         )
         self.state: NodeStateStore = state if state is not None else MemoryStateStore()
         self.http_transport = http_transport
@@ -124,6 +128,12 @@ class ExecutionServices:
         if provider_name not in self._search:
             self._search[provider_name] = get_search_provider(provider_name, self.settings)
         return self._search[provider_name]
+
+    def workspace(self, provider_name: str) -> Any:
+        """The Notion or Airtable client. Raises MissingCredentialsError without a token."""
+        if provider_name not in self._workspace:
+            self._workspace[provider_name] = get_workspace_client(provider_name, self.settings)
+        return self._workspace[provider_name]
 
     def has_credentials(self, provider_name: str) -> bool:
         return provider_name in self._injected or self.settings.has_credentials(provider_name)

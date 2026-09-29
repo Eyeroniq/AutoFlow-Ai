@@ -23,8 +23,17 @@ from flowforge_engine.nodes.logic import ConditionNode, DelayNode
 from flowforge_engine.nodes.notify import DiscordWebhookNode, TelegramNode
 from flowforge_engine.nodes.search import WebSearchNode
 from flowforge_engine.nodes.structured import StructuredOutputNode
+from flowforge_engine.nodes.vision import VisionNode
+from flowforge_engine.nodes.workspace import (
+    AirtableCreateNode,
+    AirtableListNode,
+    NotionCreatePageNode,
+    NotionQueryNode,
+)
 
 __all__ = [
+    "AirtableCreateNode",
+    "AirtableListNode",
     "AnthropicNode",
     "CerebrasNode",
     "ConditionNode",
@@ -42,6 +51,8 @@ __all__ = [
     "InputNode",
     "JoinNode",
     "LLMNode",
+    "NotionCreatePageNode",
+    "NotionQueryNode",
     "MistralNode",
     "OCRNode",
     "OllamaNode",
@@ -55,6 +66,7 @@ __all__ = [
     "SummarizeNode",
     "TelegramNode",
     "TextNode",
+    "VisionNode",
     "WebPageNode",
     "WebSearchNode",
 ]

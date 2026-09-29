@@ -18,6 +18,7 @@ from flowforge_engine.providers import (
     LLM_PROVIDERS,
     MESSAGING_PROVIDERS,
     SEARCH_PROVIDERS,
+    WORKSPACE_PROVIDERS,
     DiscordAccount,
     EmailAccount,
     ProviderInfo,
@@ -51,6 +52,8 @@ CONNECTABLE: dict[str, ProviderInfo] = {
     **MESSAGING_PROVIDERS,
     # DuckDuckGo needs no credential.
     "tavily": SEARCH_PROVIDERS["tavily"],
+    # Notion and Airtable: a token each.
+    **WORKSPACE_PROVIDERS,
 }
 # Providers whose base URL the user may set: a local Ollama, OpenAI (or a proxy), and any
 # OpenAI-compatible endpoint.
@@ -129,13 +132,14 @@ def normalize_credential(provider: str, body: ConnectRequest) -> dict[str, Any]:
     if info.kind == "messaging":
         return _messaging_credential(provider, body, fields)
 
-    if info.kind == "search":
+    if info.kind in ("search", "workspace"):
         stray = fields - {"api_key"}
         if stray:
             raise CredentialInputError(f"{provider} doesn't take {', '.join(sorted(stray))}; send api_key")
         api_key = secret(body.api_key)
         if not api_key:
-            raise CredentialInputError(f"{provider} needs an 'api_key' (get one at {info.get_key_url})")
+            what = "an 'api_key' (its token)" if info.kind == "workspace" else "an 'api_key'"
+            raise CredentialInputError(f"{provider} needs {what} (get one at {info.get_key_url})")
         return {"api_key": api_key}
 
     stray = fields & {
@@ -266,8 +270,8 @@ def provider_settings_for(user_credentials: dict[str, dict[str, Any]]) -> Provid
             merged = merged.model_copy(update={"telegram": TelegramAccount.model_validate(data)})
         elif provider == "discord":
             merged = merged.model_copy(update={"discord": DiscordAccount.model_validate(data)})
-        elif provider == "tavily":
-            merged = merged.model_copy(update={"tavily": SearchAccount.model_validate(data)})
+        elif provider in ("tavily", *WORKSPACE_PROVIDERS):
+            merged = merged.model_copy(update={provider: SearchAccount.model_validate(data)})
         elif provider == "custom":
             # A user's endpoint replaces the server's entirely (a key for one server is no use on another).
             merged = merged.model_copy(update={"custom": type(merged.custom).model_validate(data)})
@@ -342,6 +346,9 @@ async def _verify(services: ExecutionServices, provider: str) -> dict[str, Any]:
     if provider == "tavily":
         # GET /usage: proves the key and shows the credits left, without a search.
         return await services.search("tavily").verify()
+    if provider in WORKSPACE_PROVIDERS:
+        # Notion: GET /users/me (the integration's bot). Airtable: GET /meta/whoami. Nothing changes.
+        return await services.workspace(provider).verify()
     details: dict[str, Any] = {"smtp": await services.email(provider).verify()}
     details["imap"] = await services.mailbox(provider).verify()
     return details

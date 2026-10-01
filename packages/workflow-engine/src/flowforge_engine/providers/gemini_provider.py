@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 DEFAULT_MODEL = LLM_PROVIDERS["gemini"].default_model or ""
 DEFAULT_EMBEDDING_MODEL = LLM_PROVIDERS["gemini"].embedding_model or ""
+# Retrieval task types: documents and queries are embedded slightly differently.
+GEMINI_TASK_TYPES = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
 
 
 def _transport_errors() -> tuple[type[BaseException], ...]:
@@ -234,21 +236,41 @@ class GeminiProvider:
             reason = self._empty_reason(last) if last is not None else "empty stream"
             raise ProviderError(self.name, f"no text in response ({reason})")
 
-    async def embed(self, text: str, model: str | None = None) -> list[float]:
-        from google.genai import errors
+    async def embed(
+        self, text: str, model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[float]:
+        return (await self.embed_many([text], model, dimensions, task))[0]
+
+    async def embed_many(
+        self, texts: list[str], model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[list[float]]:
+        """One request for up to EMBED_BATCH texts. `dimensions` asks for a shorter vector
+        (Matryoshka truncation); `task` is "document" or "query" (retrieval task types)."""
+        from google.genai import errors, types
+
+        options: dict[str, Any] = {}
+        if dimensions:
+            options["output_dimensionality"] = dimensions
+        if task in GEMINI_TASK_TYPES:
+            options["task_type"] = GEMINI_TASK_TYPES[task]
+        config = types.EmbedContentConfig(**options) if options else None
+        # One Content per text: a plain list of strings would become one Content with
+        # several parts, which embeds as a single vector.
+        contents = [types.Content(parts=[types.Part(text=text)]) for text in texts]
 
         async def call() -> Any:
             try:
                 return await self._client.aio.models.embed_content(
-                    model=model or self._embedding_model, contents=text
+                    model=model or self._embedding_model, contents=contents, config=config
                 )
             except (errors.APIError, *_transport_errors()) as exc:
                 raise self._error(exc) from exc
 
         response = await with_retries(call, self._retry)
-        if not response.embeddings or response.embeddings[0].values is None:
-            raise ProviderError(self.name, "embedding response contained no values")
-        return list(response.embeddings[0].values)
+        vectors = [list(e.values) for e in (response.embeddings or []) if e.values is not None]
+        if len(vectors) != len(texts):
+            raise ProviderError(self.name, f"embedding response had {len(vectors)} vectors for {len(texts)} texts")
+        return vectors
 
     async def verify(self, model: str | None = None) -> dict[str, Any]:
         """Fetches the model's metadata: proves the key works and the model exists."""

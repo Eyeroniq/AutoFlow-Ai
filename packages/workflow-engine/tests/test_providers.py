@@ -483,6 +483,14 @@ class TestGeminiAdapter:
         assert await self.provider(transport).embed("hello") == [0.5, 0.25]
         assert "gemini-embedding-2" in captured[0].url.path
 
+    async def test_embed_many_asks_for_the_size_and_task_in_one_request(self):
+        transport, captured = recorder(json_response({"embeddings": [{"values": [0.1]}, {"values": [0.2]}]}))
+        vectors = await self.provider(transport).embed_many(["a", "b"], dimensions=768, task="query")
+        assert vectors == [[0.1], [0.2]] and len(captured) == 1
+        body = json.loads(captured[0].content)
+        assert body["requests"][0]["outputDimensionality"] == 768
+        assert body["requests"][0]["taskType"] == "RETRIEVAL_QUERY" and len(body["requests"]) == 2
+
     async def test_verify_gets_the_model(self):
         transport, captured = recorder(json_response({
             "name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash",

@@ -17,15 +17,16 @@ GROUPS = {
     "sources": "Data sources",
     "integration": "Integrations",
     "documents": "Documents",
+    "knowledge": "Knowledge",
     "audio": "Audio",
 }
-GROUP_ORDER = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Audio"]
+GROUP_ORDER = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Knowledge", "Audio"]
 
 
 class NodeTypeRead(BaseModel):
     type: str
     category: str = Field(description="Engine category: io, logic, ai, integration, ...")
-    group: str = Field(description="Library group: General, LLM, Lists, Data sources, Integrations, Documents, Audio.")
+    group: str = Field(description="Library group: General, LLM, Lists, Data sources, Integrations, Documents, Knowledge, Audio.")
     label: str
     description: str
     icon: str = Field(description="lucide icon name, e.g. 'sparkles'.")

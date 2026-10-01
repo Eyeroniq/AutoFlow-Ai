@@ -1,5 +1,6 @@
 import {
   AudioLines,
+  Binary,
   Bot,
   Braces,
   Eye,
@@ -12,7 +13,9 @@ import {
   GitBranch,
   Globe,
   Inbox,
+  Library,
   ListCollapse,
+  ListOrdered,
   LogIn,
   LogOut,
   type LucideIcon,
@@ -26,7 +29,9 @@ import {
   Route,
   Rss,
   ScanText,
+  Scissors,
   Search,
+  SearchCode,
   Send,
   Sparkles,
   Table,
@@ -77,6 +82,11 @@ const ICONS: Record<string, LucideIcon> = {
   "notebook-tabs": NotebookTabs,
   table: Table,
   "table-properties": TableProperties,
+  library: Library,
+  scissors: Scissors,
+  binary: Binary,
+  "search-code": SearchCode,
+  "list-ordered": ListOrdered,
 };
 
 export function NodeIcon({ name, className = "size-4" }: { name?: string; className?: string }) {
@@ -103,6 +113,7 @@ const CATEGORY: Record<string, CategoryStyle> = {
   lists: { accent: "bg-teal-500", tile: "bg-teal-50 text-teal-700", color: "#14b8a6" },
   sources: { accent: "bg-orange-500", tile: "bg-orange-50 text-orange-700", color: "#f97316" },
   audio: { accent: "bg-fuchsia-500", tile: "bg-fuchsia-50 text-fuchsia-700", color: "#d946ef" },
+  knowledge: { accent: "bg-cyan-500", tile: "bg-cyan-50 text-cyan-700", color: "#06b6d4" },
 };
 
 export function categoryStyle(category?: string): CategoryStyle {

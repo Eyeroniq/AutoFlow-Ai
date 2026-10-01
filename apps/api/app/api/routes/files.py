@@ -7,6 +7,7 @@ from starlette.formparsers import MultiPartException
 
 from app.api.deps import CurrentUser, DbSession
 from app.core.config import settings
+from app.models.file import UploadedFile
 from app.schemas.file import FileRead
 from app.services.files import (
     ALLOWED_TYPES,
@@ -63,6 +64,28 @@ async def _owned(db: DbSession, user: CurrentUser, file_id: uuid.UUID):
     },
 )
 async def upload(request: Request, db: DbSession, user: CurrentUser) -> FileRead:
+    return FileRead.model_validate(await receive_upload(request, db, user))
+
+
+# The multipart body of an upload (also used by POST /api/knowledge-bases/{id}/documents).
+UPLOAD_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {"file": {"type": "string", "format": "binary"}},
+                }
+            }
+        },
+    }
+}
+
+
+async def receive_upload(request: Request, db: DbSession, user: CurrentUser) -> UploadedFile:
+    """Store the multipart field `file` as the user's upload (size and type checked)."""
     # Check the size before the body is parsed (and spooled) at all.
     declared = request.headers.get("content-length")
     if declared is None:
@@ -88,7 +111,7 @@ async def upload(request: Request, db: DbSession, user: CurrentUser) -> FileRead
             raise HTTPException(exc.status_code, detail=str(exc)) from None
     finally:
         await form.close()
-    return FileRead.model_validate(record)
+    return record
 
 
 @router.get("", response_model=list[FileRead], summary="List your uploaded files (newest first)")

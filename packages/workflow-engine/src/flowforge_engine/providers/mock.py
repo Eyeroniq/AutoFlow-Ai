@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator
@@ -56,12 +57,27 @@ class MockLLMProvider:
         for index, word in enumerate(words):
             yield word if index == len(words) - 1 else word + " "
 
-    async def embed(self, text: str, model: str | None = None) -> list[float]:
-        # Stable across runs: derived from a hash of the text, normalized to unit length.
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        raw = [(byte / 127.5) - 1.0 for byte in digest[: self.EMBEDDING_DIMENSIONS]]
-        norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+    async def embed(
+        self, text: str, model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[float]:
+        """A hashed bag of words, normalized to unit length: stable across runs, and texts
+        sharing words point the same way, so retrieval works without any key."""
+        size = dimensions or self.EMBEDDING_DIMENSIONS
+        raw = [0.0] * size
+        words = re.findall(r"\w+", text.lower()) or [text]
+        for word in words:
+            digest = hashlib.sha256(word.encode("utf-8")).digest()
+            raw[int.from_bytes(digest[:4], "big") % size] += 1.0 if digest[4] & 1 else -1.0
+        if not any(raw):  # words cancelled out: fall back to the whole text's hash
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            raw[int.from_bytes(digest[:4], "big") % size] = 1.0
+        norm = math.sqrt(sum(v * v for v in raw))
         return [round(v / norm, 6) for v in raw]
+
+    async def embed_many(
+        self, texts: list[str], model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[list[float]]:
+        return [await self.embed(text, model, dimensions, task) for text in texts]
 
     async def verify(self, model: str | None = None) -> dict[str, Any]:
         return {"mock": True, "model": model or "mock"}

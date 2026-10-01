@@ -40,6 +40,7 @@ from app.models.integration import Integration
 from app.models.user import User
 from app.schemas.integration import ConnectRequest, IntegrationRead, IntegrationTestResult
 from app.services.files import DbFileStore
+from app.services.knowledge import DbKnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -283,12 +284,13 @@ def provider_settings_for(user_credentials: dict[str, dict[str, Any]]) -> Provid
 async def build_execution_services(
     db: AsyncSession, user: User, *, state: NodeStateStore | None = None
 ) -> ExecutionServices:
-    """Provider credentials, the user's uploaded files, node state (`state`; in memory when
+    """Provider credentials, the user's uploaded files and knowledge bases, node state (`state`; in memory when
     omitted), and the SSRF policy for a run."""
     credentials = await load_user_credentials(db, user.id)
     return ExecutionServices(
         provider_settings=provider_settings_for(credentials),
         files=DbFileStore(db, user.id),
+        knowledge=DbKnowledgeStore(db, user.id),
         allow_private_network=settings.HTTP_ALLOW_PRIVATE_NETWORKS,
         state=state,
     )

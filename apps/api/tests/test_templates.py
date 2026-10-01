@@ -19,7 +19,10 @@ from app.services.node_state import DbNodeStateStore
 from app.services.templates import CATALOG, fit_graph, sync_templates
 from tests.support import create_workflow
 
-TEMPLATE_SLUGS = ["morning-digest", "invoice-extractor", "email-triage", "job-alert-filter", "meeting-notes", "web-research"]
+TEMPLATE_SLUGS = [
+    "morning-digest", "invoice-extractor", "email-triage", "job-alert-filter", "meeting-notes", "web-research",
+    "pdf-to-knowledge-base", "document-qa",
+]
 
 
 @pytest.fixture
@@ -285,3 +288,12 @@ async def test_a_users_bot_replaces_the_servers_including_the_chat(monkeypatch):
     merged = credentials.provider_settings_for({"telegram": {"bot_token": BOT_TOKEN}})
     assert merged.telegram.bot_token.get_secret_value() == BOT_TOKEN and merged.telegram.chat_id is None
     assert credentials.provider_settings_for({}).telegram.chat_id == "server-chat"
+
+
+async def test_knowledge_templates_create_the_default_knowledge_base_once(client, user, catalog):
+    for slug in ("pdf-to-knowledge-base", "document-qa"):
+        response = await client.post(f"/api/templates/{slug}/use", json={}, headers=user.headers)
+        assert response.status_code == 201, response.text
+        assert response.json()["graph"]["variables"][0] == {"key": "knowledge_base", "value": "My documents", "type": "workflow"}
+    bases = (await client.get("/api/knowledge-bases", headers=user.headers)).json()
+    assert [kb["name"] for kb in bases] == ["My documents"]

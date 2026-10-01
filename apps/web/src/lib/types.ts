@@ -312,6 +312,60 @@ export interface UploadedFile {
   created_at: string;
 }
 
+export type EmbeddingProvider = "gemini" | "openai" | "ollama" | "mock";
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string;
+  embedding_provider: EmbeddingProvider;
+  embedding_model: string | null;
+  dimensions: number;
+  chunk_size: number;
+  chunk_overlap: number;
+  document_count: number;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeBaseCreate {
+  name: string;
+  description?: string;
+  embedding_provider: EmbeddingProvider;
+  embedding_model?: string | null;
+  chunk_size?: number;
+  chunk_overlap?: number;
+}
+
+export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
+
+export interface KnowledgeDocument {
+  id: string;
+  knowledge_base_id: string;
+  file_id: string | null;
+  filename: string;
+  status: DocumentStatus;
+  source_type: "pdf" | "image" | "text";
+  method: string | null;
+  chunk_count: number;
+  char_count: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeSearchHit {
+  rank: number;
+  chunk_id: string;
+  document_id: string;
+  filename: string;
+  chunk_index: number;
+  page: number | null;
+  score: number;
+  content: string;
+}
+
 /** What an Input node of type file outputs (and document nodes accept as `file`). */
 export interface FileDescription {
   file_id: string;

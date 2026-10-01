@@ -233,14 +233,30 @@ class OpenAICompatibleProvider:
         if not produced:
             raise ProviderError(self.name, f"no text in response (finish_reason={finish_reason})")
 
-    async def embed(self, text: str, model: str | None = None) -> list[float]:
+    async def embed(
+        self, text: str, model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[float]:
         model = model or self._embedding_model
         if not self.preset.supports_embeddings or not model:
             raise ProviderNotSupportedError(
                 self.name, f"{self.preset.label} has no embeddings API here; use the gemini or ollama provider"
             )
-        response = await self._call(lambda: self._client.embeddings.create(model=model, input=text))
-        return list(response.data[0].embedding)
+        return (await self.embed_many([text], model, dimensions, task))[0]
+
+    async def embed_many(
+        self, texts: list[str], model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[list[float]]:
+        """`dimensions` is sent only to OpenAI (text-embedding-3 can shorten its vectors);
+        Ollama's models have a fixed size. `task` is unused here."""
+        model = model or self._embedding_model
+        if not self.preset.supports_embeddings or not model:
+            raise ProviderNotSupportedError(
+                self.name, f"{self.preset.label} has no embeddings API here; use the gemini or ollama provider"
+            )
+        extra: dict[str, Any] = {"dimensions": dimensions} if dimensions and self.name == "openai" else {}
+        response = await self._call(lambda: self._client.embeddings.create(model=model, input=list(texts), **extra))
+        ordered = sorted(response.data, key=lambda item: item.index)
+        return [list(item.embedding) for item in ordered]
 
     async def verify(self, model: str | None = None) -> dict[str, Any]:
         if self.preset.verify == "key":

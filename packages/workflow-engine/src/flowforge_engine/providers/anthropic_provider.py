@@ -163,7 +163,9 @@ class AnthropicProvider:
         finally:
             await manager.__aexit__(None, None, None)
 
-    async def embed(self, text: str, model: str | None = None) -> list[float]:
+    async def embed(
+        self, text: str, model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[float]:
         raise ProviderNotSupportedError(
             self.name, "Anthropic does not offer an embeddings API; use the gemini or ollama provider"
         )

@@ -8,6 +8,7 @@ from app.api.routes import (
     files,
     health,
     integrations,
+    knowledge,
     nodes,
     templates,
     triggers,
@@ -24,6 +25,7 @@ api_router.include_router(executions.router)
 api_router.include_router(integrations.router)
 api_router.include_router(nodes.router)
 api_router.include_router(files.router)
+api_router.include_router(knowledge.router)
 api_router.include_router(deployments.router)
 # /api/v1/deployments/{id}/run: authenticated by the deployment's API key.
 api_router.include_router(deployment_runs.router)

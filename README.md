@@ -49,7 +49,7 @@ A visual AI workflow automation builder. This repository is being built in phase
   **Telegram** and **Discord Webhook** nodes with real connection tests. Four seeded
   [templates](#templates) with one-click **Use template**: Morning Digest, Invoice Extractor
   (with a CSV download), Email Triage, and Job Alert Filter.
-- **Phase 6 (this state):** audio, web search, and more free LLMs.
+- **Phase 6:** audio, web search, and more free LLMs.
   [Speech to Text](#audio-speech-to-text) transcribes audio and video (Groq's free Whisper, or
   faster-whisper on the worker's CPU with no key), with ffmpeg splitting long recordings at
   pauses and stitching the timestamps back together, on its own `audio` queue and
@@ -59,6 +59,12 @@ A visual AI workflow automation builder. This repository is being built in phase
   schema. New LLM providers: **Mistral**, **Cerebras**, and **Custom (OpenAI-compatible)** with
   the SSRF guard on its base URL (GitHub Models was retired by GitHub on 2026-07-30, so it
   isn't offered). Two more templates: **Meeting Notes** and **Web Research**.
+- **Knowledge bases (this state):** [RAG](#knowledge-bases-rag) on Postgres + pgvector. Upload
+  PDFs, scans, or text on the **Knowledge** page: the ocr workers read them (text layer, OCR for
+  scanned pages), chunk them at sentence boundaries, and embed them (Gemini, OpenAI, or Ollama,
+  768 dimensions, HNSW cosine index), with live status and a test search. Five nodes (Add
+  Document, Chunker, Embedding, Retriever, Reranker) and two templates: **PDF to Knowledge
+  Base** and **Document Q&A**, whose answers cite `[n]` sources that lead back to the exact chunk.
 
 ## Stack
 
@@ -71,7 +77,7 @@ A visual AI workflow automation builder. This repository is being built in phase
 | Auth     | JWT (python-jose, HS256), passlib + bcrypt, slowapi rate limiting           |
 | Async    | Celery 5.6 (Redis broker + result backend), Redis pub/sub, WebSockets; one worker service per queue |
 | Documents | PyMuPDF (PDF text, page rendering), Tesseract 5 via pytesseract (OCR), Pillow |
-| Data     | PostgreSQL 16, Redis 7                                                      |
+| Data     | PostgreSQL 16 with pgvector (knowledge-base embeddings, HNSW), Redis 7     |
 | Tests    | pytest + pytest-asyncio against a real Postgres test database; Vitest (web units); Playwright (end to end, real stack); Locust (load) |
 | Infra    | Docker Compose                                                              |
 
@@ -750,6 +756,83 @@ Database. With `AIRTABLE_API_KEY`, `AIRTABLE_TEST_BASE_ID`, and `AIRTABLE_TEST_T
 `AIRTABLE_TEST_FIELD`, a text field, default `Name`), it creates a record and lists it back with
 a formula. Without them the tests skip and name the missing variables.
 
+## Knowledge bases (RAG)
+
+![A knowledge base with two documents and a test search](docs/screenshots/knowledge-base.png)
+
+A knowledge base is a named collection of your documents that pipelines search **by meaning**:
+"How much does the company pay for my internet?" finds the paragraph about the "40 USD per
+month for internet" allowance even though the words differ. **Knowledge** in the top bar
+(`/knowledge`) lists yours; open one to add documents, watch them process, and try a search.
+
+**How a document goes in.** Upload a PDF, an image, or a plain-text file (the same type checks
+and size limits as `POST /api/files`). The API records it as `pending` and queues
+`flowforge.ingest_document` on the **ocr** workers, which:
+
+1. read the text: each PDF page's text layer, OCR (Tesseract) for scanned pages and images,
+   or the file as UTF-8 text (shown as *PDF text*, *OCR*, *PDF text + OCR*, or *plain text*);
+2. split it into chunks of at most `chunk_size` characters (default 1000), ending at a
+   paragraph, line, sentence, or word boundary when one falls in the chunk's second half,
+   with `chunk_overlap` characters (default 150) shared between neighbours, starting on a
+   word. Each PDF page is chunked on its own, so every chunk can cite one page;
+3. embed the chunks in batches of 100 (one request each) and store them in Postgres with
+   **pgvector** (`kb_chunks.embedding vector(768)`, an HNSW index on cosine distance);
+4. mark the document `ready` (or `failed`, with the reason, and a **Retry** button).
+
+The page polls while anything is `pending` or `processing`. A redelivered task leaves a ready
+document alone, and one stuck in `processing` for 30 minutes (its worker died) is taken over.
+
+**Embeddings.** Every knowledge base stores 768-number vectors, whichever model made them:
+Gemini (`gemini-embedding-2`, the default; free key) and OpenAI (`text-embedding-3-small`) are
+asked for 768 numbers, longer vectors are truncated and re-normalized, and a model that
+returns fewer is refused. Ollama's `nomic-embed-text` is 768 natively. Documents and queries
+use Gemini's `RETRIEVAL_DOCUMENT` / `RETRIEVAL_QUERY` task types. **Mock** embeds a hashed bag
+of words (no key, matches shared words only), for trying it out. A knowledge base keeps the
+model it was created with: vectors from different models can't be compared, so the model and
+chunking can't change later (create a new knowledge base instead).
+
+**Free-tier limit.** Gemini's free tier embeds 100 texts per minute per project, and every
+chunk counts: a 16-page paper is about 75 chunks, so a second document right after it hits the
+limit. Ingestion then waits as long as Gemini asks (up to 2 minutes at a time, 5 times per batch;
+1 minute inside a pipeline's Add Document) and carries on, so large uploads take longer instead
+of failing. Searches don't wait: a rate-limited search fails at once with Gemini's message.
+
+**Nodes** (the **Knowledge** group in the editor):
+
+| Node | What it does | Main outputs |
+| ---- | ------------ | ------------ |
+| **Knowledge Base: Add Document** (`kb_add_document`) | Reads, chunks, embeds, and stores a file in the knowledge base named in `knowledge_base` (its name or id), inside the run, on the ocr queue | `document_id`, `status` (`ready`), `chunk_count`, `char_count`, `pages`, `method` |
+| **Chunker** (`chunker`) | Splits any text (`chunk_size`, `chunk_overlap`) | `chunks` (`index`, `text`, `start`, `end`), `count` |
+| **Embedding** (`embedding`) | Embeds a text or a list of texts (`provider`, `dimensions`, `task`) | `embedding` (one text), `embeddings`, `dimensions` |
+| **Retriever** (`retriever`) | The `top_k` chunks closest to `query`, optionally above `min_score` (cosine, -1 to 1) | `results` (`rank`, `citation` "[n]", `score`, `content`, `filename`, `page`, `chunk_id`, `document_id`), `context` (numbered sources for a prompt) |
+| **Reranker** (`reranker`) | An LLM scores each result 0-10 against the question (JSON, validated, one retry); keeps the best `top_n`, renumbered | `results` (plus `rerank_score`, `retrieval_rank`), `context`, `reranked` |
+
+If the reranker's reply can't be used (or the provider fails), it keeps the retrieval order
+and says so (`reranked: false`, `warning`); turn off `keep_order_on_failure` to fail instead.
+
+**Templates.** **PDF to Knowledge Base** (file → Add Document → Output) and **Document Q&A**
+(question → Retriever (8) → Reranker (4) → LLM answer citing `[n]` with a `Sources:` list of
+file and page → Output with the answer and the sources). Both read the knowledge base name
+from the `knowledge_base` variable (default **My documents**), which **Use template** creates
+if you don't have it, embedded with Gemini (or OpenAI, or mock without either).
+
+**Following a citation.** Each source in the answer carries its `chunk_id`;
+`GET /api/knowledge-bases/{id}/chunks/{chunk_id}` returns that chunk's text, file, page, and
+character offsets in the page (or file) it came from.
+
+**Existing installs: switching the Postgres image.** The stack now uses
+`pgvector/pgvector:pg16` instead of `postgres:16-alpine`. Same Postgres major version, so the
+data volume works as it is, but the new image sorts text with glibc instead of musl. After the
+first start on an existing volume, rebuild the indexes once:
+
+```bash
+docker compose up -d postgres
+docker compose exec postgres psql -U flowforge -d flowforge -c "REINDEX DATABASE flowforge;"
+```
+
+Then `docker compose up -d --build` (the API applies the knowledge-base migration on start).
+A fresh volume (`docker compose down -v`) needs nothing.
+
 ## Notifications: Telegram and Discord
 
 Both split messages over the service's limit into several (Telegram 4,096 characters, Discord
@@ -803,7 +886,7 @@ connection** makes real calls that send nothing: Telegram `getMe` (the token wor
 
 ![Templates on the dashboard](docs/screenshots/templates.png)
 
-The dashboard's **Templates** section lists six ready-made pipelines. Each card shows its
+The dashboard's **Templates** section lists eight ready-made pipelines. Each card shows its
 steps and the credentials it needs, with a check or a warning for each and the provider that
 would be used. **Use template** creates an editable copy you own and opens it in the editor.
 LLM steps use the first free provider you have a key for (Gemini, then Groq, then OpenRouter),
@@ -821,6 +904,8 @@ and is written to the `templates` table on API start and by the seed
 | **Email Triage** | New email → Gemini (urgent / normal / spam, temperature 0) → Condition (contains "urgent", ignoring case) → Telegram only for urgent → Output. The Input has a sample urgent email for manual runs | Gmail App Password, an LLM key, Telegram (or Discord) |
 | **Meeting Notes** | Input (audio/video file; defaults to [`samples/team-meeting.mp3`](samples/team-meeting.mp3), or record in the Run form) → Speech to Text (Groq Whisper, vocabulary prompt from `{{vars.vocabulary}}`) → Structured Output (`summary`, `decisions[]`, `action_items[{task, owner, due}]`, validated against a JSON Schema, one retry with the problems if the reply doesn't match; `owner` "unassigned" and `due` "not set" when not said) → Join ×2 → Telegram (or Discord, or Gmail) → Output (the notes, the transcript, and the timestamped segments) | Groq key (or local faster-whisper, no key), an LLM key, Telegram / Discord / Gmail |
 | **Web Research** | Input (a question) → Web Search (DuckDuckGo, 5 results, Tavily fallback) → Web Page (the top result's text; a site that blocks readers gives empty text instead of failing) → Join (numbered sources) → Gemini (answers only from the sources, citing `[1]`, `[2]`, ... and ending with a `Sources:` list of `[n] Title - URL`) → Output (the answer and the sources) | An LLM key (Tavily optional) |
+| **PDF to Knowledge Base** | Input (a PDF, image, or text file) → Knowledge Base: Add Document (into `{{vars.knowledge_base}}`, default "My documents", created by **Use template** if missing) → Output (status, chunks, how it was read) | Gemini (or OpenAI) for embeddings; mock without |
+| **Document Q&A** | Input (a question) → Retriever (8 closest chunks) → Reranker (an LLM keeps the best 4) → Gemini (answers only from them, citing `[1]`, `[2]`, ... and ending with `Sources:` as `[n] file, page`) → Output (the answer and the sources, each with its `chunk_id`) | Gemini (or OpenAI) for embeddings, an LLM key |
 | **Job Alert Filter** | Schedule (every 6 h) → RSS Feed (We Work Remotely, programming; new since the last run) → For Each (score 0-100 against `{{vars.resume}}`, as JSON) → Filter (`output.score` ≥ `{{vars.threshold}}`, 70) → Condition (any?) → Join → Telegram → Output | An LLM key, Telegram (or Discord) |
 
 Edit the variables (`feed_url`, `resume`, `threshold`) in the **Variables** panel. **Download
@@ -1824,6 +1909,22 @@ Owner-only (others get `404`). Use the `id` as the value of an Input node of typ
 Execution rows now also carry `segment` and `handoff_at`, node rows their `queue` and
 `worker_hostname`, and node types in `GET /api/nodes` their `queue` and `portable`.
 
+### Knowledge bases
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET / POST | `/api/knowledge-bases` | List yours (with `document_count`, `chunk_count`) / create one: `{name, description, embedding_provider, embedding_model?, chunk_size, chunk_overlap}` → `201`; `409` duplicate name, `422` provider not connected |
+| GET / PATCH / DELETE | `/api/knowledge-bases/{id}` | One; rename or redescribe (the model and chunking can't change); delete with its documents and chunks (uploads stay under Files) |
+| GET | `/api/knowledge-bases/{id}/documents` | Documents with `status` (pending/processing/ready/failed), `chunk_count`, `method`, `error` |
+| POST | `/api/knowledge-bases/{id}/documents` | Upload (multipart `file`) → `202` pending, queued for ingestion; `415` not a PDF, image, or text; `503` queue down |
+| POST | `/api/knowledge-bases/{id}/documents/from-file` | `{file_id}`: add an upload you already have → `202` |
+| POST | `/api/knowledge-bases/{id}/documents/{doc}/retry` | Process a failed document again → `202` |
+| DELETE | `/api/knowledge-bases/{id}/documents/{doc}` | Remove a document and its chunks |
+| POST | `/api/knowledge-bases/{id}/search` | `{query, top_k}` → `results` with `rank`, `score`, `content`, `filename`, `page`, `chunk_id` |
+| GET | `/api/knowledge-bases/{id}/chunks/{chunk_id}` | One chunk, its file, page, and offsets (following a citation) |
+
+Owner-only (others get `404`); nodes find a knowledge base by its name or id among the run owner's.
+
 ### Deployments
 
 | Method | Path | Auth | Description |
@@ -1995,6 +2096,9 @@ All tables use UUID primary keys, `timestamptz` timestamps, and JSONB for JSON c
 | `credentials`         | per-user provider secrets: Fernet-encrypted JSON in `encrypted_value`; unique per (user, provider) |
 | `files`               | uploads: `owner_id`, sanitized `filename`, detected `content_type`, `size_bytes`, `sha256`, `storage_key` (`<owner>/<id>` under `FILES_DIR`) |
 | `integrations`        | per-user connection `status` enum and non-secret metadata (masked values, last test); unique per (user, provider) |
+| `knowledge_bases`     | `owner_id`, `name` (unique per owner), `description`, `embedding_provider`, `embedding_model`, `dimensions` (768), `chunk_size`, `chunk_overlap` |
+| `kb_documents`        | `knowledge_base_id`, `file_id` (`SET NULL`), `filename`, `status` enum (pending/processing/ready/failed), `source_type`, `method`, `chunk_count`, `char_count`, `error` |
+| `kb_chunks`           | `document_id`, `knowledge_base_id`, `chunk_index`, `content`, `embedding vector(768)` (HNSW index, `vector_cosine_ops`), `metadata_json` (`page`, `start`, `end`) |
 | `templates`           | `slug` (unique), `name`, `category`, starter `graph_json`, `requirements_json`, `triggers_json`, `sort_order`; synced from the catalog |
 
 Child rows cascade on delete: deleting a workflow removes its nodes, edges, variables, and
@@ -2005,7 +2109,7 @@ is `ON DELETE SET NULL`, and the snapshot columns keep the row readable.
 Migrations: `initial schema` → `preserve node execution history` (node_id SET NULL +
 snapshot) → `graph node keys` → `unique credential per provider` → `async execution columns` →
 `files and queue handoff` → `deployments` → `triggers and templates` (which also adds
-`email` to the trigger enum and renames deployment runs' trigger `api` to `webhook`). The downgrade of the second one deletes history
+`email` to the trigger enum and renames deployment runs' trigger `api` to `webhook`) → `deployment revoked_at` → `knowledge bases (pgvector)` (enables the `vector` extension). The downgrade of the second one deletes history
 rows whose node is gone, since those can't satisfy the old NOT NULL constraint. Deleting a
 workflow deletes its deployment too.
 

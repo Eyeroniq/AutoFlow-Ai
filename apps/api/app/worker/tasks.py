@@ -29,7 +29,14 @@ from app.services.events import EventPublisher
 from app.services.runs import InfrastructureUnavailable, run_execution, utcnow
 from app.services.task_queue import CeleryTaskQueue
 from app.services.triggers import claim_email_polls, fire_due_schedules, poll_email_trigger
-from app.worker.celery_app import POLL_EMAIL_TASK, RUN_EXECUTION_TASK, TRIGGERS_TICK_TASK, celery_app
+from app.services.knowledge import run_ingestion
+from app.worker.celery_app import (
+    INGEST_DOCUMENT_TASK,
+    POLL_EMAIL_TASK,
+    RUN_EXECUTION_TASK,
+    TRIGGERS_TICK_TASK,
+    celery_app,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +139,17 @@ def poll_email_task(trigger_id: str) -> dict[str, Any]:
         return result.as_dict()
 
     return asyncio.run(poll())
+
+
+@celery_app.task(name=INGEST_DOCUMENT_TASK, acks_late=True)
+def ingest_document_task(document_id: str) -> dict[str, Any]:
+    """Read, chunk, and embed one knowledge-base document (it ends ready or failed)."""
+
+    async def ingest() -> dict[str, Any]:
+        async with worker_resources() as (session_factory, _redis):
+            return await run_ingestion(session_factory, uuid.UUID(document_id))
+
+    return asyncio.run(ingest())
 
 
 @signals.worker_init.connect

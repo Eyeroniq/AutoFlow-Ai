@@ -17,10 +17,13 @@ from flowforge_engine.services import ExecutionServices
 
 
 def mock_services(
-    *, http_transport: httpx.AsyncBaseTransport | None = None, files: FileStore | None = None
+    *, http_transport: httpx.AsyncBaseTransport | None = None, files: FileStore | None = None,
+    knowledge: Any = None,
 ) -> ExecutionServices:
     """Services that hand out mock providers for everything, whatever keys are configured."""
-    return ExecutionServices(provider_settings=ProviderSettings(testing=True), http_transport=http_transport, files=files)
+    return ExecutionServices(
+        provider_settings=ProviderSettings(testing=True), http_transport=http_transport, files=files, knowledge=knowledge
+    )
 
 
 def make_context(

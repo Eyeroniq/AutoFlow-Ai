@@ -17,6 +17,7 @@ from flowforge_engine.nodes.documents import EntityExtractionNode, OCRNode, PDFE
 from flowforge_engine.nodes.feeds import RSSNode, WebPageNode
 from flowforge_engine.nodes.http import HTTPRequestNode
 from flowforge_engine.nodes.integrations import GmailNode, GmailReadNode
+from flowforge_engine.nodes.knowledge import AddDocumentNode, ChunkerNode, EmbeddingNode, RerankerNode, RetrieverNode
 from flowforge_engine.nodes.io import InputNode, OutputNode, TextNode
 from flowforge_engine.nodes.lists import FilterNode, ForEachNode, JoinNode
 from flowforge_engine.nodes.logic import ConditionNode, DelayNode
@@ -32,14 +33,17 @@ from flowforge_engine.nodes.workspace import (
 )
 
 __all__ = [
+    "AddDocumentNode",
     "AirtableCreateNode",
     "AirtableListNode",
     "AnthropicNode",
     "CerebrasNode",
+    "ChunkerNode",
     "ConditionNode",
     "CustomLLMNode",
     "DelayNode",
     "DiscordWebhookNode",
+    "EmbeddingNode",
     "EntityExtractionNode",
     "FilterNode",
     "ForEachNode",
@@ -60,6 +64,8 @@ __all__ = [
     "OpenRouterNode",
     "OutputNode",
     "PDFExtractNode",
+    "RerankerNode",
+    "RetrieverNode",
     "RSSNode",
     "SpeechToTextNode",
     "StructuredOutputNode",

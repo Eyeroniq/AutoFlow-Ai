@@ -35,8 +35,15 @@ class LLMProvider(Protocol):
         """Yield the response text as it is generated (an async generator)."""
         ...
 
-    async def embed(self, text: str, model: str | None = None) -> list[float]:
-        """Raises ProviderNotSupportedError when the provider has no embeddings API."""
+    async def embed(
+        self, text: str, model: str | None = None, dimensions: int | None = None, task: str | None = None
+    ) -> list[float]:
+        """Raises ProviderNotSupportedError when the provider has no embeddings API.
+
+        `dimensions` asks for a shorter vector where the model supports it; `task` is
+        "document" or "query" for providers with retrieval task types. Providers may also
+        offer `embed_many(texts, model, dimensions, task)` for one request per batch
+        (flowforge_engine.knowledge.embed_texts uses it when present)."""
         ...
 
     async def verify(self, model: str | None = None) -> dict[str, Any]:

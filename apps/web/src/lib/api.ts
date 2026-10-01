@@ -12,6 +12,10 @@ import type {
   Integration,
   IntegrationConnect,
   IntegrationTestResult,
+  KnowledgeBase,
+  KnowledgeBaseCreate,
+  KnowledgeDocument,
+  KnowledgeSearchHit,
   LoginPayload,
   NodeTestRequest,
   NodeTestResult,
@@ -215,11 +219,16 @@ export interface UploadOptions {
  * POST /api/files with upload progress (fetch can't report it, so this uses XHR). Same
  * auth handling as request(): a fresh token first, and one refresh + retry on 401.
  */
-export async function uploadFile(file: File, { onProgress, signal }: UploadOptions = {}): Promise<UploadedFile> {
+export function uploadFile(file: File, options: UploadOptions = {}): Promise<UploadedFile> {
+  return uploadTo<UploadedFile>("/api/files", file, options);
+}
+
+/** POST `file` as the multipart field `file` to `path`, with progress and one token refresh. */
+async function uploadTo<T>(path: string, file: File, { onProgress, signal }: UploadOptions = {}): Promise<T> {
   const attempt = (token: string | null) =>
     new Promise<{ status: number; data: unknown }>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${API_URL}/api/files`);
+      xhr.open("POST", `${API_URL}${path}`);
       xhr.setRequestHeader("Accept", "application/json");
       if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.upload.onprogress = (event) => {
@@ -251,7 +260,7 @@ export async function uploadFile(file: File, { onProgress, signal }: UploadOptio
     const detail = (result.data as { detail?: unknown } | null)?.detail;
     throw new ApiError(result.status, describeDetail(detail) ?? `Upload failed (${result.status})`, result.data);
   }
-  return result.data as UploadedFile;
+  return result.data as T;
 }
 
 function query(params: Record<string, string | number | undefined | null>): string {
@@ -341,6 +350,25 @@ export const api = {
     get: (id: string) => authed<UploadedFile>(`/api/files/${enc(id)}`),
     remove: (id: string) => authed<null>(`/api/files/${enc(id)}`, { method: "DELETE" }),
     upload: uploadFile,
+  },
+  knowledgeBases: {
+    list: () => authed<KnowledgeBase[]>("/api/knowledge-bases"),
+    get: (id: string) => authed<KnowledgeBase>(`/api/knowledge-bases/${enc(id)}`),
+    create: (body: KnowledgeBaseCreate) => authed<KnowledgeBase>("/api/knowledge-bases", { method: "POST", body }),
+    remove: (id: string) => authed<null>(`/api/knowledge-bases/${enc(id)}`, { method: "DELETE" }),
+    documents: (id: string) => authed<KnowledgeDocument[]>(`/api/knowledge-bases/${enc(id)}/documents`),
+    /** Upload a file; it's read, chunked, and embedded in the background (poll `documents`). */
+    upload: (id: string, file: File, options?: UploadOptions) =>
+      uploadTo<KnowledgeDocument>(`/api/knowledge-bases/${enc(id)}/documents`, file, options),
+    retry: (id: string, documentId: string) =>
+      authed<KnowledgeDocument>(`/api/knowledge-bases/${enc(id)}/documents/${enc(documentId)}/retry`, { method: "POST" }),
+    removeDocument: (id: string, documentId: string) =>
+      authed<null>(`/api/knowledge-bases/${enc(id)}/documents/${enc(documentId)}`, { method: "DELETE" }),
+    search: (id: string, query: string, topK = 5) =>
+      authed<{ query: string; results: KnowledgeSearchHit[] }>(`/api/knowledge-bases/${enc(id)}/search`, {
+        method: "POST",
+        body: { query, top_k: topK },
+      }),
   },
   integrations: {
     list: () => authed<Integration[]>("/api/integrations"),

@@ -10,7 +10,8 @@ workflow the user owns and can edit, fitted to what they have connected:
   Gmail step (to the user's own address) when only Gmail is;
 - Speech to Text uses Groq's Whisper with a Groq key, local faster-whisper without one;
 - the Invoice Extractor and Meeting Notes file inputs default to the bundled samples;
-- its triggers are created switched off, with the schedule in the user's time zone.
+- its triggers are created switched off, with the schedule in the user's time zone;
+- the knowledge templates create the "My documents" knowledge base if it's missing.
 
 Each template lists the credentials it needs, and the dashboard shows which are missing.
 """
@@ -21,6 +22,7 @@ import uuid
 from typing import Any
 
 from flowforge_engine import ExecutionServices, WorkflowGraph
+from flowforge_engine.knowledge import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +34,7 @@ from app.models.user import User
 from app.models.workflow import Workflow
 from app.services.credentials import build_execution_services
 from app.services.files import ensure_sample_file
+from app.services.knowledge import create_kb, owned_kb
 from app.services.schedule import ScheduleError, zone
 from app.services.workflows import replace_graph
 
@@ -41,7 +44,7 @@ logger = logging.getLogger(__name__)
 FREE_LLMS = ("gemini", "groq", "openrouter")
 LLM_NODE_TYPES = frozenset({"gemini", "groq", "openrouter", "ollama", "openai", "anthropic"})
 # Other nodes with a provider/fallback chain.
-LLM_STEP_TYPES = frozenset({"for_each", "summarize", "extract_entities", "structured_output"})
+LLM_STEP_TYPES = frozenset({"for_each", "summarize", "extract_entities", "structured_output", "reranker"})
 SAMPLE_INVOICE = "scanned-invoice.pdf"
 # A made-up planning meeting voiced by Windows text-to-speech (samples/make_meeting_sample.ps1).
 SAMPLE_MEETING = "team-meeting.mp3"
@@ -74,6 +77,14 @@ SEARCH_REQUIREMENT = {
     "why": "DuckDuckGo needs nothing. With TAVILY_API_KEY set, searches fall back to Tavily when DuckDuckGo rate limits.",
 }
 GMAIL_REQUIREMENT = {"providers": ["gmail"], "label": "Gmail (App Password)"}
+EMBEDDING_REQUIREMENT = {
+    "providers": ["gemini", "openai"],
+    "label": "Embeddings: a Gemini key (or OpenAI)",
+    "why": "Turns document chunks and questions into vectors. Without one, the knowledge base uses mock word-matching embeddings.",
+}
+# Templates that work on a knowledge base: using one creates DEFAULT_KB if it's missing.
+KB_TEMPLATES = frozenset({"pdf-to-knowledge-base", "document-qa"})
+DEFAULT_KB = "My documents"
 
 SAMPLE_EMAIL = {
     "from": "Priya Raman <priya@example.com>",
@@ -511,6 +522,79 @@ WEB_RESEARCH: dict[str, Any] = {
     "variables": [],
 }
 
+PDF_TO_KB: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "document", "type": "input", "label": "Document", "position": _pos(0, 80),
+            "config": {"name": "document", "input_type": "file"},
+        },
+        {
+            "id": "add", "type": "kb_add_document", "label": "Add to the knowledge base", "position": _pos(320, 80),
+            "description": "Text layer (OCR for scanned pages), chunked, embedded, stored",
+            "config": {"knowledge_base": "{{vars.knowledge_base}}", "file": "{{document.value}}"},
+        },
+        {
+            "id": "out", "type": "output", "label": "Ready", "position": _pos(640, 80),
+            "config": {
+                "name": "document",
+                "value": {"status": "{{add.status}}", "filename": "{{add.filename}}", "chunks": "{{add.chunk_count}}",
+                          "read_with": "{{add.method}}", "knowledge_base": "{{add.knowledge_base}}",
+                          "document_id": "{{add.document_id}}"},
+            },
+        },
+    ],
+    "edges": [{"source": "document", "target": "add"}, {"source": "add", "target": "out"}],
+    "variables": [{"key": "knowledge_base", "value": DEFAULT_KB, "type": "workflow"}],
+}
+
+DOCUMENT_QA: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "question", "type": "input", "label": "Question", "position": _pos(0, 80),
+            "config": {"name": "question", "input_type": "text", "default": "What does the document say about deadlines?"},
+        },
+        {
+            "id": "retriever", "type": "retriever", "label": "Find relevant chunks", "position": _pos(320, 80),
+            "config": {"knowledge_base": "{{vars.knowledge_base}}", "query": "{{question.value}}", "top_k": 8},
+        },
+        {
+            "id": "reranker", "type": "reranker", "label": "Keep the best", "position": _pos(640, 80),
+            "description": "An LLM scores each chunk against the question",
+            "config": {"provider": "gemini", "query": "{{question.value}}", "results": "{{retriever.results}}", "top_n": 4},
+        },
+        {
+            "id": "answer", "type": "gemini", "label": "Answer with citations", "position": _pos(960, 80),
+            "config": {
+                "provider": "gemini",
+                "system_prompt": "You answer questions from the user's documents and cite them. You never invent facts or sources.",
+                "user_prompt": (
+                    "Question: {{question.value}}\n\nExcerpts from the documents, numbered:\n{{reranker.context}}\n\n"
+                    "Answer using only these excerpts, citing them inline by number as [1], [2], and so on. End with a "
+                    "line \"Sources:\" followed by each excerpt you cited as \"[n] file, page\" (leave out the page "
+                    "when there is none). If the excerpts don't answer the question, say so."
+                ),
+                "temperature": 0.2,
+                "max_tokens": 2048,
+            },
+        },
+        {
+            "id": "out", "type": "output", "label": "Answer", "position": _pos(1280, 80),
+            "config": {
+                "name": "answer",
+                "value": {"answer": "{{answer.response}}", "sources": "{{reranker.results}}",
+                          "reranked": "{{reranker.reranked}}"},
+            },
+        },
+    ],
+    "edges": [
+        {"source": "question", "target": "retriever"},
+        {"source": "retriever", "target": "reranker"},
+        {"source": "reranker", "target": "answer"},
+        {"source": "answer", "target": "out"},
+    ],
+    "variables": [{"key": "knowledge_base", "value": DEFAULT_KB, "type": "workflow"}],
+}
+
 CATALOG: list[dict[str, Any]] = [
     {
         "slug": "morning-digest",
@@ -590,6 +674,30 @@ CATALOG: list[dict[str, Any]] = [
         ),
         "graph": WEB_RESEARCH,
         "requirements": [SEARCH_REQUIREMENT, LLM_REQUIREMENT],
+        "triggers": [],
+    },
+    {
+        "slug": "pdf-to-knowledge-base",
+        "name": "PDF to Knowledge Base",
+        "category": "Knowledge",
+        "description": (
+            "Upload a PDF, scan, or text file: it's read (OCR for scanned pages), split into chunks, embedded, and "
+            "stored in the knowledge base named in the knowledge_base variable."
+        ),
+        "graph": PDF_TO_KB,
+        "requirements": [EMBEDDING_REQUIREMENT],
+        "triggers": [],
+    },
+    {
+        "slug": "document-qa",
+        "name": "Document Q&A",
+        "category": "Knowledge",
+        "description": (
+            "Ask a question about your documents: the closest chunks are retrieved, an LLM reranks them, and the answer "
+            "cites each source as [n] with its file and page."
+        ),
+        "graph": DOCUMENT_QA,
+        "requirements": [EMBEDDING_REQUIREMENT, LLM_REQUIREMENT],
         "triggers": [],
     },
 ]
@@ -718,6 +826,19 @@ class TemplateNotFound(LookupError):
     pass
 
 
+async def ensure_default_kb(db: AsyncSession, user: User, services: ExecutionServices) -> None:
+    """Create DEFAULT_KB for the knowledge templates if the user doesn't have it, embedded
+    with the first real provider they have (mock word-matching without one)."""
+    if await owned_kb(db, user.id, DEFAULT_KB) is not None:
+        return
+    provider = next(iter(_available(services, EMBEDDING_REQUIREMENT["providers"])), "mock")
+    await create_kb(
+        db, user.id, name=DEFAULT_KB, description="Created by a knowledge template.", embedding_provider=provider,
+        embedding_model=None if provider == "mock" else services.settings.embedding_model(provider),
+        chunk_size=DEFAULT_CHUNK_SIZE, chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+    )
+
+
 async def use_template(db: AsyncSession, user: User, slug: str, *, timezone: str | None = None) -> Workflow:
     """A new workflow for `user` from the template, with its triggers created switched off."""
     template = await db.scalar(select(Template).where(Template.slug == slug))
@@ -730,6 +851,8 @@ async def use_template(db: AsyncSession, user: User, slug: str, *, timezone: str
         for node in graph["nodes"]:
             if node["type"] == "input" and node["config"].get("input_type") == "file" and sample is not None:
                 node["config"]["default"] = str(sample.id)
+    if slug in KB_TEMPLATES:
+        await ensure_default_kb(db, user, services)
     workflow = Workflow(
         name=await _unique_name(db, user.id, template.name),
         description=template.description,

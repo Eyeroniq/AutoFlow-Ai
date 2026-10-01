@@ -4,6 +4,7 @@ from app.db.base import Base
 from app.models.credential import Credential
 from app.models.deployment import Deployment
 from app.models.enums import (
+    DocumentStatus,
     ExecutionStatus,
     ExecutionTrigger,
     IntegrationStatus,
@@ -15,6 +16,7 @@ from app.models.enums import (
 from app.models.execution import NodeExecution, WorkflowExecution
 from app.models.file import UploadedFile
 from app.models.integration import Integration
+from app.models.knowledge import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
 from app.models.template import Template
 from app.models.trigger import NodeState, TriggerEvent, WorkflowTrigger
 from app.models.user import User
@@ -24,10 +26,14 @@ __all__ = [
     "Base",
     "Credential",
     "Deployment",
+    "DocumentStatus",
     "ExecutionStatus",
     "ExecutionTrigger",
     "Integration",
     "IntegrationStatus",
+    "KnowledgeBase",
+    "KnowledgeChunk",
+    "KnowledgeDocument",
     "NodeExecution",
     "NodeExecutionStatus",
     "NodeState",

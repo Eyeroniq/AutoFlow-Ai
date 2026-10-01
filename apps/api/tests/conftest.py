@@ -58,7 +58,7 @@ from app.core.rate_limit import limiter  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
 from app.db.session import get_db, get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
-from app.services.task_queue import EnqueueFailed, get_task_queue  # noqa: E402
+from app.services.task_queue import EnqueueFailed, get_ingest_queue, get_task_queue  # noqa: E402
 
 API_ROOT = Path(__file__).resolve().parents[1]
 
@@ -156,6 +156,25 @@ def task_queue() -> FakeTaskQueue:
     return FakeTaskQueue()
 
 
+@dataclass
+class FakeIngestQueue:
+    """Records knowledge-base documents queued for ingestion (tests ingest them themselves)."""
+
+    queued: list[uuid.UUID] = field(default_factory=list)
+    fail: bool = False
+
+    async def enqueue_ingest(self, document_id: uuid.UUID) -> str:
+        if self.fail:
+            raise EnqueueFailed("OperationalError: Error 111 connecting to redis:6379. Connection refused.")
+        self.queued.append(document_id)
+        return f"ingest:{document_id}"
+
+
+@pytest.fixture
+def ingest_queue() -> FakeIngestQueue:
+    return FakeIngestQueue()
+
+
 class LockedSession:
     """The test's session, with async operations serialized.
 
@@ -204,13 +223,14 @@ def redis():
 
 
 @pytest.fixture
-async def client(shared_session, session_factory, task_queue):
+async def client(shared_session, session_factory, task_queue, ingest_queue):
     async def override_get_db():
         yield shared_session
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_session_factory] = lambda: session_factory
     app.dependency_overrides[get_task_queue] = lambda: task_queue
+    app.dependency_overrides[get_ingest_queue] = lambda: ingest_queue
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         yield http
     app.dependency_overrides.clear()

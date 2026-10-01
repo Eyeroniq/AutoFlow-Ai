@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from flowforge_engine.files import FileNotAvailable, FileStore
+from flowforge_engine.knowledge import KnowledgeError, KnowledgeStore
 from flowforge_engine.netguard import ALLOW_ENV
 from flowforge_engine.providers.base import EmailProvider, LLMProvider, MailboxProvider
 from flowforge_engine.providers.factory import (
@@ -30,7 +31,8 @@ class ExecutionServices:
     defaults overlaid with the user's own keys); it defaults to the environment. Pass
     explicit providers to override the factory (tests). `http_transport` lets tests
     intercept outbound HTTP (HTTP Request, RSS, Web Page). `state` keeps node state between
-    runs (RSS "since last run"); the API passes a database-backed store.
+    runs (RSS "since last run"); the API passes a database-backed store. `knowledge` is the
+    owner's knowledge bases (pgvector in the API).
     """
 
     def __init__(
@@ -48,6 +50,7 @@ class ExecutionServices:
         files: FileStore | None = None,
         allow_private_network: bool | None = None,
         state: NodeStateStore | None = None,
+        knowledge: KnowledgeStore | None = None,
     ):
         self.settings = provider_settings if provider_settings is not None else ProviderSettings.from_env()
         self._llm: dict[str, LLMProvider] = dict(llm_providers or {})
@@ -67,6 +70,7 @@ class ExecutionServices:
         self.state: NodeStateStore = state if state is not None else MemoryStateStore()
         self.http_transport = http_transport
         self._files = files
+        self._knowledge = knowledge
         # The HTTP Request node's SSRF guard (flowforge_engine.netguard) is on unless this is
         # True; None reads HTTP_ALLOW_PRIVATE_NETWORKS from the environment.
         if allow_private_network is None:
@@ -79,6 +83,13 @@ class ExecutionServices:
         if self._files is None:
             raise FileNotAvailable("File storage isn't available here (no file store was configured for this run)")
         return self._files
+
+    @property
+    def knowledge(self) -> KnowledgeStore:
+        """The run owner's knowledge bases. Raises KnowledgeError when none are configured."""
+        if self._knowledge is None:
+            raise KnowledgeError("Knowledge bases aren't available here (no knowledge store was configured for this run)")
+        return self._knowledge
 
     def llm(self, provider_name: str) -> LLMProvider:
         """Raises MissingCredentialsError if the provider has no credentials."""

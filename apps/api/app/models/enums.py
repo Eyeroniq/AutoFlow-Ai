@@ -65,3 +65,12 @@ class IntegrationStatus(str, enum.Enum):
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
     ERROR = "error"
+
+
+class DocumentStatus(str, enum.Enum):
+    """A knowledge-base document: queued, being read and embedded, searchable, or failed."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"

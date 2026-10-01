@@ -24,6 +24,8 @@ RUN_EXECUTION_TASK = "flowforge.run_execution"
 # Every minute: fire due schedules and queue due mailbox checks (app.services.triggers).
 TRIGGERS_TICK_TASK = "flowforge.triggers_tick"
 POLL_EMAIL_TASK = "flowforge.poll_email_trigger"
+# Read, chunk, and embed a document added to a knowledge base (app.services.knowledge).
+INGEST_DOCUMENT_TASK = "flowforge.ingest_document"
 
 celery_app = Celery(
     "flowforge",

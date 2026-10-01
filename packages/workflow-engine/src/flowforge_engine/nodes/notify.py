@@ -7,22 +7,39 @@ a stop lets a send in progress finish, so it is never unknown whether a message 
 
 from __future__ import annotations
 
+import base64
 import html
+import mimetypes
 import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from flowforge_engine.errors import ProviderError
+from flowforge_engine.files import FileNotAvailable
 from flowforge_engine.models import GraphNode, NodeContext, NodeResult
+from flowforge_engine.nodes.documents import FILE_FIELD, FileRef, _open_file
+from flowforge_engine.nodes.integrations import AttachmentConfig
 from flowforge_engine.providers.discord_provider import MAX_CONTENT_CHARS, MAX_EMBED_DESCRIPTION, MAX_EMBED_TITLE
 from flowforge_engine.providers.settings import DiscordProviderName, TelegramProviderName
 from flowforge_engine.providers.telegram_provider import MAX_MESSAGE_CHARS
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedOutboundConfig, NodeDefinition, register_node
 from flowforge_engine.textutil import split_message
 from flowforge_engine.variables import contains_reference
 
+class _AnyType(frozenset):
+    """A "set of allowed types" that allows every type (for _open_file)."""
+
+    def __contains__(self, item: object) -> bool:
+        return True
+
+
+# Telegram's limits for a document and its caption.
+MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+MAX_CAPTION_CHARS = 1024
+# Any uploaded file type may be sent as a document.
+_ANY_TYPE = _AnyType()
 # Markdown chunks are converted to HTML after splitting; leave room for the tags.
 _TELEGRAM_SOURCE_CHARS = 3500
 
@@ -76,7 +93,7 @@ def _parse_error(exc: ProviderError) -> bool:
 # --- Telegram ------------------------------------------------------------------------------
 
 
-class TelegramConfig(NodeConfig):
+class TelegramConfig(GuardedOutboundConfig):
     auth: TelegramProviderName = Field(
         default="telegram",
         description="'telegram' = your connected bot (or the server's TELEGRAM_BOT_TOKEN); 'mock' = send nothing.",
@@ -85,7 +102,10 @@ class TelegramConfig(NodeConfig):
         default=None,
         description="A user, group, or channel id (or @channelname). Blank: the Telegram integration's default chat (TELEGRAM_CHAT_ID).",
     )
-    text: str = Field(min_length=1, description="The message. Usually a reference such as {{digest.response}}.")
+    text: str = Field(
+        default="",
+        description="The message (with a document: its caption, or a message before it if over 1024 characters). Usually a reference such as {{digest.response}}.",
+    )
     format: Literal["markdown", "html", "text"] = Field(
         default="markdown",
         description="markdown: **bold**, _italics_, headings, lists and links are rendered (falls back to plain text if Telegram rejects it). html: Telegram's HTML subset. text: sent as is.",
@@ -95,10 +115,24 @@ class TelegramConfig(NodeConfig):
     split_long: bool = Field(
         default=True, description=f"Send text over {MAX_MESSAGE_CHARS} characters as several messages (off: fail instead)."
     )
+    document: AttachmentConfig | None = Field(
+        default=None,
+        description="Optional file to send, from its content: e.g. an ICS Calendar node's {{ics.attachment}}.",
+    )
+    document_file: FileRef | None = Field(
+        default=None, description="Optional uploaded file to send (instead of document).", json_schema_extra=FILE_FIELD
+    )
+
+    @model_validator(mode="after")
+    def _something_to_send(self) -> TelegramConfig:
+        if self.document is not None and self.document_file not in (None, ""):
+            raise ValueError("send either document or document_file, not both")
+        return self
 
 
 class TelegramResult(BaseModel):
     message_ids: list[int]
+    document: str | None = None
     chat_id: str
     parts: int
     format_used: str
@@ -109,6 +143,7 @@ class TelegramResult(BaseModel):
 @register_node("telegram")
 class TelegramNode(NodeDefinition[TelegramConfig]):
     category = "integration"
+    guard_fields = ('text', 'document')
     label = "Telegram"
     description = "Sends a message through your Telegram bot (Bot API), split when it's long."
     icon = "send"
@@ -130,8 +165,11 @@ class TelegramNode(NodeDefinition[TelegramConfig]):
                 "(TELEGRAM_CHAT_ID). Message your bot, then read the id from https://api.telegram.org/bot<token>/getUpdates"
             )
         text = config.text.strip()
-        if not text:
+        has_document = config.document is not None or config.document_file not in (None, "")
+        if not text and not has_document:
             return NodeResult.fail("The message is empty")
+        if has_document:
+            return await self._send_document(context, config, chat_id, text)
         limit = _TELEGRAM_SOURCE_CHARS if config.format == "markdown" else MAX_MESSAGE_CHARS
         chunks = split_message(text, limit)
         if len(chunks) > 1 and not config.split_long:
@@ -175,6 +213,50 @@ class TelegramNode(NodeDefinition[TelegramConfig]):
             mock=bool(getattr(bot, "is_mock", False)),
         )
 
+    async def _send_document(self, context: NodeContext, config: TelegramConfig, chat_id: str, text: str) -> NodeResult:
+        """The file, with the text as its caption (or as a message first when it's too long)."""
+        try:
+            if config.document is not None:
+                doc = config.document
+                data = base64.b64decode(doc.content, validate=True) if doc.encoding == "base64" else doc.content.encode("utf-8")
+                filename = doc.filename
+                content_type = doc.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            else:
+                stored = await _open_file(context, config.document_file, _ANY_TYPE)
+                data, filename, content_type = stored.path.read_bytes(), stored.filename, stored.content_type
+        except FileNotAvailable as exc:
+            return NodeResult.fail(str(exc))
+        except ValueError:
+            return NodeResult.fail("document.content isn't valid base64 (set encoding to text for plain content)")
+        if len(data) > MAX_DOCUMENT_BYTES:
+            return NodeResult.fail(f"'{filename}' is {len(data) / 1048576:.1f} MB; Telegram bots can send up to 50 MB")
+        try:
+            bot = context.services.telegram(config.auth)
+        except ProviderError as exc:
+            return NodeResult.fail(str(exc))
+        message_ids: list[int] = []
+        caption, mode = (text or None), None
+        if caption and config.format == "markdown":
+            converted = markdown_to_telegram_html(caption)
+            caption, mode = (converted, "HTML") if len(converted) <= MAX_CAPTION_CHARS else (caption, None)
+        elif caption and config.format == "html":
+            mode = "HTML"
+        try:
+            if caption and len(caption) > MAX_CAPTION_CHARS:
+                message = await bot.send_message(chat_id, text, disable_notification=config.silent)
+                message_ids.append(int(message.get("message_id", 0)))
+                caption, mode = None, None
+            message = await bot.send_document(
+                chat_id, filename, data, content_type, caption=caption, parse_mode=mode, disable_notification=config.silent
+            )
+        except ProviderError as exc:
+            return NodeResult.fail(str(exc), message_ids=message_ids, chat_id=chat_id)
+        message_ids.append(int(message.get("message_id", 0)))
+        return NodeResult.ok(
+            message_ids=message_ids, chat_id=chat_id, parts=len(message_ids), format_used="document",
+            sent_at=datetime.now(UTC).isoformat(), mock=bool(getattr(bot, "is_mock", False)), document=filename,
+        )
+
 
 # --- Discord ---------------------------------------------------------------------------------
 
@@ -195,7 +277,7 @@ def _color(value: str | int | None) -> int | None:
     return int(digits, 16)
 
 
-class DiscordConfig(NodeConfig):
+class DiscordConfig(GuardedOutboundConfig):
     auth: DiscordProviderName = Field(
         default="discord",
         description="'discord' = your connected webhook (or DISCORD_WEBHOOK_URL); 'mock' = send nothing.",
@@ -228,6 +310,7 @@ class DiscordResult(BaseModel):
 @register_node("discord_webhook")
 class DiscordWebhookNode(NodeDefinition[DiscordConfig]):
     category = "integration"
+    guard_fields = ('content', 'embed_title', 'embed_description', 'embed_footer')
     label = "Discord Webhook"
     description = "Posts a message (and an optional embed) to a Discord channel through a webhook."
     icon = "message-square"

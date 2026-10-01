@@ -59,12 +59,20 @@ A visual AI workflow automation builder. This repository is being built in phase
   schema. New LLM providers: **Mistral**, **Cerebras**, and **Custom (OpenAI-compatible)** with
   the SSRF guard on its base URL (GitHub Models was retired by GitHub on 2026-07-30, so it
   isn't offered). Two more templates: **Meeting Notes** and **Web Research**.
-- **Knowledge bases (this state):** [RAG](#knowledge-bases-rag) on Postgres + pgvector. Upload
+- **Knowledge bases:** [RAG](#knowledge-bases-rag) on Postgres + pgvector. Upload
   PDFs, scans, or text on the **Knowledge** page: the ocr workers read them (text layer, OCR for
   scanned pages), chunk them at sentence boundaries, and embed them (Gemini, OpenAI, or Ollama,
   768 dimensions, HNSW cosine index), with live status and a test search. Five nodes (Add
   Document, Chunker, Embedding, Retriever, Reranker) and two templates: **PDF to Knowledge
   Base** and **Document Q&A**, whose answers cite `[n]` sources that lead back to the exact chunk.
+- **Privacy layer (this state):** [privacy and security](#privacy-and-security). One detection
+  service finds secrets (key formats, JWTs, private keys, passwords, high-entropy tokens), card
+  numbers (Luhn), Aadhaar (Verhoeff) and PAN, and, when switched on, personal data (Presidio +
+  spaCy). A **privacy guard** on every outbound and LLM node blocks, redacts, or warns before the
+  node runs; stored step data is masked by default; each run gets a **Privacy Report** (counts and
+  types only). New nodes: **Secret Scanner**, **PII Redact** / **PII Restore** (the mapping in
+  encrypted Redis for an hour, so it survives queue hand-offs), and **ICS Calendar Event**; the
+  Telegram node sends files; `{{system.now}}` and `{{system.today}}`.
 
 ## Stack
 
@@ -832,6 +840,91 @@ docker compose exec postgres psql -U flowforge -d flowforge -c "REINDEX DATABASE
 
 Then `docker compose up -d --build` (the API applies the knowledge-base migration on start).
 A fresh volume (`docker compose down -v`) needs nothing.
+
+## Privacy and security
+
+![The Privacy Report on a run](docs/screenshots/privacy-report.png)
+
+FlowForge looks for secrets and personal data in what pipelines send out, and keeps it out
+of run history. One detection service ([`flowforge_engine/privacy.py`](packages/workflow-engine/src/flowforge_engine/privacy.py))
+does all of it; the guard, the nodes, and the masking of stored data call into it.
+
+**What it finds.** Findings are a type, a category, a field path and character offsets, a
+confidence, and the detector; never the matched text.
+
+| Category | Types | How |
+| -------- | ----- | --- |
+| secret | AWS, Google, GitHub, Stripe, Slack, OpenAI, Anthropic, Groq keys; Telegram bot tokens; JWTs; private-key blocks; `password=` / `api_key:` style assignments; the password in `postgres://user:pass@host` style URLs; high-entropy tokens of 20+ characters right after "key", "token", "secret", "password", or "bearer" | Patterns; entropy ≥ 3.5 bits with 3+ character classes. UUIDs and hex digests (commit SHAs, checksums) are never flagged |
+| financial | Card numbers | 13-19 digits that pass the **Luhn** check and start like a card network |
+| government_id | **Aadhaar** (validated with the **Verhoeff** checksum), **PAN** | A PAN's fourth letter must be a holder type (P, C, H, F, A, T, B, L, J, G); PANs have no public check digit |
+| personal | Emails, Indian phone numbers (+91 / 0 / 10 digits from 6-9) by rule; names, locations, other phone numbers, IP addresses, IBANs from **Microsoft Presidio** with spaCy's `en_core_web_sm` | Only when asked: the workflow's "detect personal data" setting, or the node's own option |
+
+Overlapping matches keep the most specific one (a secret over an ID over a card number over
+personal data). A per-workflow **allowlist** suppresses known-safe values: an entry matches text
+exactly (ignoring case), or is a regex written `re:<pattern>`.
+
+**The privacy guard.** Every node that sends data out (Gmail, Telegram, Discord Webhook, HTTP
+Request, Notion Create Page, Airtable Create Record) and every LLM node (the nine providers,
+Structured Output, Summarize, Entity Extraction, Vision, Reranker) has a `privacy_guard` setting,
+applied by the executor after `{{...}}` is resolved and before the node runs. It only checks the
+node's content fields (a mail's subject, body, and attachments; a prompt; an HTTP URL, query, and
+body), not recipients, ids, or auth headers.
+
+| Mode | What happens | Default for |
+| ---- | ------------ | ----------- |
+| `block` | The node fails with what was found, by type and count: "Blocked by the privacy guard: found 1 card number, 1 Aadhaar number in body". Nothing is sent | outbound nodes |
+| `redact` | It runs with each finding replaced by `[REDACTED:<TYPE>]` | LLM nodes |
+| `warn` | It runs unchanged; the step records a warning | |
+| `off` | Nothing is checked | |
+
+The step's input in the run history is what the node actually ran with (the redacted version,
+in redact mode), and its `privacy` record says what the guard did.
+
+**Masking stored data** (per workflow, **on by default**, in the editor's **Privacy** panel).
+Step inputs and outputs in `node_executions`, live WebSocket events, the run's inputs, and its
+final output are stored with every finding replaced by `[REDACTED:<TYPE>]`. The next steps still
+get the real values: a run that continues on another queue reads earlier steps' real outputs from
+an encrypted Redis hash (Fernet, the credentials key), deleted when the run finishes. The run's
+inputs are masked once its first segment has read them. Turn masking off to debug with the real
+values in the history.
+
+**The Privacy Report** (on each run's page, and `privacy_report` in `GET /api/executions/{id}`):
+counts by category and type, each step that held something, and what the guard did there. No
+values are stored for it or shown. A value counts once per step (the same card under two keys is
+one), and the run's totals take, per type, the most any one step held, so a value passed from step
+to step counts once.
+
+**Nodes** (the **Privacy** group):
+
+| Node | Does | Outputs |
+| ---- | ---- | ------- |
+| **Secret Scanner** | Scans text or any JSON (`data`); `include_personal_data` (default on); `fail_on_findings` to stop the run | `findings` (type, category, path, start, end, confidence, detector), `count`, `clean`, `by_type`, `by_category` |
+| **PII Redact** | Replaces each distinct value with `<TYPE_n>` (the same value, the same placeholder), so an LLM never sees it | `text`, `mapping_id`, `placeholders`, `by_type` |
+| **PII Restore** | Puts the originals back in `text` (e.g. the LLM's answer) | `text`, `restored`, `unknown_placeholders` |
+
+Redact keeps its `{placeholder: original}` mapping in Redis, Fernet-encrypted, for **one hour**,
+keyed to the execution (another run can't read it), so Restore works after the run moved to
+another queue and worker. Its output carries only the `mapping_id`.
+
+**ICS Calendar Event** (`ics_calendar`). Makes an `.ics` file with the `icalendar` library from a
+title, a start, an end (or `duration_minutes`), a location, a description, attendees, and an
+optional organizer: a stable UID (a hash of the title and start, so sending it again updates the
+event), a reminder `alarm_minutes` before (default 30), and `METHOD:PUBLISH` (or `REQUEST` for an
+invitation). Times without an offset are in `timezone` (default `Asia/Kolkata`). Dates must be
+explicit ISO 8601 (`2026-10-05T15:00`, or `2026-10-05` for all day): anything else, like
+"tomorrow evening", succeeds with `ambiguous: true` and a `reason`, and no file, rather than
+guessing. `{{ics.attachment}}` drops into a Gmail node's `attachments` or a Telegram node's
+`document`. Put `{{system.now}}` (the run's time, UTC ISO 8601) or `{{system.today}}` in the
+extraction prompt so an LLM can turn "tomorrow at 3" into a date.
+
+**Telegram documents.** The Telegram node sends a file as well as text: `document` (inline
+content such as `{{ics.attachment}}`, text or base64) or `document_file` (an upload). The text
+becomes its caption, or a message before it when longer than 1,024 characters. Up to 50 MB.
+
+**Limits.** Streaming LLM tokens are shown live as they arrive, unmasked (they're never stored).
+For Each's per-item prompts aren't guarded (they're resolved per item inside the node). Presidio's
+small English model misses some names and finds some false ones; personal-data detection is off
+by default for that reason. PANs are checked by shape, not a checksum.
 
 ## Notifications: Telegram and Discord
 

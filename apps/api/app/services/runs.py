@@ -43,6 +43,7 @@ from flowforge_engine import (
     topological_sort,
     validate_workflow,
 )
+from flowforge_engine.privacy import PrivacyPolicy, distinct, mask, summarize
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import select, update
@@ -60,6 +61,7 @@ from app.schemas.execution import ExecutionDetail, NodeExecutionRead
 from app.services.credentials import build_execution_services
 from app.services.events import EventPublisher, iso, stop_flag_set
 from app.services.node_state import DbNodeStateStore
+from app.services.privacy import OutputStash, RedisVault, policy_for, privacy_report
 from app.services.task_queue import EnqueueFailed, TaskQueue
 from app.services.trigger_outcomes import apply_trigger_outcome
 
@@ -293,10 +295,37 @@ class ExecutionRecorder(ExecutionHooks):
         *,
         worker_id: str | None = None,
         queue: str | None = None,
+        policy: PrivacyPolicy | None = None,
+        stash: OutputStash | None = None,
     ):
         self.db, self.publisher, self.execution_id = db, publisher, execution_id
         # Where this segment's nodes run, recorded on each node row.
         self.worker_id, self.queue = worker_id, queue
+        # The workflow's privacy settings; `stash` keeps masked steps' real outputs for
+        # later segments (app.services.privacy).
+        self.policy, self.stash = policy or PrivacyPolicy(), stash
+
+    async def _privacy(self, result: NodeRunResult, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(the payload to store and publish, the step's privacy record): what the input and
+        output held (counts and types), what the guard did, and, with masking on, the
+        payload with findings replaced."""
+        policy = self.policy
+
+        def work() -> tuple[tuple[Any, list[Any]], tuple[Any, list[Any]]]:
+            return mask(payload["input"], policy), mask(payload["output"], policy)
+
+        if "personal" in policy.categories:
+            (masked_in, found_in), (masked_out, found_out) = await asyncio.to_thread(work)
+        else:
+            (masked_in, found_in), (masked_out, found_out) = work()
+        record = {"input": summarize(distinct(payload["input"], found_in)),
+                  "output": summarize(distinct(payload["output"], found_out)), "guard": result.privacy,
+                  "masked": bool(policy.mask_stored_io and (found_in or found_out))}
+        if not policy.mask_stored_io:
+            return payload, record
+        if found_out and self.stash is not None:
+            await self.stash.put(result.node_id, payload["output"])
+        return {"input": masked_in, "output": masked_out}, record
 
     def _row(self, node_key: str) -> Any:
         return update(NodeExecution).where(
@@ -317,11 +346,13 @@ class ExecutionRecorder(ExecutionHooks):
     async def node_finished(self, result: NodeRunResult) -> None:
         # JSON-mode dump so whatever a node returned is serializable into JSONB.
         payload = result.model_dump(mode="json", include={"input", "output"})
+        payload, privacy = await self._privacy(result, payload)
         status = NodeExecutionStatus(result.status.value)
         await self.db.execute(self._row(result.node_id).values(
             status=status,
             input_json=payload["input"],
             output_json=payload["output"],
+            privacy_json=privacy,
             error_message=result.error or result.skip_reason,
             started_at=result.started_at,
             finished_at=result.finished_at,
@@ -427,8 +458,12 @@ async def hand_off(
     return True
 
 
-async def _finished_results(db: AsyncSession, execution_id: uuid.UUID) -> dict[str, NodeRunResult]:
-    """Results of the nodes earlier segments finished, rebuilt from their rows."""
+async def _finished_results(
+    db: AsyncSession, execution_id: uuid.UUID, stash: OutputStash | None = None
+) -> dict[str, NodeRunResult]:
+    """Results of the nodes earlier segments finished, rebuilt from their rows (and, for
+    steps stored masked, their real outputs from the stash)."""
+    real = await stash.all() if stash is not None else {}
     rows = await db.scalars(
         select(NodeExecution)
         .where(
@@ -446,7 +481,7 @@ async def _finished_results(db: AsyncSession, execution_id: uuid.UUID) -> dict[s
             label=row.node_label,
             status=status,
             input=row.input_json,
-            output=row.output_json,
+            output=real[row.node_key] if row.node_key in real else row.output_json,
             error=row.error_message if status is NodeStatus.FAILED else None,
             skip_reason=row.error_message if status is NodeStatus.SKIPPED else None,
             started_at=row.started_at,
@@ -589,17 +624,32 @@ async def run_execution(
             if services is None:
                 state = DbNodeStateStore(session_factory, execution.workflow_id, execution_id)
                 services = await build_execution_services(db, owner, state=state)
+            policy = policy_for(execution.workflow.privacy_json)
+            services.privacy, services.vault = policy, RedisVault(redis, execution_id)
+            stash = OutputStash(redis, execution_id)
             context = NodeContext(
                 workflow_id=str(execution.workflow_id),
                 execution_id=str(execution_id),
                 inputs=execution.inputs_json or {},
                 services=services,
             )
-            completed = await _finished_results(db, execution_id) if segment else None
+            if segment == 0 and policy.mask_stored_io and execution.inputs_json:
+                # Input nodes run in this segment (they're portable) and read the inputs from
+                # `context`; the stored copy can be masked now.
+                masked_inputs, found = mask(execution.inputs_json, policy)
+                if found:
+                    await db.execute(
+                        update(WorkflowExecution).where(WorkflowExecution.id == execution_id)
+                        .values(inputs_json=masked_inputs).execution_options(synchronize_session=False)
+                    )
+                    await db.commit()
+            completed = await _finished_results(db, execution_id, stash) if segment else None
             result = await execute_graph(
                 graph, context,
                 node_timeout=settings.WORKFLOW_NODE_TIMEOUT_SECONDS,
-                hooks=ExecutionRecorder(db, publisher, execution_id, worker_id=worker_id, queue=queue),
+                hooks=ExecutionRecorder(
+                    db, publisher, execution_id, worker_id=worker_id, queue=queue, policy=policy, stash=stash
+                ),
                 control=control,
                 completed=completed,
                 accepts=None if queues is None else queues.__contains__,
@@ -614,7 +664,10 @@ async def run_execution(
             else:
                 status, error = _RUN_STATUS[result.status], result.error
                 final_output = result.model_dump(mode="json", include={"final_output"})["final_output"]
+                if policy.mask_stored_io:
+                    final_output = mask(final_output, policy)[0]
                 await finish_execution(db, publisher, execution_id, status, error=error, final_output=final_output)
+                await stash.clear()
         except GraphValidationFailed as exc:
             # E.g. a credential was removed between queueing and running.
             error = str(exc)
@@ -677,6 +730,8 @@ async def load_execution_detail(
         return None
     detail = ExecutionDetail.model_validate(execution)
     detail.node_executions.sort(key=_node_order)
+    masked = any((row.privacy_json or {}).get("masked") for row in execution.node_executions)
+    detail.privacy_report = privacy_report(execution.node_executions, masked=masked)
     return detail
 
 

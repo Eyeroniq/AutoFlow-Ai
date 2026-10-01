@@ -1,10 +1,11 @@
+import re
 import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
 from flowforge_engine import ValidationIssue, WorkflowGraph
 from flowforge_engine.testing import example_graph
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from app.models.enums import ExecutionStatus, WorkflowStatus
 from app.schemas.trigger import TriggerBrief
@@ -123,3 +124,39 @@ class NodeTestResult(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None
+
+
+class PrivacySettings(BaseModel):
+    """A workflow's privacy settings (GET/PUT /api/workflows/{id}/privacy)."""
+
+    mask_stored_io: bool = Field(
+        default=True,
+        description="Store step inputs/outputs, live events, and the final output with secrets and IDs masked "
+        "([REDACTED:<TYPE>]). The real values still reach the next steps.",
+    )
+    detect_personal_data: bool = Field(
+        default=False,
+        description="Also find names, emails, phone numbers, and locations (guard, masking, and the report).",
+    )
+    allowlist: list[str] = Field(
+        default_factory=list, max_length=200,
+        description="Known-safe values the detectors should ignore: exact text (any case), or re:<regex>.",
+    )
+
+    @field_validator("allowlist")
+    @classmethod
+    def _entries(cls, entries: list[str]) -> list[str]:
+        cleaned = []
+        for entry in entries:
+            entry = entry.strip()
+            if not entry:
+                continue
+            if len(entry) > 200:
+                raise ValueError("allowlist entries are at most 200 characters")
+            if entry.startswith("re:"):
+                try:
+                    re.compile(entry[3:])
+                except re.error as exc:
+                    raise ValueError(f"invalid regex in '{entry}': {exc}") from None
+            cleaned.append(entry)
+        return cleaned

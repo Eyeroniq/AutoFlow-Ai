@@ -20,6 +20,7 @@ import type {
   NodeTestRequest,
   NodeTestResult,
   NodeType,
+  PrivacySettings,
   RegisterPayload,
   SchedulePreview,
   Template,
@@ -309,6 +310,9 @@ export const api = {
     /** Save a trigger's config and switch it on or off; resolves with every trigger. */
     saveTrigger: (id: string, type: TriggerType, body: { enabled: boolean; config?: Record<string, unknown> }) =>
       authed<TriggersResponse>(`/api/workflows/${enc(id)}/triggers/${type}`, { method: "PUT", body }),
+    privacy: (id: string) => authed<PrivacySettings>(`/api/workflows/${enc(id)}/privacy`),
+    savePrivacy: (id: string, body: PrivacySettings) =>
+      authed<PrivacySettings>(`/api/workflows/${enc(id)}/privacy`, { method: "PUT", body }),
     saveTriggerSettings: (id: string, body: TriggerSettings) =>
       authed<TriggersResponse>(`/api/workflows/${enc(id)}/trigger-settings`, { method: "PUT", body }),
     checkEmail: (id: string) => authed<EmailCheckResult>(`/api/workflows/${enc(id)}/triggers/email/check`, { method: "POST" }),

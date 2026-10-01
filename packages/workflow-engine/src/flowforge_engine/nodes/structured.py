@@ -86,6 +86,7 @@ class StructuredOutputResult(BaseModel):
 @register_node("structured_output")
 class StructuredOutputNode(_LLMDocumentNode, NodeDefinition[StructuredOutputConfig]):
     category = "ai"
+    guard_fields = ('prompt', 'system_prompt')
     label = "Structured Output"
     description = "Asks an LLM for JSON matching a schema, validates it, and retries once with the errors."
     icon = "braces"

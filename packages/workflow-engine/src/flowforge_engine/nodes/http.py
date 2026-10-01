@@ -8,13 +8,13 @@ from pydantic import BaseModel, Field
 
 from flowforge_engine.models import NodeContext, NodeResult
 from flowforge_engine.netguard import BlockedDestination, check_url, guarded_transport
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedOutboundConfig, NodeDefinition, register_node
 
 # Response bodies are stored in execution history; cap what we keep.
 MAX_BODY_CHARS = 100_000
 
 
-class HTTPRequestConfig(NodeConfig):
+class HTTPRequestConfig(GuardedOutboundConfig):
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] = "GET"
     url: str = Field(min_length=1)
     headers: dict[str, str] = Field(default_factory=dict)
@@ -49,6 +49,7 @@ def _parse_body(response: httpx.Response) -> tuple[Any, bool]:
 @register_node("http_request")
 class HTTPRequestNode(NodeDefinition[HTTPRequestConfig]):
     category = "integration"
+    guard_fields = ('url', 'query', 'body')
     label = "HTTP Request"
     description = "Calls a public HTTP endpoint and exposes the status, headers, and parsed body."
     icon = "globe"

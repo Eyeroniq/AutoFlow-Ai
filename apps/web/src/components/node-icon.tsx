@@ -4,8 +4,10 @@ import {
   Bot,
   Braces,
   Eye,
+  EyeOff,
   Box,
   Brain,
+  CalendarPlus,
   Cpu,
   FileText,
   Filter,
@@ -33,6 +35,7 @@ import {
   Search,
   SearchCode,
   Send,
+  ShieldAlert,
   Sparkles,
   Table,
   TableProperties,
@@ -87,6 +90,9 @@ const ICONS: Record<string, LucideIcon> = {
   binary: Binary,
   "search-code": SearchCode,
   "list-ordered": ListOrdered,
+  "shield-alert": ShieldAlert,
+  "eye-off": EyeOff,
+  "calendar-plus": CalendarPlus,
 };
 
 export function NodeIcon({ name, className = "size-4" }: { name?: string; className?: string }) {
@@ -114,6 +120,7 @@ const CATEGORY: Record<string, CategoryStyle> = {
   sources: { accent: "bg-orange-500", tile: "bg-orange-50 text-orange-700", color: "#f97316" },
   audio: { accent: "bg-fuchsia-500", tile: "bg-fuchsia-50 text-fuchsia-700", color: "#d946ef" },
   knowledge: { accent: "bg-cyan-500", tile: "bg-cyan-50 text-cyan-700", color: "#06b6d4" },
+  privacy: { accent: "bg-slate-700", tile: "bg-slate-100 text-slate-800", color: "#334155" },
 };
 
 export function categoryStyle(category?: string): CategoryStyle {

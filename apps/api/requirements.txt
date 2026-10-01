@@ -46,3 +46,10 @@ trafilatura==2.2.0
 faster-whisper==1.2.1
 # Web Search: DuckDuckGo without a key (Tavily goes through httpx).
 ddgs==9.16.0
+# Privacy layer: Presidio finds personal data (names, addresses, ...) with a small spaCy
+# model; secrets, cards, Aadhaar, PAN, and Indian phone numbers use FlowForge's own rules.
+presidio-analyzer==2.2.364
+spacy==3.8.16
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# ICS Calendar node.
+icalendar==7.3.0

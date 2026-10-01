@@ -30,6 +30,7 @@ from app.schemas.workflow import (
     LastExecution,
     NodeTestRequest,
     NodeTestResult,
+    PrivacySettings,
     ValidateRequest,
     WorkflowCreate,
     WorkflowListItem,
@@ -40,6 +41,7 @@ from app.schemas.workflow import (
 )
 from app.services.files import file_input_issues
 from app.services.node_state import DbNodeStateStore
+from app.services.privacy import policy_for
 from app.services.providers import get_execution_services
 from app.services.runs import (
     InvalidWorkflowGraph,
@@ -187,6 +189,31 @@ async def validate(
     return WorkflowValidation(valid=not errors, errors=errors)
 
 
+@router.get(
+    "/{workflow_id}/privacy", response_model=PrivacySettings, summary="The workflow's privacy settings", responses=_NOT_FOUND,
+)
+async def get_privacy(workflow_id: uuid.UUID, db: DbSession, user: CurrentUser) -> PrivacySettings:
+    workflow = await get_owned_workflow(db, workflow_id, user)
+    return PrivacySettings.model_validate(workflow.privacy_json or {})
+
+
+@router.put(
+    "/{workflow_id}/privacy",
+    response_model=PrivacySettings,
+    summary="Set the workflow's privacy settings",
+    description=(
+        "Applies to runs started from now on: masking of stored step data, whether personal data (names, emails, "
+        "phones, locations) is detected too, and the allowlist of known-safe values."
+    ),
+    responses=_NOT_FOUND,
+)
+async def put_privacy(workflow_id: uuid.UUID, body: PrivacySettings, db: DbSession, user: CurrentUser) -> PrivacySettings:
+    workflow = await get_owned_workflow(db, workflow_id, user)
+    workflow.privacy_json = body.model_dump()
+    await db.commit()
+    return body
+
+
 @router.post(
     "/{workflow_id}/duplicate",
     response_model=WorkflowRead,
@@ -242,6 +269,7 @@ async def run_node_test(
         node = node.model_copy(update={"config": body.config})
     # Reads what earlier runs saved (an RSS feed's position) without moving it.
     services.state = DbNodeStateStore(session_factory, workflow.id, None)
+    services.privacy = policy_for(workflow.privacy_json)
     context = NodeContext(
         workflow_id=str(workflow.id),
         execution_id=f"test-{uuid.uuid4()}",

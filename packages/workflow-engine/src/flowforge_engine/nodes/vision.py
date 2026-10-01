@@ -20,7 +20,7 @@ from flowforge_engine.jsonschema_lite import check_schema
 from flowforge_engine.models import GraphNode, NodeContext, NodeResult
 from flowforge_engine.nodes.documents import FILE_FIELD, FileRef, _open_file
 from flowforge_engine.nodes.structured import MAX_ATTEMPTS, check_reply, retry_request, schema_request
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedLLMConfig, NodeDefinition, register_node
 
 # What Gemini takes inline; the rest are converted to PNG.
 GEMINI_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
@@ -28,7 +28,7 @@ GEMINI_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
 MAX_IMAGE_BYTES = 18 * 1024 * 1024
 
 
-class VisionConfig(NodeConfig):
+class VisionConfig(GuardedLLMConfig):
     image: FileRef = Field(
         description="The image: a reference like {{input.photo}} (an Input node of type file) or an uploaded file's id.",
         json_schema_extra=FILE_FIELD,
@@ -79,6 +79,7 @@ def _to_png(path: Any) -> bytes:
 @register_node("vision")
 class VisionNode(NodeDefinition[VisionConfig]):
     category = "ai"
+    guard_fields = ('prompt', 'system_prompt')
     label = "Vision"
     description = "Asks Gemini about an image: a description, extracted text, or JSON matching a schema."
     icon = "eye"

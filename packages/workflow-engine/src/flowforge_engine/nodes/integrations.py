@@ -8,7 +8,7 @@ from flowforge_engine.errors import ProviderError
 from flowforge_engine.models import GraphNode, NodeContext, NodeResult
 from flowforge_engine.providers.base import EmailAttachment, MailboxQuery, OutgoingEmail
 from flowforge_engine.providers.settings import EMAIL_PROVIDER_NAMES, EmailProviderName
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedOutboundConfig, NodeConfig, NodeDefinition, register_node
 from flowforge_engine.variables import contains_reference
 
 _email_adapter: TypeAdapter[str] = TypeAdapter(EmailStr)
@@ -51,7 +51,7 @@ class AttachmentConfig(NodeConfig):
     content_type: str | None = Field(default=None, description="MIME type; guessed from the filename if blank.")
 
 
-class GmailConfig(NodeConfig):
+class GmailConfig(GuardedOutboundConfig):
     auth: EmailProviderName = Field(default="gmail", description=AUTH_DESCRIPTION)
     to: str | list[str] = Field(description="Recipient(s): a list, or comma-separated.")
     cc: str | list[str] | None = None
@@ -78,6 +78,7 @@ class GmailResult(BaseModel):
 @register_node("gmail")
 class GmailNode(NodeDefinition[GmailConfig]):
     category = "integration"
+    guard_fields = ('subject', 'body', 'html_body', 'attachments')
     label = "Gmail"
     description = "Sends an email through Gmail SMTP (App Password), with cc/bcc, HTML, and attachments."
     icon = "mail"

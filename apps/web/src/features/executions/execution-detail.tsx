@@ -18,6 +18,7 @@ import { NodeTimeline } from "../runs/node-timeline";
 import { OutputDownloads } from "../runs/output-downloads";
 import { isTerminal } from "../runs/run-state";
 import { type LiveExecution, useLiveExecution } from "../runs/use-live-execution";
+import { PrivacyReport } from "./privacy-report";
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -168,6 +169,7 @@ function ExecutionDetail({ executionId }: { executionId: string }) {
           <NodeTimeline run={run} />
         </section>
         <div className="min-w-0 space-y-4">
+          <PrivacyReport executionId={execution.id} status={run.status} />
           <JsonCard title="Inputs" value={execution.inputs} />
           <JsonCard
             title="Final output"

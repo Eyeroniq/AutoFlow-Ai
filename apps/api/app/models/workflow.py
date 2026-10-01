@@ -34,6 +34,8 @@ class Workflow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # this many failed runs in a row (0 = never).
     max_runs_per_hour: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
     max_consecutive_failures: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    # Privacy settings (flowforge_engine.privacy.PrivacyPolicy); {} = the defaults.
+    privacy_json: Mapped[dict[str, Any]] = mapped_column(default=dict, server_default="{}")
 
     owner: Mapped["User"] = relationship(back_populates="workflows")
     nodes: Mapped[list["WorkflowNode"]] = relationship(

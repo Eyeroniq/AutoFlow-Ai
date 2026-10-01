@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from flowforge_engine.models import GraphNode, NodeContext, NodeResult
@@ -17,6 +17,25 @@ class NodeConfig(BaseModel):
 
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
+
+
+GUARD_DESCRIPTION = (
+    "Privacy guard, checked before the node runs: block = fail if the content holds a secret, card number, "
+    "Aadhaar or PAN (or personal data, when the workflow detects it); redact = send it with those masked; "
+    "warn = send it unchanged and record a warning; off = don't check."
+)
+
+
+class GuardedOutboundConfig(NodeConfig):
+    """Config of a node that sends data out of FlowForge: the guard blocks by default."""
+
+    privacy_guard: Literal["off", "warn", "redact", "block"] = Field(default="block", description=GUARD_DESCRIPTION)
+
+
+class GuardedLLMConfig(NodeConfig):
+    """Config of a node that sends text to an LLM provider: the guard redacts by default."""
+
+    privacy_guard: Literal["off", "warn", "redact", "block"] = Field(default="redact", description=GUARD_DESCRIPTION)
 
 
 class NodeDefinition(ABC, Generic[ConfigT]):
@@ -50,6 +69,10 @@ class NodeDefinition(ABC, Generic[ConfigT]):
     # them unresolved; the node resolves them once per list item, with {{item}} and
     # {{index}} in scope next to everything else. Validation accepts those two roots there.
     deferred_fields: ClassVar[frozenset[str]] = frozenset()
+    # Content fields the privacy guard scans before the node runs (its config then needs a
+    # `privacy_guard` field: GuardedOutboundConfig / GuardedLLMConfig). Recipients, ids,
+    # and auth headers aren't content and stay out.
+    guard_fields: ClassVar[tuple[str, ...]] = ()
 
     @abstractmethod
     async def execute(self, context: NodeContext, config: ConfigT) -> NodeResult: ...
@@ -86,6 +109,7 @@ class NodeDefinition(ABC, Generic[ConfigT]):
             "portable": cls.portable,
             "interruptible": cls.interruptible,
             "item_fields": sorted(cls.deferred_fields),
+            "guard_fields": list(cls.guard_fields),
         }
 
 

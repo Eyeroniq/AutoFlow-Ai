@@ -39,6 +39,10 @@ class NodeExecutionRead(BaseModel):
     duration_ms: int | None
     queue: str | None = Field(default=None, description="The queue the node ran on (null for in-request runs).")
     worker_hostname: str | None = Field(default=None, description="The worker that ran the node.")
+    privacy: dict[str, Any] | None = Field(
+        default=None, validation_alias="privacy_json",
+        description="Counts and types found in the step's input and output, and what the privacy guard did (no values).",
+    )
 
 
 class ExecutionSummary(BaseModel):
@@ -82,6 +86,10 @@ class ExecutionDetail(ExecutionSummary):
     inputs: dict[str, Any] | None = Field(default=None, validation_alias="inputs_json")
     final_output: dict[str, Any] | None = Field(validation_alias="final_output_json")
     node_executions: list[NodeExecutionRead]
+    privacy_report: dict[str, Any] | None = Field(
+        default=None,
+        description="Counts and types of secrets and personal data found in the run, per step, and what the guard did. Never the values.",
+    )
 
 
 class ExecutionLinks(BaseModel):

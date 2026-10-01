@@ -235,6 +235,14 @@ class MockTelegramProvider(_MockMessenger):
         sent = self._record(str(chat_id), {"text": text, **options})
         return {"message_id": int(sent.message_id), "chat": {"id": chat_id}, "date": 0, "text": text}
 
+    async def send_document(
+        self, chat_id: str, filename: str, data: bytes, content_type: str, **options: Any
+    ) -> dict[str, Any]:
+        sent = self._record(str(chat_id), {"document": filename, "content_type": content_type, "size": len(data),
+                                           "content": data.decode("utf-8", "replace")[:20000], **options})
+        return {"message_id": int(sent.message_id), "chat": {"id": chat_id}, "date": 0,
+                "document": {"file_name": filename, "mime_type": content_type, "file_size": len(data)}}
+
     async def verify(self, chat_id: str | None = None) -> dict[str, Any]:
         return {"mock": True, "bot": "@mock_bot", "chat": {"id": chat_id} if chat_id else None}
 

@@ -316,6 +316,7 @@ class RerankerResult(BaseModel):
 @register_node("reranker")
 class RerankerNode(_LLMDocumentNode, NodeDefinition[RerankerConfig]):
     category = "knowledge"
+    guard_fields = ('query', 'results')
     label = "Reranker"
     description = "Has an LLM score each retrieved chunk against the question, then keeps the best ones in order."
     icon = "list-ordered"

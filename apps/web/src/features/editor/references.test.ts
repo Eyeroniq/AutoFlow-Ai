@@ -32,6 +32,8 @@ describe("buildReferenceSuggestions", () => {
       "system.execution_id",
       "system.workflow_id",
       "system.node_id",
+      "system.now",
+      "system.today",
     ]);
   });
 

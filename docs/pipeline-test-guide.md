@@ -362,6 +362,58 @@ Run Document Q&A with something unrelated, e.g. "Who won the 2022 World Cup?".
 
 ---
 
+## Part H — Privacy and security
+
+These use made-up values only: the test card number `4111 1111 1111 1111` and the Aadhaar-shaped
+number `2345 6789 0124` (it passes the Aadhaar checksum but belongs to no one).
+
+### ☐ 34. The guard blocks a secret before Discord (or Gmail)
+1. Input (text) → **Discord Webhook** (content `{{input.value}}`). Leave `privacy_guard` at its default, **block**.
+2. Run with `my aws key is AKIAIOSFODNN7EXAMPLE` (AWS's own documentation example; not a real key).
+
+**You should see:** the Discord card turns red with "Blocked by the privacy guard: found 1 AWS access key in content". Nothing arrives in Discord. The error never shows the key itself.
+
+### ☐ 35. Redact through a real email (the one this phase was verified with)
+1. Input → **Gmail** (to: you, subject `Privacy test`, body `Customer details: {{input.value}}`). Set Gmail's **privacy_guard** to **redact**.
+2. Run with `card 4111 1111 1111 1111, Aadhaar 2345 6789 0124`.
+
+**You should see:** the email in your inbox reads `card [REDACTED:CREDIT_CARD], Aadhaar [REDACTED:AADHAAR]`. Open the run: the Gmail step's input shows the same masked body.
+
+### ☐ 36. Warn mode
+Same as 35 with **warn**, sending to yourself.
+
+**You should see:** the email arrives unchanged, and the run's Privacy Report shows "guard warned" on the Gmail step.
+
+### ☐ 37. The Privacy Report
+Open the run from test 35 (Executions → the run).
+
+**You should see:** a **Privacy report** box: "2 found: 1 financial, 1 government IDs", "1 Aadhaar, 1 card number", the steps that held them, and "guard redacted" on Gmail; "stored data masked" at the top. The Inputs and every step show `[REDACTED:...]`: the real numbers appear nowhere on the page.
+
+### ☐ 38. Privacy settings
+1. In the editor, **Privacy** (top bar) → untick **Mask sensitive data**, tick **Also detect personal data**, add `you@example.com` to the allowlist → **Save**.
+2. Run test 36 again with `email asha@example.com and you@example.com`.
+
+**You should see:** the run history now shows the real text (masking off). The report counts **1 email** (asha's; the allowlisted one is ignored). Turn masking back on afterwards.
+
+### ☐ 39. Redact → Gemini → Restore
+1. Input → **PII Redact** (text `{{input.value}}`) → **Gemini** (prompt: `Write a two-line reply to this customer, keeping placeholders like <PERSON_1> exactly as they are: {{pii_redact.text}}`) → **PII Restore** (text `{{gemini.response}}`, mapping_id `{{pii_redact.mapping_id}}`) → Output (`{{pii_restore.text}}`).
+2. Run with `Hi, I'm Rahul Sharma (rahul@example.com), my card 4111 1111 1111 1111 was charged twice.`
+
+**You should see:** the Gemini step's input has `<PERSON_1>`, `<EMAIL_1>`, `<CREDIT_CARD_1>` instead of the real values. The final reply has the real name and email back in it. PII Redact's own output shows only the placeholders and a `mapping_id`, never the originals.
+
+### ☐ 40. Secret Scanner
+Text node with `AWS key AKIAIOSFODNN7EXAMPLE, password=Hunter2isNotSafe, request id 3f2a9c1e-1b2c-4d5e-8f90-123456789abc` → **Secret Scanner** (data `{{text.text}}`) → Output (`{{secret_scanner.by_type}}`).
+
+**You should see:** `{"AWS_ACCESS_KEY": 1, "PASSWORD": 1}`. The UUID isn't flagged. Each finding has a path and character positions, but no value.
+
+### ☐ 41. Email → ICS → Telegram with messy dates
+1. Input (text, e.g. `Lunch with Asha tomorrow 1pm to 2:30 at Cafe Mondegar`) → **Structured Output** (prompt: `Now is {{system.now}} in Asia/Kolkata. Extract the event as exact ISO date-times in that zone: {{input.value}}`, schema `{"type":"object","required":["title","start","end"],"properties":{"title":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"},"location":{"type":"string"}}}`) → **ICS Calendar Event** (title `{{structured_output.data.title}}`, start `{{structured_output.data.start}}`, end `{{structured_output.data.end}}`, location `{{structured_output.data.location}}`) → **Telegram** (text `Your invite`, document `{{ics_calendar.attachment}}`).
+2. Run it. Then set the ICS start directly to `tomorrow evening` and run the ICS node alone (**Test node**).
+
+**You should see:** an `.ics` file in Telegram that opens in your calendar app at the right day and time, with a 30-minute reminder. With `tomorrow evening` the ICS node returns `ambiguous: true` and a reason, and no file.
+
+---
+
 ## Final checks
 
 - ☐ **Executions page:** filter by status and by trigger; open a run and click each step to see its input, output and time.

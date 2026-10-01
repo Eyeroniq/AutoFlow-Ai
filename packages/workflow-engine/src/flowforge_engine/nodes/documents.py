@@ -29,7 +29,7 @@ from flowforge_engine.nodes.ai import (
     parse_chain_entry,
 )
 from flowforge_engine.providers.settings import LLM_PROVIDER_NAMES, LLMProviderName
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedLLMConfig, NodeConfig, NodeDefinition, register_node
 
 logger = logging.getLogger(__name__)
 
@@ -349,7 +349,7 @@ class OCRNode(NodeDefinition[OCRConfig]):
 # --- LLM document nodes -----------------------------------------------------------------
 
 
-class LLMChainConfig(NodeConfig):
+class LLMChainConfig(GuardedLLMConfig):
     """Provider settings shared by the LLM document nodes (same semantics as the LLM nodes)."""
 
     provider: LLMProviderName = Field(default="gemini", description="Which LLM service answers. 'mock' returns a canned reply.")
@@ -427,6 +427,7 @@ class SummarizeResult(BaseModel):
 @register_node("summarize")
 class SummarizeNode(_LLMDocumentNode, NodeDefinition[SummarizeConfig]):
     category = "documents"
+    guard_fields = ('text', 'focus')
     label = "Summarize"
     description = "Summarizes document text with an LLM: length, style, focus, and a fallback chain."
     icon = "text-quote"
@@ -653,6 +654,7 @@ def parse_entities(reply: str, types: list[str], custom: dict[str, str]) -> Enti
 @register_node("extract_entities")
 class EntityExtractionNode(_LLMDocumentNode, NodeDefinition[EntityExtractionConfig]):
     category = "documents"
+    guard_fields = ('text',)
     label = "Entity Extraction"
     description = "Pulls people, organizations, dates, amounts, and custom types out of text as validated JSON."
     icon = "tags"

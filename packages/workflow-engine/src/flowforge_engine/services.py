@@ -9,6 +9,7 @@ import httpx
 from flowforge_engine.files import FileNotAvailable, FileStore
 from flowforge_engine.knowledge import KnowledgeError, KnowledgeStore
 from flowforge_engine.netguard import ALLOW_ENV
+from flowforge_engine.privacy import MemoryVault, PrivacyPolicy, SecretVault
 from flowforge_engine.providers.base import EmailProvider, LLMProvider, MailboxProvider
 from flowforge_engine.providers.factory import (
     get_discord_provider,
@@ -51,6 +52,8 @@ class ExecutionServices:
         allow_private_network: bool | None = None,
         state: NodeStateStore | None = None,
         knowledge: KnowledgeStore | None = None,
+        privacy: PrivacyPolicy | None = None,
+        vault: SecretVault | None = None,
     ):
         self.settings = provider_settings if provider_settings is not None else ProviderSettings.from_env()
         self._llm: dict[str, LLMProvider] = dict(llm_providers or {})
@@ -71,6 +74,10 @@ class ExecutionServices:
         self.http_transport = http_transport
         self._files = files
         self._knowledge = knowledge
+        # The workflow's privacy settings (guard and masking), and where PII Redact keeps
+        # its mappings (encrypted Redis in the API, so Restore works on another worker).
+        self.privacy: PrivacyPolicy = privacy if privacy is not None else PrivacyPolicy()
+        self.vault: SecretVault = vault if vault is not None else MemoryVault()
         # The HTTP Request node's SSRF guard (flowforge_engine.netguard) is on unless this is
         # True; None reads HTTP_ALLOW_PRIVATE_NETWORKS from the environment.
         if allow_private_network is None:

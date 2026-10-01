@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, CalendarClock, Check, CircleAlert, Play, Redo2, Rocket, Save, ShieldCheck, Square, Undo2, Variable } from "lucide-react";
+import { ArrowLeft, CalendarClock, Check, CircleAlert, Play, Redo2, Rocket, Save, Shield, ShieldCheck, Square, Undo2, Variable } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
@@ -38,6 +38,22 @@ function TriggersButton() {
     >
       <CalendarClock className="size-4" aria-hidden /> Triggers
       {tone !== "off" && <span className={`size-2 rounded-full ${TRIGGER_DOT[tone]}`} aria-label={tone} />}
+    </button>
+  );
+}
+
+function PrivacyButton() {
+  const rightPanel = useEditorUi((s) => s.rightPanel);
+  const setUi = useEditorUi((s) => s.set);
+  return (
+    <button
+      type="button"
+      className={`${barButton} ${rightPanel === "privacy" ? "bg-indigo-600" : ""}`}
+      onClick={() => setUi({ rightPanel: rightPanel === "privacy" ? null : "privacy" })}
+      title="Privacy guard, masking of stored data, and allowlist"
+      data-testid="privacy-button"
+    >
+      <Shield className="size-4" aria-hidden /> Privacy
     </button>
   );
 }
@@ -178,6 +194,7 @@ export function TopBar({ onValidate, onRun }: { onValidate: () => void; onRun: (
           )}
         </button>
         <TriggersButton />
+        <PrivacyButton />
         <button
           type="button"
           className={barButton}

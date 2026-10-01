@@ -15,13 +15,14 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from flowforge_engine.errors import VariableResolutionError
 from flowforge_engine.models import NodeContext
 
 RESERVED_NAMESPACES = frozenset({"vars", "system"})
-SYSTEM_KEYS = frozenset({"workflow_id", "execution_id", "node_id"})
+SYSTEM_KEYS = frozenset({"workflow_id", "execution_id", "node_id", "now", "today"})
 # Available only in per-item template fields (NodeDefinition.deferred_fields): the current
 # list item and its 0-based position. They shadow a node with the same id there.
 ITEM_NAMESPACES = frozenset({"item", "index"})
@@ -63,6 +64,9 @@ def build_scope(context: NodeContext) -> dict[str, Any]:
             "workflow_id": context.workflow_id,
             "execution_id": context.execution_id,
             "node_id": context.node_id,
+            # When the node runs, in UTC (ISO 8601), and that day: for "tomorrow at 3pm" prompts.
+            "now": (now := datetime.now(UTC)).isoformat(timespec="seconds"),
+            "today": now.date().isoformat(),
         },
     }
 

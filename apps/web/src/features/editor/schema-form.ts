@@ -132,10 +132,15 @@ function specFor(name: string, raw: JsonSchema, root: JsonSchema, required: bool
   }
 }
 
-/** Field specs in schema property order. */
+// Settings every guarded node shares (inherited first in the schema), shown after the node's own fields.
+const LAST_FIELDS = ["privacy_guard"];
+
+/** Field specs in schema property order, shared settings last. */
 export function fieldsFromSchema(schema: JsonSchema): FieldSpec[] {
   const required = new Set(schema.required ?? []);
-  return Object.entries(schema.properties ?? {}).map(([name, prop]) => specFor(name, prop, schema, required.has(name)));
+  const entries = Object.entries(schema.properties ?? {});
+  const ordered = [...entries.filter(([n]) => !LAST_FIELDS.includes(n)), ...entries.filter(([n]) => LAST_FIELDS.includes(n))];
+  return ordered.map(([name, prop]) => specFor(name, prop, schema, required.has(name)));
 }
 
 const isEmpty = (value: unknown) => value === undefined || value === null || value === "";

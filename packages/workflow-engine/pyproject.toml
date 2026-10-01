@@ -27,6 +27,10 @@ sources = ["feedparser>=6", "trafilatura>=2"]
 audio = ["faster-whisper>=1.1"]
 # Web Search with DuckDuckGo (Tavily needs nothing extra).
 search = ["ddgs>=9"]
+# Personal-data detection (names, addresses) for the privacy layer; secrets and Indian IDs need nothing extra.
+privacy = ["presidio-analyzer>=2.2", "spacy>=3.8"]
+# ICS Calendar node.
+calendar = ["icalendar>=6"]
 test = ["pytest>=8", "pytest-asyncio>=1.0"]
 
 [tool.hatch.build.targets.wheel]

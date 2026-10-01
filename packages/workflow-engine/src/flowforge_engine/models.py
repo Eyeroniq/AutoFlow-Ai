@@ -175,6 +175,8 @@ class NodeRunResult(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     duration_ms: int | None = None
+    # What the privacy guard did before the node ran (counts and types, never values).
+    privacy: dict[str, Any] | None = None
 
 
 class ExecutionResult(BaseModel):

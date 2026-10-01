@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type RightPanel = "variables" | "validation" | "triggers" | null;
+export type RightPanel = "variables" | "validation" | "triggers" | "privacy" | null;
 export type ConnectionStatus = "idle" | "connecting" | "open" | "reconnecting" | "closed" | "error";
 
 interface EditorUi {

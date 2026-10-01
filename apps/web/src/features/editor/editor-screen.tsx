@@ -20,6 +20,7 @@ import { RunInputsDialog, RunPanel } from "./run-panel";
 import { ValidationPanel, VariablesPanel } from "./side-panels";
 import { getEditorStore, useEditor } from "./store";
 import { FloatingRunButton, TopBar } from "./top-bar";
+import { PrivacyPanel } from "./privacy-panel";
 import { TriggersPanel } from "./triggers-panel";
 import { useEditorUi } from "./ui-store";
 
@@ -99,6 +100,7 @@ function RightPanel({ onValidate }: { onValidate: () => void }) {
   if (rightPanel === "variables") return <VariablesPanel />;
   if (rightPanel === "validation") return <ValidationPanel onValidate={onValidate} />;
   if (rightPanel === "triggers") return <TriggersPanel />;
+  if (rightPanel === "privacy") return <PrivacyPanel />;
   if (ids.length === 1) return <ConfigPanel key={ids[0]} nodeId={ids[0]} />;
   if (ids.length > 1) return <MultiSelectionPanel ids={ids} />;
   return null;

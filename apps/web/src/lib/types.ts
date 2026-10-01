@@ -237,10 +237,43 @@ export interface NodeExecution {
   worker_hostname: string | null;
 }
 
+export interface PrivacySettings {
+  mask_stored_io: boolean;
+  detect_personal_data: boolean;
+  allowlist: string[];
+}
+
+export interface PrivacyGuard {
+  mode: string;
+  action: "clean" | "warned" | "redacted" | "blocked" | "off";
+  total: number;
+  by_type: Record<string, number>;
+  by_category: Record<string, number>;
+  fields: string[];
+}
+
+export interface PrivacyReport {
+  total: number;
+  by_type: Record<string, number>;
+  by_category: Record<string, number>;
+  guard_actions: Record<string, number>;
+  masked: boolean;
+  nodes: {
+    node_key: string;
+    label: string;
+    node_type: string;
+    total: number;
+    by_type: Record<string, number>;
+    by_category: Record<string, number>;
+    guard: PrivacyGuard | null;
+  }[];
+}
+
 export interface ExecutionDetail extends ExecutionSummary {
   inputs: Record<string, unknown> | null;
   final_output: Record<string, unknown> | null;
   node_executions: NodeExecution[];
+  privacy_report?: PrivacyReport | null;
 }
 
 export interface ExecutionAccepted {

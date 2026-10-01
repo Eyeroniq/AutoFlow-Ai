@@ -40,7 +40,7 @@ async def test_node_catalog_comes_from_the_registry(client, user):
     assert nodes["output"]["produces_final_output"] is True
 
     groups = [n["group"] for n in response.json()]
-    order = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Knowledge", "Audio"]
+    order = ["General", "LLM", "Lists", "Data sources", "Integrations", "Documents", "Knowledge", "Audio", "Privacy"]
     assert groups == sorted(groups, key=order.index)  # grouped, in order
 
     assert (await client.get("/api/nodes")).status_code == 401

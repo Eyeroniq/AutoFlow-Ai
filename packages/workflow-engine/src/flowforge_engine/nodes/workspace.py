@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from flowforge_engine.errors import ProviderError
 from flowforge_engine.models import GraphNode, NodeContext, NodeResult
 from flowforge_engine.providers.workspace import notion_id
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedOutboundConfig, NodeConfig, NodeDefinition, register_node
 from flowforge_engine.variables import contains_reference
 
 
@@ -48,7 +48,7 @@ class _Workspace:
 # --- Notion --------------------------------------------------------------------------------
 
 
-class NotionCreatePageConfig(NodeConfig):
+class NotionCreatePageConfig(GuardedOutboundConfig):
     database_id: str = Field(min_length=1, description=DATABASE_ID)
     title: str = Field(min_length=1, description="The page's title (the database's title property).")
     content: str = Field(
@@ -73,6 +73,7 @@ class NotionCreatePageResult(BaseModel):
 
 @register_node("notion_create_page")
 class NotionCreatePageNode(_Workspace, NodeDefinition[NotionCreatePageConfig]):
+    guard_fields = ('title', 'content')
     label = "Notion: Create Page"
     description = "Adds a page (a row) to a Notion database, with a title and a body."
     icon = "notebook-pen"
@@ -142,7 +143,7 @@ BASE_ID = "The base's id (starts with 'app'; it's in the base's URL)."
 TABLE = "The table's name or id (tbl...)."
 
 
-class AirtableCreateConfig(NodeConfig):
+class AirtableCreateConfig(GuardedOutboundConfig):
     base_id: str = Field(min_length=1, description=BASE_ID)
     table_name: str = Field(min_length=1, description=TABLE)
     fields: dict[str, Any] = Field(description='The record\'s fields by name, e.g. {"Name": "{{input.name}}", "Score": 7}.')
@@ -163,6 +164,7 @@ class AirtableCreateResult(BaseModel):
 
 @register_node("airtable_create_record")
 class AirtableCreateNode(_Workspace, NodeDefinition[AirtableCreateConfig]):
+    guard_fields = ('fields',)
     label = "Airtable: Create Record"
     description = "Adds a record to an Airtable table."
     icon = "table"

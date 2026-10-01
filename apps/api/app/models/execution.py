@@ -102,6 +102,8 @@ class NodeExecution(UUIDPrimaryKeyMixin, Base):
     # Which queue and worker ran the node (null for skipped nodes and sync runs' queue).
     queue: Mapped[str | None] = mapped_column(String(100))
     worker_hostname: Mapped[str | None] = mapped_column(String(255))
+    # What was found in the step (counts and types) and what the privacy guard did; no values.
+    privacy_json: Mapped[dict[str, Any] | None]
 
     execution: Mapped["WorkflowExecution"] = relationship(back_populates="node_executions")
     node: Mapped["WorkflowNode | None"] = relationship()

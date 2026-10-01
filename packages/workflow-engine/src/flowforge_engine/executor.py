@@ -23,6 +23,7 @@ from flowforge_engine.models import (
     RunStatus,
     WorkflowGraph,
 )
+from flowforge_engine.privacy import GuardOutcome, blocked_message, guard, summarize
 from flowforge_engine.registry import NodeDefinition, NodeRegistry, default_registry
 from flowforge_engine.variables import build_scope, resolve_value
 
@@ -263,11 +264,17 @@ async def _run_node(
     clock = time.perf_counter()
     resolved: dict[str, Any] = node.config
     output: dict[str, Any] | None = None
+    privacy: dict[str, Any] | None = None
     error: str | None = None
     interrupted = False
 
     try:
         resolved = _resolve_config(node.config, definition, build_scope(node_context))
+        if definition.guard_fields:
+            resolved, outcome = await _apply_guard(resolved, definition, node_context)
+            privacy = outcome.report()
+            if outcome.action == "blocked":
+                raise _GuardBlocked(blocked_message(outcome))
         config = definition.config_schema.model_validate(resolved)
         timeout = definition.timeout(config, timeout)
         node_context.deadline = time.monotonic() + timeout
@@ -279,6 +286,8 @@ async def _run_node(
             error = node_result.error or "Node reported failure without an error message"
     except _Interrupted:
         interrupted = True
+    except _GuardBlocked as exc:
+        error = str(exc)
     except VariableResolutionError as exc:
         error = str(exc)
     except pydantic.ValidationError as exc:
@@ -321,7 +330,34 @@ async def _run_node(
         started_at=started_at,
         finished_at=datetime.now(UTC),
         duration_ms=duration_ms,
+        privacy=privacy,
     )
+
+
+class _GuardBlocked(Exception):
+    """The privacy guard refused to let the node run (the message names types and counts)."""
+
+
+async def _apply_guard(
+    resolved: dict[str, Any], definition: NodeDefinition[Any], context: NodeContext
+) -> tuple[dict[str, Any], GuardOutcome]:
+    """Run the node's privacy guard on its content fields (Presidio, when personal data is
+    on, is CPU work, so it runs in a thread)."""
+    policy = context.services.privacy
+    if "privacy_guard" not in resolved:  # the node's default mode (block / redact)
+        field = definition.config_schema.model_fields.get("privacy_guard")
+        resolved = {**resolved, "privacy_guard": field.default if field is not None else "off"}
+    if "personal" in policy.categories:
+        resolved, outcome = await asyncio.to_thread(guard, resolved, definition.guard_fields, policy)
+    else:
+        resolved, outcome = guard(resolved, definition.guard_fields, policy)
+    if outcome.action in ("blocked", "redacted", "warned"):
+        logger.info(
+            "privacy guard",
+            extra={"node_id": context.node_id, "node_type": definition.type, "action": outcome.action,
+                   "findings": summarize(outcome.findings)["by_type"]},
+        )
+    return resolved, outcome
 
 
 def _resolve_config(config: dict[str, Any], definition: NodeDefinition[Any], scope: dict[str, Any]) -> dict[str, Any]:

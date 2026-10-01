@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from flowforge_engine.errors import ProviderError
 from flowforge_engine.models import GraphNode, NodeContext, NodeResult
 from flowforge_engine.providers.settings import LLM_PROVIDER_NAMES, LLMProviderName
-from flowforge_engine.registry import NodeConfig, NodeDefinition, register_node
+from flowforge_engine.registry import GuardedLLMConfig, NodeDefinition, register_node
 from flowforge_engine.variables import contains_reference
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ def parse_chain_entry(entry: str) -> tuple[str, str | None]:
     return provider.strip().lower(), (model.strip() or None)
 
 
-class LLMConfig(NodeConfig):
+class LLMConfig(GuardedLLMConfig):
     provider: LLMProviderName = Field(description="Which LLM service answers. 'mock' returns a canned reply.")
     model: str | None = Field(
         default=None,
@@ -235,6 +235,7 @@ def llm_required_providers(node: GraphNode, default_provider: str) -> list[tuple
 
 class LLMNode(NodeDefinition[LLMConfig]):
     category = "ai"
+    guard_fields = ('system_prompt', 'user_prompt')
     output_schema = LLMResult
     queue = "llm"
 

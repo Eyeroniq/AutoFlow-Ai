@@ -1,6 +1,7 @@
 """Built-in node types. Importing this package registers them on the default registry."""
 
 from flowforge_engine.nodes.audio import SpeechToTextNode
+from flowforge_engine.nodes.calendar import CalendarNode
 from flowforge_engine.nodes.ai import (
     AnthropicNode,
     CerebrasNode,
@@ -22,6 +23,7 @@ from flowforge_engine.nodes.io import InputNode, OutputNode, TextNode
 from flowforge_engine.nodes.lists import FilterNode, ForEachNode, JoinNode
 from flowforge_engine.nodes.logic import ConditionNode, DelayNode
 from flowforge_engine.nodes.notify import DiscordWebhookNode, TelegramNode
+from flowforge_engine.nodes.privacy import RedactNode, RestoreNode, SecretScannerNode
 from flowforge_engine.nodes.search import WebSearchNode
 from flowforge_engine.nodes.structured import StructuredOutputNode
 from flowforge_engine.nodes.vision import VisionNode
@@ -37,6 +39,7 @@ __all__ = [
     "AirtableCreateNode",
     "AirtableListNode",
     "AnthropicNode",
+    "CalendarNode",
     "CerebrasNode",
     "ChunkerNode",
     "ConditionNode",
@@ -64,9 +67,12 @@ __all__ = [
     "OpenRouterNode",
     "OutputNode",
     "PDFExtractNode",
+    "RedactNode",
     "RerankerNode",
+    "RestoreNode",
     "RetrieverNode",
     "RSSNode",
+    "SecretScannerNode",
     "SpeechToTextNode",
     "StructuredOutputNode",
     "SummarizeNode",

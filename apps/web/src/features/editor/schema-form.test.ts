@@ -195,3 +195,18 @@ describe("patterns", () => {
     expect(bad.error?.issues[0].message).toBe(String.raw`Doesn't match the expected format (^[a-z_]{3,}(\+[a-z_]{3,})*$)`);
   });
 });
+
+describe("shared settings", () => {
+  it("puts privacy_guard after the node's own fields", () => {
+    const fields = fieldsFromSchema({
+      type: "object",
+      properties: {
+        privacy_guard: { type: "string", enum: ["off", "warn", "redact", "block"], default: "block" },
+        to: { type: "string" },
+        body: { type: "string" },
+      },
+    });
+    expect(fields.map((f) => f.name)).toEqual(["to", "body", "privacy_guard"]);
+    expect(fields[2]).toMatchObject({ kind: "select", default: "block" });
+  });
+});

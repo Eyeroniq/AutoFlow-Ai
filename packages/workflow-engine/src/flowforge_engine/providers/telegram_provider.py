@@ -9,6 +9,7 @@ is part of the URL, so it is redacted from every error message.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -84,11 +85,18 @@ class TelegramProvider:
             )
         return ProviderError(self.name, f"{method}: {description} (HTTP {status}).{_hint(description)}", status_code=status)
 
-    async def _call_once(self, method: str, payload: dict[str, Any]) -> Any:
+    async def _call_once(
+        self, method: str, payload: dict[str, Any], files: dict[str, tuple[str, bytes, str]] | None = None
+    ) -> Any:
         url = f"{self._api_base}/bot{self._token}/{method}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                response = await client.post(url, json=payload)
+                if files:
+                    # multipart/form-data: plain fields as strings, the file as an upload.
+                    form = {k: v if isinstance(v, str) else json.dumps(v) for k, v in payload.items()}
+                    response = await client.post(url, data=form, files=files)
+                else:
+                    response = await client.post(url, json=payload)
         except httpx.TimeoutException as exc:
             raise ProviderError(self.name, f"{method}: no answer within {self._timeout:g}s", retryable=True) from exc
         except httpx.HTTPError as exc:
@@ -114,9 +122,30 @@ class TelegramProvider:
                 retry_after = None
         raise self._error(method, status, description, float(retry_after) if retry_after is not None else None)
 
-    async def call(self, method: str, payload: dict[str, Any] | None = None) -> Any:
+    async def call(
+        self, method: str, payload: dict[str, Any] | None = None, files: dict[str, tuple[str, bytes, str]] | None = None
+    ) -> Any:
         """One Bot API method, retried on 429 (after `retry_after`), 5xx, and network errors."""
-        return await with_retries(lambda: self._call_once(method, payload or {}), self._retry, sleep=self._sleep)
+        return await with_retries(lambda: self._call_once(method, payload or {}, files), self._retry, sleep=self._sleep)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        filename: str,
+        data: bytes,
+        content_type: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+        disable_notification: bool = False,
+    ) -> dict[str, Any]:
+        """sendDocument (a file of up to 50 MB, with an optional caption of up to 1024 characters)."""
+        payload: dict[str, Any] = {"chat_id": str(chat_id), "disable_notification": disable_notification}
+        if caption:
+            payload["caption"] = caption
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+        return await self.call("sendDocument", payload, files={"document": (filename, data, content_type)})
 
     async def send_message(
         self,

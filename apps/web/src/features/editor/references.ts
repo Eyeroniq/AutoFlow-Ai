@@ -16,7 +16,7 @@ export interface ReferenceSuggestion {
   detail: string;
 }
 
-export const SYSTEM_REFERENCES = ["system.execution_id", "system.workflow_id", "system.node_id"];
+export const SYSTEM_REFERENCES = ["system.execution_id", "system.workflow_id", "system.node_id", "system.now", "system.today"];
 
 /** Offered first in a list node's per-item fields (For Each's prompt, Join's template). */
 export const ITEM_REFERENCES: ReferenceSuggestion[] = [

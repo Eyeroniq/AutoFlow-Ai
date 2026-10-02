@@ -16,6 +16,7 @@ export const TRIGGER_LABEL: Record<TriggerType, string> = {
   schedule: "Schedule",
   email: "New email",
   webhook: "Webhook",
+  telegram: "Telegram message",
 };
 
 /** How an execution's trigger reads in lists ("api" was the webhook's old name). */
@@ -24,6 +25,8 @@ export const EXECUTION_TRIGGER_LABEL: Record<ExecutionTrigger, string> = {
   schedule: "schedule",
   email: "email",
   webhook: "webhook",
+  telegram: "telegram",
+  discord_voice: "discord voice",
   event: "event",
   api: "webhook",
 };

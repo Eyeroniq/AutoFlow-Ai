@@ -160,3 +160,13 @@ class PrivacySettings(BaseModel):
                     raise ValueError(f"invalid regex in '{entry}': {exc}") from None
             cleaned.append(entry)
         return cleaned
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(min_length=5, max_length=2000, description="The pipeline you want, in plain English.")
+
+
+class GenerateResult(BaseModel):
+    workflow: "WorkflowRead"
+    attempts: int = Field(description="How many tries the model needed to produce a graph that validates.")
+    warnings: list[str] = Field(description="Things to set up before it runs, e.g. a provider that isn't connected.")

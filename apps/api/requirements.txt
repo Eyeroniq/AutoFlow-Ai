@@ -51,5 +51,12 @@ ddgs==9.16.0
 presidio-analyzer==2.2.364
 spacy==3.8.16
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# Resume refinement: the refined resume as a PDF (reportlab) and a DOCX file (python-docx).
+reportlab==5.0.1
+python-docx==1.2.0
 # ICS Calendar node.
 icalendar==7.3.0
+# Discord voice monitor (app.discord_bot): py-cord with PyNaCl and davey (voice + DAVE), and
+# numpy to mix recordings. libopus comes with ffmpeg in the Dockerfile.
+numpy==2.4.6
+py-cord[voice]==2.8.1

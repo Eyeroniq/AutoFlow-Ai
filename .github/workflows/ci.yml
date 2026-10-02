@@ -118,6 +118,28 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  discord-recorder:
+    name: Discord recorder (node --test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/discord-recorder
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/discord-recorder/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
   build:
     name: Docker images build
     runs-on: ubuntu-24.04

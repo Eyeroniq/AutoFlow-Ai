@@ -46,6 +46,7 @@ class SecretScannerConfig(NodeConfig):
 class SecretScannerResult(BaseModel):
     findings: list[dict[str, Any]]
     count: int
+    summary: str
     clean: bool
     by_type: dict[str, int]
     by_category: dict[str, int]
@@ -68,6 +69,8 @@ class SecretScannerNode(NodeDefinition[SecretScannerConfig]):
         summary = summarize(findings)
         out = {
             "findings": [f.as_dict() for f in findings], "count": len(findings), "clean": not findings,
+            # "1 card number, 1 Aadhaar number" (no values): for messages.
+            "summary": describe(findings) or "nothing sensitive",
             "by_type": summary["by_type"], "by_category": summary["by_category"],
             "personal_data_engine": "rules" if not config.include_personal_data else (
                 "presidio" if presidio_status() is None else "rules (Presidio unavailable)"
@@ -153,3 +156,118 @@ class RestoreNode(NodeDefinition[RestoreConfig]):
         if unknown and config.fail_on_unknown:
             return NodeResult.fail(f"Unknown placeholders in the text: {', '.join(unknown)}", restored=restored)
         return NodeResult.ok(text=text, restored=restored, unknown_placeholders=unknown)
+
+
+# --- Redact Image ----------------------------------------------------------------------------
+
+
+class RedactImageConfig(NodeConfig):
+    image: Any = Field(
+        description="The screenshot or photo, e.g. {{input.image}} (an Input node of type file).",
+        json_schema_extra={"format": "file-ref"},
+    )
+    include_personal_data: bool = Field(default=True, description=PERSONAL_HELP)
+    language: str = Field(
+        default="eng", pattern=r"^[a-z_]{3,}(\+[a-z_]{3,})*$", description="Tesseract language(s), e.g. eng or eng+hin."
+    )
+    padding: int = Field(default=4, ge=0, le=40, description="Extra pixels around each hidden word.")
+
+
+class RedactImageResult(BaseModel):
+    file: dict[str, Any]
+    count: int
+    hidden_words: int
+    summary: str
+    by_type: dict[str, int]
+    width: int
+    height: int
+
+
+# Small screenshots are OCR'd at this scale (Tesseract reads ~30px-high text best).
+_MIN_OCR_WIDTH = 1600
+MAX_IMAGE_PIXELS = 40_000_000
+
+
+def redact_image(path: Any, categories: frozenset[str], allowlist: list[str], language: str, padding: int):
+    """(PNG bytes with every sensitive word covered by a black box, findings, words hidden,
+    size). Words come from Tesseract with their boxes; each line's text is scanned, and the
+    words a finding overlaps are covered."""
+    import io
+
+    import pytesseract
+    from PIL import Image, ImageDraw, ImageOps
+
+    with Image.open(path) as opened:
+        opened.seek(0)
+        image = ImageOps.exif_transpose(opened).convert("RGB")
+    if image.width * image.height > MAX_IMAGE_PIXELS:
+        raise ValueError(f"the image is {image.width}x{image.height}; at most {MAX_IMAGE_PIXELS // 1_000_000} megapixels")
+    scale = max(1.0, _MIN_OCR_WIDTH / image.width)
+    ocr_input = image.resize((round(image.width * scale), round(image.height * scale))) if scale > 1 else image
+    data = pytesseract.image_to_data(ocr_input, lang=language, config="--psm 3",
+                                     output_type=pytesseract.Output.DICT, timeout=180)
+
+    # Rebuild each line's text, remembering where every word sits in it.
+    lines: dict[tuple[int, int, int], list[int]] = {}
+    for i, word in enumerate(data["text"]):
+        if word.strip():
+            lines.setdefault((data["block_num"][i], data["par_num"][i], data["line_num"][i]), []).append(i)
+    findings, boxes = [], []
+    for indexes in lines.values():
+        text, spans = "", []
+        for i in indexes:
+            if text:
+                text += " "
+            spans.append((len(text), len(text) + len(data["text"][i].strip()), i))
+            text += data["text"][i].strip()
+        found = scan_text(text, categories=categories, allowlist=allowlist)
+        findings += found
+        for f in found:
+            for start, end, i in spans:
+                if start < f.end and end > f.start:
+                    boxes.append((data["left"][i], data["top"][i], data["width"][i], data["height"][i]))
+
+    draw = ImageDraw.Draw(image)
+    for left, top, width, height in boxes:
+        x0, y0 = left / scale - padding, top / scale - padding
+        x1, y1 = (left + width) / scale + padding, (top + height) / scale + padding
+        draw.rectangle([max(0, x0), max(0, y0), min(image.width, x1), min(image.height, y1)], fill="black")
+    out = io.BytesIO()
+    image.save(out, format="PNG", optimize=True)
+    return out.getvalue(), findings, len(boxes), image.size
+
+
+@register_node("redact_image")
+class RedactImageNode(NodeDefinition[RedactImageConfig]):
+    category = "privacy"
+    label = "Redact Image"
+    description = "Covers card numbers, Aadhaar, PAN, keys, emails, phones, and names in a screenshot or photo with black boxes, so it's safe to share."
+    icon = "eye-off"
+    config_schema = RedactImageConfig
+    output_schema = RedactImageResult
+    queue = "ocr"
+
+    async def execute(self, context: NodeContext, config: RedactImageConfig) -> NodeResult:
+        import base64
+
+        from flowforge_engine.files import IMAGE_TYPES, FileNotAvailable
+        from flowforge_engine.nodes.documents import _open_file
+
+        try:
+            stored = await _open_file(context, config.image, IMAGE_TYPES)
+        except FileNotAvailable as exc:
+            return NodeResult.fail(str(exc))
+        try:
+            png, findings, hidden, (width, height) = await asyncio.to_thread(
+                redact_image, stored.path, _categories(config.include_personal_data),
+                context.services.privacy.allowlist, config.language, config.padding,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:  # unreadable image, OCR timeout
+            return NodeResult.fail(f"Couldn't redact '{stored.filename}': {exc}")
+        stem = stored.filename.rsplit(".", 1)[0] or "image"
+        return NodeResult.ok(
+            file={"filename": f"{stem}-redacted.png", "content": base64.b64encode(png).decode("ascii"),
+                  "encoding": "base64", "content_type": "image/png"},
+            count=len(findings), hidden_words=hidden, summary=describe(findings) or "nothing sensitive",
+            by_type=summarize(findings)["by_type"], width=width, height=height,
+        )

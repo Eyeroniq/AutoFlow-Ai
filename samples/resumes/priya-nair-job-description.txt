@@ -1,0 +1,17 @@
+Senior Backend Engineer (Python) - Meridian Payments
+
+We are looking for a Senior Backend Engineer to build and scale the services behind our payments platform.
+
+Responsibilities
+- Design, build and operate Python (FastAPI or Django) services that handle high request volumes
+- Own PostgreSQL schemas and query performance; experience with Redis caching
+- Run services on AWS using Docker and Kubernetes; build CI/CD pipelines
+- Improve reliability: monitoring, alerting, incident response, on-call
+- Mentor engineers and review code
+
+Requirements
+- 5+ years of backend development, strong Python
+- Experience with event-driven systems (Kafka or similar message queues)
+- Hands-on with AWS (ECS/EKS, RDS, S3), Terraform is a plus
+- Comfortable with REST API design, testing, and observability (Prometheus, Grafana)
+- Track record of measurable performance or reliability improvements

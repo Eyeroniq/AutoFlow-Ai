@@ -25,6 +25,7 @@ failed runs in a row (app.services.trigger_outcomes).
 
 import contextlib
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -63,6 +64,7 @@ _EXECUTION_TRIGGER = {
     TriggerType.SCHEDULE: ExecutionTrigger.SCHEDULE,
     TriggerType.EMAIL: ExecutionTrigger.EMAIL,
     TriggerType.WEBHOOK: ExecutionTrigger.WEBHOOK,
+    TriggerType.TELEGRAM: ExecutionTrigger.TELEGRAM,
 }
 
 
@@ -127,10 +129,42 @@ class WebhookTriggerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class TelegramTriggerConfig(BaseModel):
+    """Messages to the server's bot (TELEGRAM_BOT_TOKEN) from these chats may run this
+    deployed pipeline, through the intent router (app.services.telegram_center)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_chat_ids: list[str] = Field(
+        default=None, max_length=50, validate_default=True,
+        description="Chats whose messages may run it. Empty: TELEGRAM_CHAT_ID from the server's .env.",
+    )
+
+    @field_validator("allowed_chat_ids", mode="before")
+    @classmethod
+    def _ids(cls, value: Any) -> list[str]:
+        # validate_default: an omitted list is filled from TELEGRAM_CHAT_ID here too.
+        items = value.split(",") if isinstance(value, str) else list(value or [])
+        ids = []
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            if not re.fullmatch(r"-?\d{1,20}", text):
+                raise ValueError(f"'{text}' is not a Telegram chat id (a number, negative for groups)")
+            ids.append(text)
+        if not ids and settings.TELEGRAM_CHAT_ID:
+            ids = [str(settings.TELEGRAM_CHAT_ID).strip()]
+        if not ids:
+            raise ValueError("add at least one chat id (TELEGRAM_CHAT_ID isn't set on the server)")
+        return list(dict.fromkeys(ids))
+
+
 CONFIG_MODELS: dict[TriggerType, type[BaseModel]] = {
     TriggerType.SCHEDULE: ScheduleConfig,
     TriggerType.EMAIL: EmailTriggerConfig,
     TriggerType.WEBHOOK: WebhookTriggerConfig,
+    TriggerType.TELEGRAM: TelegramTriggerConfig,
 }
 
 
@@ -243,6 +277,15 @@ async def save_trigger(
                 trigger.next_fire_at = now  # the next tick checks
         else:
             trigger.next_fire_at = None
+
+    elif trigger_type is TriggerType.TELEGRAM and enabled:
+        live = await db.scalar(
+            select(Deployment.id).where(Deployment.workflow_id == workflow.id, Deployment.revoked_at.is_(None))
+        )
+        if live is None:
+            raise TriggerConfigError(
+                "Deploy the pipeline first (with a description): Telegram messages are matched against deployed pipelines"
+            )
 
     if turning_on:
         trigger.consecutive_failures = 0
@@ -704,7 +747,7 @@ async def _last_run(db: AsyncSession, trigger_id: uuid.UUID) -> TriggerLastRun |
 
 
 async def list_triggers(db: AsyncSession, workflow: Workflow, *, now: datetime | None = None) -> TriggersRead:
-    """All three trigger types for the panel (unsaved ones with their defaults)."""
+    """All four trigger types for the panel (unsaved ones with their defaults)."""
     now = now or utcnow()
     rows = {
         row.type: row
@@ -718,7 +761,7 @@ async def list_triggers(db: AsyncSession, workflow: Workflow, *, now: datetime |
         select(Deployment).where(Deployment.workflow_id == workflow.id, Deployment.revoked_at.is_(None))
     )
     views = []
-    for trigger_type in (TriggerType.SCHEDULE, TriggerType.EMAIL, TriggerType.WEBHOOK):
+    for trigger_type in (TriggerType.SCHEDULE, TriggerType.EMAIL, TriggerType.WEBHOOK, TriggerType.TELEGRAM):
         row = rows.get(trigger_type)
         config = dict(row.config_json) if row and row.config_json else {}
         warnings: list[str] = []
@@ -745,6 +788,13 @@ async def list_triggers(db: AsyncSession, workflow: Workflow, *, now: datetime |
                 warnings.append(warning)
             if row and row.state_json:
                 view.mailbox = {k: row.state_json.get(k) for k in ("folder", "last_uid", "last_poll_at")}
+        elif trigger_type is TriggerType.TELEGRAM:
+            view.config = {"allowed_chat_ids": config.get("allowed_chat_ids") or (
+                [str(settings.TELEGRAM_CHAT_ID)] if settings.TELEGRAM_CHAT_ID else [])}
+            if deployment is None:
+                warnings.append("Deploy the workflow with a description first: Telegram messages are matched against it.")
+            elif not settings.TELEGRAM_BOT_TOKEN:
+                warnings.append("The server has no TELEGRAM_BOT_TOKEN, so nothing listens for messages.")
         else:
             # The deployment endpoint is the webhook; it's on unless switched off here.
             view.enabled = row.enabled if row is not None else deployment is not None

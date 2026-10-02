@@ -13,6 +13,8 @@ interface EditorUi {
   connection: { status: ConnectionStatus; detail: string | null };
   /** Bumped to ask the config panel to open the Test section for the selected node. */
   testRequest: number;
+  /** Bumped to start a run as the Run button would (the command palette's "Run current pipeline"). */
+  runRequest: number;
   set: (patch: Partial<Omit<EditorUi, "set">>) => void;
 }
 
@@ -25,5 +27,6 @@ export const useEditorUi = create<EditorUi>((set) => ({
   deployOpen: false,
   connection: { status: "idle", detail: null },
   testRequest: 0,
+  runRequest: 0,
   set: (patch) => set(patch),
 }));

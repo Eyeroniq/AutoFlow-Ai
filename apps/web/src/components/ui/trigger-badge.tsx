@@ -1,4 +1,4 @@
-import { CalendarClock, Hand, Mail, type LucideIcon, Webhook, Zap } from "lucide-react";
+import { CalendarClock, Hand, Mail, Mic, type LucideIcon, Send, Webhook, Zap } from "lucide-react";
 
 import type { ExecutionTrigger } from "@/lib/types";
 
@@ -7,6 +7,8 @@ const TRIGGERS: Record<ExecutionTrigger, { icon: LucideIcon; label: string; tone
   schedule: { icon: CalendarClock, label: "schedule", tone: "bg-violet-50 text-violet-700" },
   email: { icon: Mail, label: "email", tone: "bg-sky-50 text-sky-700" },
   webhook: { icon: Webhook, label: "webhook", tone: "bg-amber-50 text-amber-800" },
+  telegram: { icon: Send, label: "telegram", tone: "bg-cyan-50 text-cyan-700" },
+  discord_voice: { icon: Mic, label: "discord voice", tone: "bg-indigo-50 text-indigo-700" },
   // Deployment runs from before triggers existed.
   api: { icon: Webhook, label: "webhook", tone: "bg-amber-50 text-amber-800" },
   event: { icon: Zap, label: "event", tone: "bg-slate-100 text-slate-600" },

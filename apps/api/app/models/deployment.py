@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -36,3 +36,9 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Set by undeploy (DELETE /api/deployments/{id}): the endpoint answers 404 and the key is
     # dead. The row stays for history; deploying again reactivates it with a new key.
     revoked_at: Mapped[datetime | None] = mapped_column(default=None)
+    # What the pipeline does, in a sentence or two: the Telegram intent router matches
+    # messages against it.
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    # The graph sends or writes somewhere (deployments.has_side_effects); runs started from
+    # Telegram wait for a Confirm tap.
+    side_effects: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())

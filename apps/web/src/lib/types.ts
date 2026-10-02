@@ -186,7 +186,7 @@ export interface NodeTestResult {
 
 export type ExecutionStatus = "pending" | "running" | "success" | "failed" | "stopped";
 /** What started a run. "api" is the old name for webhook runs (before triggers existed). */
-export type ExecutionTrigger = "manual" | "schedule" | "email" | "webhook" | "event" | "api";
+export type ExecutionTrigger = "manual" | "schedule" | "email" | "webhook" | "telegram" | "discord_voice" | "event" | "api";
 export type NodeExecutionStatus = "pending" | "running" | "success" | "failed" | "skipped";
 
 export interface ExecutionSummary {
@@ -273,6 +273,8 @@ export interface ExecutionDetail extends ExecutionSummary {
   inputs: Record<string, unknown> | null;
   final_output: Record<string, unknown> | null;
   node_executions: NodeExecution[];
+  /** The graph exactly as it ran (what Replay draws). */
+  graph?: { nodes: unknown[]; edges: unknown[] } | null;
   privacy_report?: PrivacyReport | null;
 }
 
@@ -435,6 +437,10 @@ export interface Deployment {
   /** Relative to the API's base URL: /api/v1/deployments/{id}/run */
   endpoint: string;
   api_key_prefix: string;
+  /** What it does: the Telegram Command Center matches messages against it. */
+  description: string;
+  /** It sends or writes somewhere: runs from Telegram wait for a Confirm tap. */
+  side_effects: boolean;
   inputs: DeploymentInput[];
   outputs: DeploymentOutput[];
   key_created_at: string;
@@ -495,7 +501,7 @@ export interface IntegrationTestResult {
 
 // --- triggers ------------------------------------------------------------------------------------
 
-export type TriggerType = "schedule" | "email" | "webhook";
+export type TriggerType = "schedule" | "email" | "webhook" | "telegram";
 
 export interface ScheduleConfig {
   cron: string;

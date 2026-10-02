@@ -47,8 +47,10 @@ def greeting_graph(text: str = "Hello {{input.topic}}") -> dict[str, Any]:
     }
 
 
-async def deploy(client, user, wid: str, *, expect: int | None = None) -> dict[str, Any]:
-    response = await client.post("/api/deployments", json={"workflow_id": wid}, headers=user.headers)
+async def deploy(
+    client, user, wid: str, *, expect: int | None = None, description: str | None = "Greets someone by name"
+) -> dict[str, Any]:
+    response = await client.post("/api/deployments", json={"workflow_id": wid, "description": description}, headers=user.headers)
     if expect is not None:
         assert response.status_code == expect, response.text
     return response.json()
@@ -139,9 +141,23 @@ async def test_deploy_returns_the_key_once_and_stores_only_its_hash(client, user
 
 async def test_the_key_response_is_not_cacheable(client, user):
     wid = await create_workflow(client, user, greeting_graph())
-    response = await client.post("/api/deployments", json={"workflow_id": wid}, headers=user.headers)
+    response = await client.post("/api/deployments", json={"workflow_id": wid, "description": "Greets"}, headers=user.headers)
     assert response.status_code == 201
     assert response.headers["cache-control"] == "no-store"
+
+
+async def test_the_first_deploy_needs_a_description_and_redeploys_keep_it(client, user):
+    wid = await create_workflow(client, user, greeting_graph())
+    missing = await client.post("/api/deployments", json={"workflow_id": wid}, headers=user.headers)
+    assert missing.status_code == 422 and "Describe what the pipeline does" in missing.json()["detail"]
+    blank = await client.post("/api/deployments", json={"workflow_id": wid, "description": "   "}, headers=user.headers)
+    assert blank.status_code == 422
+    created = await deploy(client, user, wid, expect=201, description="  Greets someone  ")
+    assert created["description"] == "Greets someone" and created["side_effects"] is False
+    again = await deploy(client, user, wid, expect=200, description=None)
+    assert again["description"] == "Greets someone"
+    changed = await deploy(client, user, wid, expect=200, description="Says hello")
+    assert changed["description"] == "Says hello"
 
 
 async def test_redeploy_keeps_id_and_key_and_publishes_the_new_graph(client, user, task_queue, shared_session):

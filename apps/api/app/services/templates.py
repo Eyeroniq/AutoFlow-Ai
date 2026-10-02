@@ -83,7 +83,7 @@ EMBEDDING_REQUIREMENT = {
     "why": "Turns document chunks and questions into vectors. Without one, the knowledge base uses mock word-matching embeddings.",
 }
 # Templates that work on a knowledge base: using one creates DEFAULT_KB if it's missing.
-KB_TEMPLATES = frozenset({"pdf-to-knowledge-base", "document-qa"})
+KB_TEMPLATES = frozenset({"pdf-to-knowledge-base", "document-qa", "paper-digest"})
 DEFAULT_KB = "My documents"
 
 SAMPLE_EMAIL = {
@@ -595,6 +595,222 @@ DOCUMENT_QA: dict[str, Any] = {
     "variables": [{"key": "knowledge_base", "value": DEFAULT_KB, "type": "workflow"}],
 }
 
+PAPER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["title", "problem", "contributions", "data", "results", "limitations"],
+    "properties": {
+        "title": {"type": "string"},
+        "problem": {"type": "string"},
+        "contributions": {"type": "array", "items": {"type": "string"}},
+        "data": {"type": "string"},
+        "results": {"type": "array", "items": {"type": "string"}},
+        "limitations": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+PAPER_DIGEST: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "paper", "type": "input", "label": "Paper (PDF)", "position": _pos(0, 80),
+            "config": {"name": "paper", "input_type": "file"},
+        },
+        {
+            "id": "pdf", "type": "pdf_extract", "label": "Read the paper", "position": _pos(320, 0),
+            "config": {"file": "{{paper.value}}", "max_chars": 60000},
+        },
+        {
+            "id": "digest", "type": "structured_output", "label": "Extract the essentials", "position": _pos(640, 0),
+            "config": {
+                "provider": "gemini",
+                "prompt": (
+                    "Read this research paper and extract, faithfully and concisely: its title; the problem it addresses "
+                    "(one sentence); its main contributions (2-4 bullets); the data or dataset used (one line, with sizes "
+                    "if stated); the headline results with their numbers (2-4 bullets); and the limitations it admits or "
+                    "that are evident (1-3 bullets). Use only what the paper says.\n\n{{pdf.text}}"
+                ),
+                "schema": PAPER_SCHEMA,
+                "max_input_chars": 60000,
+            },
+        },
+        {
+            "id": "add", "type": "kb_add_document", "label": "Add to the knowledge base", "position": _pos(640, 200),
+            "description": "So Document Q&A can answer questions about it later, with page citations",
+            "config": {"knowledge_base": "{{vars.knowledge_base}}", "file": "{{paper.value}}"},
+        },
+        {
+            "id": "card", "type": "text", "label": "Digest", "position": _pos(960, 80),
+            "config": {"text": (
+                "📄 {{digest.data.title}}\n\nProblem: {{digest.data.problem}}\n\nContributions:\n{{contributions.text}}\n\n"
+                "Data: {{digest.data.data}}\n\nResults:\n{{results.text}}\n\nLimitations:\n{{limitations.text}}\n\n"
+                "Added to “{{add.knowledge_base}}” ({{add.chunk_count}} chunks): ask Document Q&A about it."
+            )},
+        },
+        {
+            "id": "contributions", "type": "join", "label": "Contributions", "position": _pos(800, -120),
+            "config": {"items": "{{digest.data.contributions}}", "template": "• {{item}}", "separator": "\\n"},
+        },
+        {
+            "id": "results", "type": "join", "label": "Results", "position": _pos(800, -40),
+            "config": {"items": "{{digest.data.results}}", "template": "• {{item}}", "separator": "\\n"},
+        },
+        {
+            "id": "limitations", "type": "join", "label": "Limitations", "position": _pos(800, 40),
+            "config": {"items": "{{digest.data.limitations}}", "template": "• {{item}}", "separator": "\\n"},
+        },
+        {
+            "id": "out", "type": "output", "label": "Digest", "position": _pos(1280, 80),
+            "config": {"name": "digest", "value": "{{card.text}}"},
+        },
+    ],
+    "edges": [
+        {"source": "paper", "target": "pdf"},
+        {"source": "pdf", "target": "digest"},
+        {"source": "paper", "target": "add"},
+        {"source": "digest", "target": "contributions"},
+        {"source": "digest", "target": "results"},
+        {"source": "digest", "target": "limitations"},
+        {"source": "contributions", "target": "card"},
+        {"source": "results", "target": "card"},
+        {"source": "limitations", "target": "card"},
+        {"source": "add", "target": "card"},
+        {"source": "card", "target": "out"},
+    ],
+    "variables": [{"key": "knowledge_base", "value": DEFAULT_KB, "type": "workflow"}],
+}
+
+SAFE_TO_SHARE: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "image", "type": "input", "label": "Screenshot or photo", "position": _pos(0, 80),
+            "config": {"name": "image", "input_type": "file"},
+        },
+        {
+            "id": "redact", "type": "redact_image", "label": "Black out what's sensitive", "position": _pos(320, 0),
+            "description": "OCR finds each word's position; card numbers, IDs, keys, emails, phones, and names get black boxes",
+            "config": {"image": "{{image.value}}", "include_personal_data": True},
+        },
+        {
+            "id": "read", "type": "vision", "label": "Second opinion: read every word", "position": _pos(320, 200),
+            "config": {
+                "image": "{{image.value}}",
+                "prompt": (
+                    "Transcribe all the text in this image exactly as written, line by line, including numbers, names, "
+                    "emails, and codes. Output only the text."
+                ),
+                "temperature": 0,
+            },
+        },
+        {
+            "id": "scan", "type": "secret_scanner", "label": "What Vision saw", "position": _pos(640, 200),
+            "config": {"data": "{{read.text}}", "include_personal_data": True},
+        },
+        {
+            "id": "missed", "type": "condition", "label": "Anything not covered?", "position": _pos(960, 80),
+            "description": "Vision saw more sensitive items than OCR could locate and cover",
+            "config": {"left": "{{scan.count}}", "operator": "greater_than", "right": "{{redact.count}}"},
+        },
+        {
+            "id": "check", "type": "text", "label": "Check before posting", "position": _pos(1280, 0),
+            "config": {"text": (
+                "⚠️ I covered {{redact.summary}}, but I can see more in the picture ({{scan.summary}}) than I could "
+                "locate to cover. Check the copy before you post it."
+            )},
+        },
+        {
+            "id": "done", "type": "text", "label": "Safe copy", "position": _pos(1280, 200),
+            "config": {"text": "🛡️ Covered: {{redact.summary}}. The rest of the picture is unchanged."},
+        },
+        {"id": "out_check", "type": "output", "label": "Copy to check", "position": _pos(1600, 0),
+         "config": {"name": "check_first", "value": {"message": "{{check.text}}", "file": "{{redact.file}}"}}},
+        {"id": "out_done", "type": "output", "label": "Safe copy", "position": _pos(1600, 200),
+         "config": {"name": "safe_copy", "value": {"message": "{{done.text}}", "file": "{{redact.file}}"}}},
+    ],
+    "edges": [
+        {"source": "image", "target": "redact"},
+        {"source": "image", "target": "read"},
+        {"source": "read", "target": "scan"},
+        {"source": "redact", "target": "missed"},
+        {"source": "scan", "target": "missed"},
+        {"source": "missed", "target": "check", "source_handle": "true"},
+        {"source": "missed", "target": "done", "source_handle": "false"},
+        {"source": "check", "target": "out_check"},
+        {"source": "done", "target": "out_done"},
+    ],
+    "variables": [],
+}
+
+EVENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["title", "start", "end", "location", "notes"],
+    "properties": {
+        "title": {"type": "string"},
+        "start": {"type": "string"},
+        "end": {"type": "string"},
+        "location": {"type": "string"},
+        "notes": {"type": "string"},
+    },
+}
+
+CALENDAR_INVITE: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "request", "type": "input", "label": "What and when", "position": _pos(0, 80),
+            "config": {"name": "request", "input_type": "text",
+                       "default": "GATE mock test next Sunday 10am to 1pm at COEP main building"},
+        },
+        {
+            "id": "event", "type": "structured_output", "label": "Work out the exact times", "position": _pos(320, 80),
+            "config": {
+                "provider": "gemini",
+                "prompt": (
+                    "It is now {{system.now}} (UTC); the user is in {{vars.timezone}}. Turn this request into one calendar "
+                    "event: a short title, and start and end as ISO 8601 date-times in the user's time zone without an "
+                    "offset (e.g. 2026-10-05T15:00). Resolve words like today, tomorrow, next Sunday, or evening (18:00) "
+                    "against the current date. If no duration is given, make it one hour. If the request doesn't say "
+                    "when at all, or the date can't be pinned down, write the words the user used (e.g. \"sometime "
+                    "soon\") as start instead of guessing. Location and notes: what the request says, or an empty string.\n\nRequest: {{request.value}}"
+                ),
+                "schema": EVENT_SCHEMA,
+                "temperature": 0,
+            },
+        },
+        {
+            "id": "ics", "type": "ics_calendar", "label": "Calendar file", "position": _pos(640, 80),
+            "config": {
+                "title": "{{event.data.title}}", "start": "{{event.data.start}}", "end": "{{event.data.end}}",
+                "location": "{{event.data.location}}", "description": "{{event.data.notes}}",
+                "timezone": "{{vars.timezone}}", "alarm_minutes": 30,
+            },
+        },
+        {
+            "id": "clear", "type": "condition", "label": "Date clear?", "position": _pos(960, 80),
+            "config": {"left": "{{ics.ambiguous}}", "operator": "equals", "right": False},
+        },
+        {
+            "id": "summary", "type": "text", "label": "Invite", "position": _pos(1280, 0),
+            "config": {"text": "📅 {{event.data.title}}\n{{ics.start}} → {{ics.end}}\nReminder 30 minutes before. Tap the file to add it to your calendar."},
+        },
+        {
+            "id": "unclear", "type": "text", "label": "Ask for the date", "position": _pos(1280, 160),
+            "config": {"text": "I couldn't pin down when that is ({{ics.reason}}). Send it again with a day and time, e.g. \"Friday 3pm\"."},
+        },
+        {"id": "out", "type": "output", "label": "Invite", "position": _pos(1600, 0),
+         "config": {"name": "invite", "value": {"message": "{{summary.text}}", "file": "{{ics.attachment}}"}}},
+        {"id": "out_unclear", "type": "output", "label": "Question", "position": _pos(1600, 160),
+         "config": {"name": "question", "value": "{{unclear.text}}"}},
+    ],
+    "edges": [
+        {"source": "request", "target": "event"},
+        {"source": "event", "target": "ics"},
+        {"source": "ics", "target": "clear"},
+        {"source": "clear", "target": "summary", "source_handle": "true"},
+        {"source": "clear", "target": "unclear", "source_handle": "false"},
+        {"source": "summary", "target": "out"},
+        {"source": "unclear", "target": "out_unclear"},
+    ],
+    "variables": [{"key": "timezone", "value": "Asia/Kolkata", "type": "workflow"}],
+}
+
 CATALOG: list[dict[str, Any]] = [
     {
         "slug": "morning-digest",
@@ -698,6 +914,46 @@ CATALOG: list[dict[str, Any]] = [
         ),
         "graph": DOCUMENT_QA,
         "requirements": [EMBEDDING_REQUIREMENT, LLM_REQUIREMENT],
+        "triggers": [],
+    },
+    {
+        "slug": "paper-digest",
+        "name": "Paper Digest",
+        "category": "Knowledge",
+        "description": (
+            "Send a research paper (PDF): its problem, contributions, data, results with numbers, and limitations, "
+            "and it's added to your knowledge base so Document Q&A can answer questions about it with page citations."
+        ),
+        "telegram": "Summarizes a research paper PDF (contributions, data, results, limitations) and saves it for questions later.",
+        "graph": PAPER_DIGEST,
+        "requirements": [EMBEDDING_REQUIREMENT, LLM_REQUIREMENT],
+        "triggers": [],
+    },
+    {
+        "slug": "safe-to-share",
+        "name": "Safe to Share",
+        "category": "Privacy",
+        "description": (
+            "Send a screenshot or photo before posting it: card numbers, Aadhaar, PAN, keys, emails, phone numbers, "
+            "and names are covered with black boxes, and you get the picture back ready to share (Vision double-checks "
+            "and warns you if it sees anything that wasn't covered)."
+        ),
+        "telegram": "Checks a screenshot or photo for sensitive data (cards, Aadhaar, PAN, keys, emails, phone numbers) before you share it.",
+        "graph": SAFE_TO_SHARE,
+        "requirements": [{"providers": ["gemini"], "label": "A Gemini key (Vision)", "why": "Reads the text in the image."}],
+        "triggers": [],
+    },
+    {
+        "slug": "calendar-invite",
+        "name": "Calendar Invite",
+        "category": "Productivity",
+        "description": (
+            "Say or type an event (\"GATE mock test next Sunday 10 to 1\"): an LLM works out the exact times from today's "
+            "date, and you get an .ics file with a 30-minute reminder. A vague date gets a question, not a guess."
+        ),
+        "telegram": "Turns an event in plain words, like 'mock test next Sunday 10 to 1', into a calendar invite file.",
+        "graph": CALENDAR_INVITE,
+        "requirements": [LLM_REQUIREMENT],
         "triggers": [],
     },
 ]

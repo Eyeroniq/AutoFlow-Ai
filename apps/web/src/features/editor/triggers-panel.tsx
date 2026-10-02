@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarClock, CircleAlert, Copy, ExternalLink, Mail, RefreshCw, Rocket, ShieldAlert, Webhook, X } from "lucide-react";
+import { CalendarClock, CircleAlert, Copy, ExternalLink, Mail, RefreshCw, Rocket, Send, ShieldAlert, Webhook, X } from "lucide-react";
 import Link from "next/link";
 import { type ReactNode, useEffect, useId, useState } from "react";
 
@@ -379,6 +379,51 @@ function WebhookCard({ trigger, settings, save, busy }: CardProps) {
   );
 }
 
+// --- telegram ---------------------------------------------------------------------------------
+
+function TelegramCard({ trigger, settings, save, busy }: CardProps) {
+  const setUi = useEditorUi((s) => s.set);
+  const saved = ((trigger.config.allowed_chat_ids as string[] | undefined) ?? []).join(", ");
+  const [chats, setChats] = useState(saved);
+  const config = () => ({ allowed_chat_ids: chats.split(",").map((c) => c.trim()).filter(Boolean) });
+  return (
+    <Card icon={<Send className="size-4" />} trigger={trigger} settings={settings} busy={busy} onToggle={(enabled) => save("telegram", enabled, config())}>
+      <div className="space-y-2">
+        <p className="text-[11px] text-slate-500">
+          Message the bot (text, a voice note, or a photo) from an allowed chat: it picks the deployed pipeline whose description fits, asks if
+          anything is missing, and replies with the result. Pipelines that send or change something wait for a Confirm tap.
+        </p>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-slate-600">Allowed chat ids (comma-separated)</span>
+          <input
+            value={chats}
+            onChange={(e) => setChats(e.target.value)}
+            placeholder="TELEGRAM_CHAT_ID from the server when empty"
+            className="block w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+            data-testid="telegram-chats"
+          />
+        </label>
+        {chats !== saved && trigger.enabled && (
+          <Button size="sm" onClick={() => save("telegram", true, config())} loading={busy}>
+            Save chats
+          </Button>
+        )}
+        {trigger.warnings.map((warning) => (
+          <p key={warning} className="text-[11px] text-amber-800">
+            {warning}
+          </p>
+        ))}
+        {trigger.warnings.some((w) => w.startsWith("Deploy")) && (
+          <Button size="sm" variant="secondary" onClick={() => setUi({ deployOpen: true })}>
+            <Rocket className="size-3.5" aria-hidden /> Deploy
+          </Button>
+        )}
+      </div>
+      <Activity trigger={trigger} settings={settings} nextLabel="Next" />
+    </Card>
+  );
+}
+
 // --- limits and the panel ---------------------------------------------------------------------
 
 function Limits({ data, onSave, busy }: { data: TriggersResponse; onSave: (settings: TriggerSettings) => void; busy: boolean }) {
@@ -481,6 +526,7 @@ export function TriggersPanel() {
               const key = `${trigger.type}:${JSON.stringify(trigger.config)}`;
               if (trigger.type === "schedule") return <ScheduleCard key={key} {...props} />;
               if (trigger.type === "email") return <EmailCard key={key} {...props} />;
+              if (trigger.type === "telegram") return <TelegramCard key={key} {...props} />;
               return <WebhookCard key={key} {...props} />;
             })}
             <Limits key={JSON.stringify(data.settings)} data={data} onSave={(settings) => saveLimits.mutate(settings)} busy={saveLimits.isPending} />

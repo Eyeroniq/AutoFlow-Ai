@@ -37,6 +37,7 @@ import type {
   WorkflowUpdate,
   WorkflowValidation,
 } from "./types";
+import type { Refinement, RefinementSummary, ResumeEmail } from "./resume-types";
 
 export class ApiError extends Error {
   constructor(
@@ -295,6 +296,12 @@ export const api = {
       authed<Workflow>(`/api/workflows/${enc(id)}`, { method: "PUT", body }),
     remove: (id: string) => authed<null>(`/api/workflows/${enc(id)}`, { method: "DELETE" }),
     duplicate: (id: string) => authed<Workflow>(`/api/workflows/${enc(id)}/duplicate`, { method: "POST" }),
+    /** An LLM drafts a validated pipeline from a description (422 with `detail.problems` if it can't). */
+    generate: (prompt: string) =>
+      authed<{ workflow: Workflow; attempts: number; warnings: string[] }>("/api/workflows/generate", {
+        method: "POST",
+        body: { prompt },
+      }),
     /** Validate `graph` (unsaved edits) or, without it, the saved graph. */
     validate: (id: string, graph?: WorkflowGraph) =>
       authed<WorkflowValidation>(`/api/workflows/${enc(id)}/validate`, {
@@ -341,8 +348,8 @@ export const api = {
   deployments: {
     list: (params: { workflow_id?: string } = {}) => authed<Deployment[]>(`/api/deployments${query(params)}`),
     /** Deploy or redeploy the saved graph; `api_key` is set only on the first deploy. */
-    deploy: (workflowId: string) =>
-      authed<DeploymentWithKey>("/api/deployments", { method: "POST", body: { workflow_id: workflowId } }),
+    deploy: (workflowId: string, description?: string) =>
+      authed<DeploymentWithKey>("/api/deployments", { method: "POST", body: { workflow_id: workflowId, description } }),
     /** A new API key (in `api_key`); the old one is revoked. The deployed graph doesn't change. */
     rotateKey: (deploymentId: string) =>
       authed<DeploymentWithKey>(`/api/deployments/${enc(deploymentId)}/rotate-key`, { method: "POST" }),
@@ -354,6 +361,18 @@ export const api = {
     get: (id: string) => authed<UploadedFile>(`/api/files/${enc(id)}`),
     remove: (id: string) => authed<null>(`/api/files/${enc(id)}`, { method: "DELETE" }),
     upload: uploadFile,
+  },
+  resume: {
+    /** Start the five-agent pipeline on an uploaded PDF (202; poll `get` until it is success or failed). */
+    start: (fileId: string, jobDescription: string) =>
+      authed<Refinement>("/api/resume-refinements", { method: "POST", body: { file_id: fileId, job_description: jobDescription } }),
+    list: () => authed<RefinementSummary[]>("/api/resume-refinements"),
+    get: (id: string) => authed<Refinement>(`/api/resume-refinements/${enc(id)}`),
+    remove: (id: string) => authed<null>(`/api/resume-refinements/${enc(id)}`, { method: "DELETE" }),
+    download: (id: string, format: "pdf" | "docx") =>
+      downloadAuthed(`/api/resume-refinements/${enc(id)}/download?format=${format}`, `resume.${format}`),
+    /** Email the refined PDF and DOCX to the signed-in user's own address (the API takes no recipient). */
+    email: (id: string) => authed<ResumeEmail>(`/api/resume-refinements/${enc(id)}/email`, { method: "POST" }),
   },
   knowledgeBases: {
     list: () => authed<KnowledgeBase[]>("/api/knowledge-bases"),

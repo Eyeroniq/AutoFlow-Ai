@@ -26,6 +26,8 @@ TRIGGERS_TICK_TASK = "flowforge.triggers_tick"
 POLL_EMAIL_TASK = "flowforge.poll_email_trigger"
 # Read, chunk, and embed a document added to a knowledge base (app.services.knowledge).
 INGEST_DOCUMENT_TASK = "flowforge.ingest_document"
+# Run the multi-agent resume refinement pipeline (app.services.resume_refinement).
+REFINE_RESUME_TASK = "flowforge.refine_resume"
 
 celery_app = Celery(
     "flowforge",

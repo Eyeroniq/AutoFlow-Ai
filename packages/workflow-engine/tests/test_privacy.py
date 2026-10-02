@@ -115,6 +115,24 @@ def test_personal_rules_and_presidio():
     assert ("PERSON", "Rahul Sharma") in found and ("LOCATION", "Pune") in found
 
 
+def test_labelled_names_on_forms_are_found():
+    assert types("Name: Priya Deshmukh") == [("PERSON", "Priya Deshmukh")]
+    assert types("Full name - Ravi Kumar Patil") == [("PERSON", "Ravi Kumar Patil")]
+    assert types("the name: of the game") == [] and types("Customer: priya") == []
+
+
+async def test_secret_scanner_summary_reads_like_a_sentence():
+    result = await execute_node(node("scan", "secret_scanner", data=f"{CARD} and {PAN}"), make_context())
+    assert result.output["summary"] == "1 card number, 1 PAN"
+    clean = await execute_node(node("scan", "secret_scanner", data="hello"), make_context())
+    assert clean.output["summary"] == "nothing sensitive"
+
+
+def test_lowercase_words_are_not_taken_for_names():
+    pytest.importorskip("presidio_analyzer")
+    assert [t for t, _ in types("$ docker compose logs api | tail -4")] == []
+
+
 def test_personal_data_only_when_asked():
     assert types("mail priya@example.com", {"secret", "financial", "government_id"}) == []
 
@@ -188,6 +206,65 @@ async def test_secret_scanner_node():
         node("scan", "secret_scanner", data=f"card {CARD}", fail_on_findings=True), make_context()
     )
     assert strict.status == NodeStatus.FAILED and strict.error == "Found 1 card number"
+
+
+# --- Redact Image -------------------------------------------------------------------------------
+
+
+def screenshot(tmp_path, lines, name="shot.png"):
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.new("RGB", (1300, 60 + 55 * len(lines)), "white")
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+    except OSError:
+        pytest.skip("DejaVu font not available")
+    for i, line in enumerate(lines):
+        draw.text((30, 25 + i * 55), line, fill="black", font=font)
+    path = tmp_path / name
+    image.save(path)
+    return path
+
+
+async def test_redact_image_blacks_out_only_the_sensitive_words(tmp_path):
+    pytest.importorskip("pytesseract")
+    from PIL import Image
+
+    path = screenshot(tmp_path, ["Payment details below", f"Card: {CARD}", "Thanks a lot"])
+    files = LocalFileStore()
+    stored = files.add(path, content_type="image/png")
+    services = ExecutionServices(provider_settings=ProviderSettings(testing=True), files=files)
+    result = await execute_node(node("r", "redact_image", image=stored.id, include_personal_data=False), make_context(services=services))
+    assert result.status == NodeStatus.SUCCESS, result.error
+    out = result.output
+    assert out["summary"] == "1 card number" and out["hidden_words"] >= 1
+    assert out["file"]["filename"] == "shot-redacted.png" and out["file"]["encoding"] == "base64"
+    redacted = tmp_path / "out.png"
+    redacted.write_bytes(base64.b64decode(out["file"]["content"]))
+    with Image.open(redacted) as image:
+        gray = image.convert("L")
+        card_row = gray.crop((130, 88, 420, 106))  # inside where the card digits were
+        first_row = gray.crop((30, 25, 400, 60))  # "Payment details below"
+        assert min(card_row.getdata()) == 0 and sum(v < 30 for v in card_row.getdata()) > 0.5 * card_row.width * card_row.height
+        assert sum(v < 30 for v in first_row.getdata()) < 0.3 * first_row.width * first_row.height  # still text, not a box
+
+
+async def test_redact_image_refuses_non_images(tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("hi")
+    files = LocalFileStore()
+    stored = files.add(path, content_type="text/plain")
+    services = ExecutionServices(provider_settings=ProviderSettings(testing=True), files=files)
+    result = await execute_node(node("r", "redact_image", image=stored.id), make_context(services=services))
+    assert result.status == NodeStatus.FAILED and "this node reads" in result.error
+
+
+def test_base64_file_content_is_never_scanned_or_rewritten():
+    attachment = {"filename": "x.png", "encoding": "base64", "content": "QUJDUEUxMjM0RiBBQkNQRTEyMzRG ABCPE1234F"}
+    assert scan({"file": attachment}) == []
+    assert mask({"file": attachment})[0] == {"file": attachment}
+    assert [f.type for f in scan({"file": {**attachment, "encoding": "text"}})] == ["PAN"]
 
 
 # --- The guard on real nodes ---------------------------------------------------------------------

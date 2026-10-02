@@ -1,0 +1,16 @@
+Senior Product Designer - Northwind Health
+
+Northwind builds patient-facing mobile and web products used by millions of people to manage their care.
+
+What you'll do
+- Own end-to-end design for core patient flows (booking, messaging, prescriptions), from research to shipped UI
+- Run user research and usability testing and turn findings into design decisions
+- Build and maintain our design system in Figma and partner with engineers on implementation
+- Define success metrics with product managers and show impact through experiments
+- Mentor designers and raise the quality bar
+
+What we're looking for
+- 6+ years in product or UX design with a strong mobile portfolio
+- Expert Figma and prototyping skills; comfortable with HTML/CSS
+- Experience with accessibility (WCAG) and design systems at scale
+- A track record of measurable improvements to conversion or task completion

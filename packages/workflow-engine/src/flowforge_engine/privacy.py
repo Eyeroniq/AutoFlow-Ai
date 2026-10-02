@@ -153,6 +153,12 @@ _CARD_PREFIX = re.compile(r"^(?:4|5[1-5]|2[2-7]|3[47]|6(?:011|5|4[4-9]|22)|3(?:0
 _AADHAAR = re.compile(r"(?<![\d-])[2-9]\d{3}([ -]?)\d{4}\1\d{4}(?![\d])")
 _PAN = re.compile(r"(?<![A-Za-z0-9])[A-Z]{3}[ABCFGHJLPT][A-Z]\d{4}[A-Z](?![A-Za-z0-9])")
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])")
+# A name written as a labelled field ("Name: Priya Deshmukh", "Full name - Ravi K"): forms and
+# screenshots, where a small NER model often misses it. Only the value is flagged.
+_LABELLED_NAME = re.compile(
+    r"(?i:\b(?:full\s+name|name|customer|patient|applicant|account\s+holder|holder)\b)\s*[:\-–]\s*"
+    r"([A-Z][a-z'’.]+(?:[ \t]+[A-Z][a-z'’.]*){0,3})"
+)
 _IN_PHONE = re.compile(r"(?<![\w+])(?:(?:\+|00)91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\d)")
 
 
@@ -202,6 +208,7 @@ def _government_findings(text: str) -> list[Finding]:
 def _personal_rule_findings(text: str) -> list[Finding]:
     found = [Finding("EMAIL", "personal", *m.span(), 0.95, "pattern") for m in _EMAIL.finditer(text)]
     found += [Finding("IN_PHONE", "personal", *m.span(), 0.8, "pattern") for m in _IN_PHONE.finditer(text)]
+    found += [Finding("PERSON", "personal", *m.span(1), 0.75, "pattern") for m in _LABELLED_NAME.finditer(text)]
     return found
 
 
@@ -230,6 +237,8 @@ def _presidio() -> Any:
     with _analyzer_lock:
         if _analyzer is None and _analyzer_error is None:
             try:
+                # Its loader warns about every recognizer of a language we don't load.
+                logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
                 from presidio_analyzer import AnalyzerEngine
                 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
@@ -251,6 +260,8 @@ def _presidio_findings(text: str) -> list[Finding]:
     return [
         Finding(_PRESIDIO_TYPES[r.entity_type], "personal", r.start, r.end, round(float(r.score), 3), "presidio")
         for r in results if r.score >= PRESIDIO_MIN_SCORE and r.entity_type in _PRESIDIO_TYPES
+        # The small model tags lowercase words ("docker") as people; real names are capitalized.
+        and not (r.entity_type in ("PERSON", "LOCATION") and not any(ch.isupper() for ch in text[r.start:r.end]))
     ]
 
 
@@ -319,7 +330,12 @@ def _walk(value: Any, path: str) -> Iterable[tuple[str, str]]:
     if isinstance(value, str):
         yield path, value
     elif isinstance(value, dict):
+        # A file's base64 content isn't text: a random run of it can look like a PAN or a card
+        # number, and "redacting" it would corrupt the file.
+        binary = value.get("encoding") == "base64"
         for key, item in value.items():
+            if binary and key == "content":
+                continue
             yield from _walk(item, f"{path}.{key}" if path else str(key))
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):

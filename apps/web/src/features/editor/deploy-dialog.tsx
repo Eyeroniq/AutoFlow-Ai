@@ -222,6 +222,10 @@ function DeployDialogBody({ workflowId, onClose }: { workflowId: string; onClose
   const [issued, setIssued] = useState<{ deploymentId: string; key: string } | null>(null);
 
   const deployment: Deployment | null = existing.data ?? null;
+  // Prefilled from the live deployment; required on the first deploy.
+  const [description, setDescription] = useState<string | null>(null);
+  const shownDescription = description ?? deployment?.description ?? "";
+  const needsDescription = !shownDescription.trim();
   const key = issued && deployment && issued.deploymentId === deployment.id ? issued.key : null;
   const behind = Boolean(deployment && (deployment.workflow_version !== version || unsaved));
   const io = deployment ?? draftIo;
@@ -245,7 +249,7 @@ function DeployDialogBody({ workflowId, onClose }: { workflowId: string; onClose
         return;
       }
       const redeploy = Boolean(deployment);
-      const result = await api.deployments.deploy(workflowId);
+      const result = await api.deployments.deploy(workflowId, shownDescription.trim() || undefined);
       const apiKey = received(result);
       toast.success(
         redeploy ? `Redeployed (v${result.version})` : "Pipeline deployed",
@@ -298,7 +302,8 @@ function DeployDialogBody({ workflowId, onClose }: { workflowId: string; onClose
           <Button
             onClick={() => void deploy()}
             loading={busy === "deploy"}
-            disabled={busy !== null || existing.isPending}
+            disabled={busy !== null || existing.isPending || needsDescription}
+            title={needsDescription ? "Describe what the pipeline does first" : undefined}
             variant={deployment && !behind ? "secondary" : "primary"}
             data-testid="deploy-confirm"
           >
@@ -330,6 +335,32 @@ function DeployDialogBody({ workflowId, onClose }: { workflowId: string; onClose
               Not deployed yet
             </span>
           )}
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="deploy-description" className="flex items-center gap-2 text-sm font-medium text-slate-800">
+            What does it do?
+            {deployment?.side_effects && (
+              <span
+                className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-200"
+                title="It sends or writes something (email, messages, non-GET HTTP, Notion/Airtable): runs from Telegram wait for a Confirm tap."
+                data-testid="deploy-side-effects"
+              >
+                has side effects
+              </span>
+            )}
+          </label>
+          <textarea
+            id="deploy-description"
+            rows={2}
+            maxLength={1000}
+            value={shownDescription}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="e.g. Searches the web for a question and answers it with sources."
+            className="block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+            data-testid="deploy-description"
+          />
+          <p className="text-[11px] text-slate-500">A sentence or two. The Telegram Command Center matches messages against it.</p>
         </div>
 
         {existing.error && <ErrorAlert message={`Couldn't load the deployment: ${existing.error.message}`} />}

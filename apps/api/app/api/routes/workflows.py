@@ -1,10 +1,11 @@
+import copy as copy_module
 import logging
 import socket
 import time
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from flowforge_engine import (
@@ -20,6 +21,7 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, SessionFactoryDep, TaskQueueDep
 from app.core.config import settings
+from app.core.rate_limit import limiter, per_user
 from app.core.redis import get_redis
 from app.models.enums import ExecutionStatus
 from app.models.execution import WorkflowExecution
@@ -47,6 +49,7 @@ from app.services.node_state import DbNodeStateStore
 from app.services.privacy import policy_for
 from app.services.generation import MAX_ATTEMPTS, GenerationFailed, LLMCall, generate, owner_llm
 from app.services.templates import fit_graph
+from app.services.triggers import switch_off_blocks, sync_trigger_blocks
 from app.services.providers import get_execution_services
 from app.services.runs import (
     InvalidWorkflowGraph,
@@ -139,9 +142,10 @@ async def get_workflow(workflow_id: uuid.UUID, db: DbSession, user: CurrentUser)
     responses={**_NOT_FOUND, 422: {"description": "Malformed graph (e.g. duplicate node ids)"}},
 )
 async def update_workflow(
-    workflow_id: uuid.UUID, body: WorkflowUpdate, db: DbSession, user: CurrentUser
+    workflow_id: uuid.UUID, body: WorkflowUpdate, db: DbSession, user: CurrentUser, services: Services
 ) -> Workflow:
     workflow = await get_owned_workflow(db, workflow_id, user)
+    previous_graph = copy_module.deepcopy(workflow.graph_json)
     fields = body.model_fields_set
     if "name" in fields and body.name is not None:
         workflow.name = body.name
@@ -153,6 +157,10 @@ async def update_workflow(
         await replace_graph(db, workflow, body.graph)
     await db.commit()
     await db.refresh(workflow)
+    if "graph" in fields and body.graph is not None:
+        # Trigger blocks (Schedule, Email, Telegram) become the workflow's real triggers.
+        await sync_trigger_blocks(db, workflow, previous_graph, services)
+        await db.refresh(workflow)
     return workflow
 
 
@@ -279,7 +287,7 @@ async def duplicate_workflow(workflow_id: uuid.UUID, db: DbSession, user: Curren
     )
     db.add(copy)
     await db.flush()
-    await replace_graph(db, copy, WorkflowGraph.model_validate(source.graph_json))
+    await replace_graph(db, copy, WorkflowGraph.model_validate(switch_off_blocks(source.graph_json)))
     copy.version = 1
     await db.commit()
     await db.refresh(copy)
@@ -366,7 +374,9 @@ async def run_node_test(
         503: {"description": "The task broker (Redis) is unreachable; the execution is marked failed"},
     },
 )
+@limiter.limit(lambda: settings.WORKFLOW_RUN_RATE_LIMIT, key_func=per_user)
 async def run(
+    request: Request,
     workflow_id: uuid.UUID,
     db: DbSession,
     user: CurrentUser,

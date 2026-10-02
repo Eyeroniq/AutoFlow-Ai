@@ -83,7 +83,6 @@ export function UserMenu({ tone = "light" }: { tone?: "light" | "dark" }) {
         { label: "Dashboard", onSelect: () => router.push("/dashboard") },
         { label: "Executions", onSelect: () => router.push("/executions") },
         { label: "Knowledge", onSelect: () => router.push("/knowledge") },
-        { label: "Resume refiner", onSelect: () => router.push("/resume") },
         { label: "Integrations", onSelect: () => router.push("/integrations") },
         { label: "Sign out", onSelect: signOut, icon: <LogOut className="size-4" />, danger: true },
       ]}
@@ -95,7 +94,6 @@ const NAV = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/executions", label: "Executions" },
   { href: "/knowledge", label: "Knowledge" },
-  { href: "/resume", label: "Resume" },
   { href: "/integrations", label: "Integrations" },
 ];
 

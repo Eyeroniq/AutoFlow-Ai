@@ -464,6 +464,110 @@ MEETING_NOTES: dict[str, Any] = {
     "variables": [{"key": "vocabulary", "value": "FlowForge, Groq, Telegram, Whisper", "type": "workflow"}],
 }
 
+RESUME_REFINER: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "resume", "type": "input", "label": "Resume PDF", "position": _pos(0, 0),
+            "description": "Your resume as a PDF (digital or scanned).",
+            "config": {"name": "resume", "input_type": "file"},
+        },
+        {
+            "id": "job", "type": "input", "label": "Job description", "position": _pos(0, 300),
+            "description": "Optional: paste the job posting to get a match score and a tailored rewrite.",
+            "config": {"name": "job_description", "input_type": "text", "default": ""},
+        },
+        {
+            "id": "read", "type": "ocr", "label": "Read the resume", "position": _pos(320, 0),
+            "description": "Text layer where the PDF has one, OCR for scans",
+            "config": {"file": "{{resume.resume}}", "language": "eng", "dpi": 300, "prefer_text_layer": True},
+        },
+        {
+            "id": "parse", "type": "resume_parse", "label": "Parser agent", "position": _pos(640, 0),
+            "description": "Structured resume: contact, summary, jobs with bullets, education, skills",
+            "config": {"text": "{{read.text}}"},
+        },
+        {
+            "id": "ats", "type": "resume_ats", "label": "ATS agent", "position": _pos(960, -160),
+            "description": "What applicant tracking systems would choke on (model review + measured PDF layout)",
+            "config": {"parsed": "{{parse.data}}", "file": "{{resume.resume}}"},
+        },
+        {
+            "id": "content", "type": "resume_content", "label": "Content coach", "position": _pos(960, 0),
+            "description": "Every bullet reviewed: weak verbs, no metrics, vague, passive",
+            "config": {"parsed": "{{parse.data}}"},
+        },
+        {
+            "id": "match", "type": "resume_match", "label": "Job matcher", "position": _pos(960, 160),
+            "description": "Keywords matched and missing against the job description (skipped when it is empty)",
+            "config": {"parsed": "{{parse.data}}", "job_description": "{{job.job_description}}"},
+        },
+        {
+            "id": "rewrite", "type": "resume_rewrite", "label": "Rewriter", "position": _pos(1280, 0),
+            "description": "The improved draft, bullet by bullet, with guardrails against invented facts",
+            "config": {
+                "parsed": "{{parse.data}}", "ats": "{{ats.data}}", "content": "{{content.data}}",
+                "match": "{{match.data}}", "job_description": "{{job.job_description}}",
+            },
+        },
+        {
+            "id": "out", "type": "output", "label": "Refinement", "position": _pos(1600, 0),
+            "config": {
+                "name": "refinement",
+                "value": {
+                    "resume": "{{rewrite.resume}}", "text": "{{rewrite.text}}", "changes": "{{rewrite.changes}}",
+                    "stats": "{{rewrite.stats}}", "notes": "{{rewrite.notes}}", "ats": "{{ats.data}}",
+                    "job_match": "{{match.data}}",
+                },
+            },
+        },
+    ],
+    "edges": [
+        {"source": "resume", "target": "read"},
+        {"source": "read", "target": "parse"},
+        {"source": "parse", "target": "ats"},
+        {"source": "parse", "target": "content"},
+        {"source": "parse", "target": "match"},
+        {"source": "job", "target": "match"},
+        {"source": "ats", "target": "rewrite"},
+        {"source": "content", "target": "rewrite"},
+        {"source": "match", "target": "rewrite"},
+        {"source": "rewrite", "target": "out"},
+    ],
+    "variables": [],
+}
+
+def _discord_meeting() -> dict[str, Any]:
+    """The Meeting Notes graph for the Discord voice recorder: the bot delivers the result to Telegram
+    itself (summary, transcript, or both, as the chat chooses), so there is no Telegram node here."""
+    graph = copy.deepcopy(MEETING_NOTES)
+    graph["nodes"] = [n for n in graph["nodes"] if n["id"] != "send"]
+    for node in graph["nodes"]:
+        if node["id"] == "input":
+            node["description"] = "Filled in by the Discord bot with the recording. Defaults to the sample call so you can test here."
+        if node["id"] == "notes":
+            node["config"]["prompt"] = node["config"]["prompt"].replace(
+                "Only use what was said.", "Extra focus from the user: {{vars.focus}}. Only use what was said.", 1
+            )
+    graph["edges"] = [e for e in graph["edges"] if "send" not in (e["source"], e["target"])]
+    graph["edges"].append({"source": "actions", "target": "out"})
+    graph["nodes"].insert(0, {
+        "id": "discord", "type": "discord_voice", "label": "Discord voice meeting", "position": _pos(0, -120),
+        "description": (
+            "Set your server id and voice channel id. The bot watches it, asks in Telegram before recording, and "
+            "runs this pipeline with the recording."
+        ),
+        "config": {"guild_id": "", "channel_id": "", "max_minutes": 90},
+    })
+    graph["edges"].append({"source": "discord", "target": "stt"})
+    graph["variables"] = [
+        *graph["variables"],
+        {"key": "focus", "value": "anything that needs follow-up", "type": "workflow"},
+    ]
+    return graph
+
+
+DISCORD_MEETING: dict[str, Any] = _discord_meeting()
+
 WEB_RESEARCH: dict[str, Any] = {
     "nodes": [
         {
@@ -881,6 +985,31 @@ CATALOG: list[dict[str, Any]] = [
         "triggers": [],
     },
     {
+        "slug": "resume-refiner",
+        "name": "Resume Refiner",
+        "category": "Career",
+        "description": (
+            "Upload a resume PDF (and optionally a job description): five agent nodes (parser, ATS, content coach, job matcher, "
+            "rewriter) review it and draft the improved version. Add a Gmail or Telegram node to send the result."
+        ),
+        "graph": RESUME_REFINER,
+        "requirements": [LLM_REQUIREMENT],
+        "triggers": [],
+    },
+    {
+        "slug": "discord-meeting-summary",
+        "name": "Discord Meeting Summary",
+        "category": "Audio",
+        "description": (
+            "Drag-and-drop Discord meetings: the Discord Voice Meeting block names a channel; when you approve a recording in Telegram, the bot runs this pipeline: "
+            "Whisper transcribes it and an LLM writes the summary, decisions, and action items. The bot sends the result "
+            "to your chat as a summary, the full transcript, or both. Edit the prompt, model, or focus variable to customize it."
+        ),
+        "graph": DISCORD_MEETING,
+        "requirements": [SPEECH_REQUIREMENT, LLM_REQUIREMENT],
+        "triggers": [],
+    },
+    {
         "slug": "web-research",
         "name": "Web Research",
         "category": "Research",
@@ -984,6 +1113,30 @@ class TemplateRead(BaseModel):
     triggers: list[TemplateTrigger]
 
 
+_BLOCKS = {"schedule": ("schedule_trigger", "Schedule"), "email": ("email_trigger", "New email")}
+
+
+def _with_trigger_blocks(entry: dict[str, Any]) -> None:
+    """Show a template's triggers as blocks on its canvas (switched off, like the triggers themselves)."""
+    graph = copy.deepcopy(entry["graph"])
+    first = min((n for n in graph["nodes"] if n["type"] not in ("input", "output")), key=lambda n: n["position"]["x"], default=None)
+    for trigger in entry["triggers"]:
+        node_type, label = _BLOCKS.get(trigger["type"], (None, None))
+        if node_type is None or any(n["type"] == node_type for n in graph["nodes"]):
+            continue
+        graph["nodes"].append({
+            "id": f"{trigger['type']}_trigger", "type": node_type, "label": label, "position": _pos(0, -140),
+            "config": {**trigger["config"], "enabled": False},
+        })
+        if first is not None:
+            graph["edges"].append({"source": f"{trigger['type']}_trigger", "target": first["id"]})
+    entry["graph"] = graph
+
+
+for _entry in CATALOG:
+    _with_trigger_blocks(_entry)
+
+
 async def sync_templates(db: AsyncSession) -> int:
     """Write the catalog into the templates table (insert or update by slug)."""
     existing = {row.slug: row for row in await db.scalars(select(Template).where(Template.slug.is_not(None)))}
@@ -1025,7 +1178,7 @@ async def list_templates(db: AsyncSession, user: User) -> list[TemplateRead]:
         requirements = _requirements(row, services)
         items.append(TemplateRead(
             slug=row.slug or "", name=row.name, description=row.description, category=row.category,
-            node_types=[node["type"] for node in (row.graph_json or {}).get("nodes", [])],
+            node_types=[node["type"] for node in (row.graph_json or {}).get("nodes", []) if not node["type"].endswith("_trigger")],
             requirements=requirements, ready=all(r.satisfied for r in requirements),
             triggers=[TemplateTrigger.model_validate(t) for t in row.triggers_json or []],
         ))

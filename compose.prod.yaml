@@ -1,0 +1,350 @@
+# FlowForge AI: production stack (built and tested locally, not deployed anywhere yet).
+# Everything is explained in docs/HOSTING.md. The short version, from a server with Docker and a domain
+# whose DNS already points at it:
+#
+#   cp .env.production.example .env        # then fill it in (docs/HOSTING.md lists every variable)
+#   docker compose -f compose.prod.yaml up -d --build
+#
+# What differs from the development stack (infrastructure/docker-compose.yml, `docker compose up`):
+#   - Caddy is the only thing that listens on the network (80/443), with automatic HTTPS for $DOMAIN;
+#     Postgres, Redis, the API, the workers, and the web app have no published ports.
+#   - Images are built for production: no bind mounts, no --reload, no dev dependencies, a compiled web app.
+#   - The browser talks to https://$DOMAIN for the site, the API (/api), and the live-run WebSocket (wss://
+#     on the same host), so there is nothing to allow with CORS beyond that origin.
+#   - ENVIRONMENT=production makes the API refuse to start with an unsafe configuration (weak JWT secret,
+#     a wildcard CORS origin, insecure cookies).
+#   - A backup service dumps the database every day to $BACKUP_DIR.
+# Optional profiles:  --profile monitoring (Flower, on 127.0.0.1 only)   --profile bots (Telegram + Discord)
+name: flowforge-prod
+
+x-api-image: &api-image
+  build:
+    context: ./apps/api
+    additional_contexts:
+      workflow_engine: ./packages/workflow-engine
+    args:
+      REQUIREMENTS: requirements.txt
+
+x-env-file: &env-file
+  - path: ${ENV_FILE:-.env}
+    required: true
+
+# Shared by the API and every worker. Values here win over the env file.
+x-app-env: &app-env
+  ENVIRONMENT: production
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowforge}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-flowforge}
+  REDIS_URL: redis://redis:6379/0
+  FILES_DIR: /data/files
+  SAMPLES_DIR: /samples
+  WHISPER_MODELS_DIR: /data/models
+  JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+  # The site's own origin(s). Never "*" (the API refuses to start with it).
+  CORS_ORIGINS: ${CORS_ORIGINS:-${PUBLIC_URL:?Set PUBLIC_URL (https://your.domain) in .env}}
+  COOKIE_SECURE: "true"
+  # Caddy sets X-Forwarded-For; the rate limiter counts callers by it.
+  TRUST_PROXY_HEADERS: "true"
+  PUBLIC_DEMO: ${PUBLIC_DEMO:-false}
+  DEMO_OWNER_EMAIL: ${DEMO_OWNER_EMAIL:-}
+  TESTING: "false"
+  HTTP_ALLOW_PRIVATE_NETWORKS: "false"
+
+x-worker: &worker
+  <<: *api-image
+  restart: unless-stopped
+  env_file: *env-file
+  environment: &worker-env
+    <<: *app-env
+    WORKER_NAME: worker
+  volumes:
+    - files_data:/data/files
+    - whisper_models:/data/models
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    api:
+      condition: service_healthy
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping --destination $$WORKER_NAME@$$HOSTNAME --timeout 5 | grep -q pong"]
+    interval: 30s
+    timeout: 15s
+    retries: 3
+    start_period: 40s
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+    # No `ports:`: reachable only by the other services, on this project's private network.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *api-image
+    restart: unless-stopped
+    env_file: *env-file
+    environment:
+      <<: *app-env
+    # Migrations first, then the server (exec: it receives SIGTERM).
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${API_WORKERS:-2} --proxy-headers --forwarded-allow-ips '*' --no-access-log
+    volumes:
+      - files_data:/data/files
+      - whisper_models:/data/models
+      - ./samples:/samples:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  worker-default:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-default
+    command:
+      - sh
+      - -c
+      - exec celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --hostname=$${WORKER_NAME}@%h --queues=default --concurrency=$${WORKER_DEFAULT_CONCURRENCY:-4}
+
+  worker-llm:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-llm
+    command:
+      - sh
+      - -c
+      - exec celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --hostname=$${WORKER_NAME}@%h --queues=llm --concurrency=$${WORKER_LLM_CONCURRENCY:-8}
+
+  worker-ocr:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-ocr
+      OMP_THREAD_LIMIT: "1"
+    command:
+      - sh
+      - -c
+      - exec celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --hostname=$${WORKER_NAME}@%h --queues=ocr --concurrency=$${WORKER_OCR_CONCURRENCY:-2}
+
+  worker-audio:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_NAME: worker-audio
+      OMP_NUM_THREADS: "2"
+    command:
+      - sh
+      - -c
+      - exec celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --hostname=$${WORKER_NAME}@%h --queues=audio --concurrency=$${WORKER_AUDIO_CONCURRENCY:-2}
+
+  # Exactly one. Sends the triggers tick every minute.
+  beat:
+    <<: *api-image
+    restart: unless-stopped
+    env_file: *env-file
+    environment:
+      <<: *app-env
+    command:
+      - sh
+      - -c
+      - exec celery -A app.worker.celery_app:celery_app beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.prod
+      additional_contexts:
+        shared: ./packages/shared
+      args:
+        # Inlined into the browser bundle: the site's public URL (the API shares its origin).
+        NEXT_PUBLIC_API_URL: ${PUBLIC_URL:?Set PUBLIC_URL (https://your.domain) in .env}
+    restart: unless-stopped
+    environment:
+      # The route guard verifies the API's signed session cookie with this secret.
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # The only published ports. Automatic HTTPS for $DOMAIN (a real domain: Let's Encrypt; localhost: Caddy's local CA).
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./infrastructure/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here: keep this volume, or every restart asks Let's Encrypt again.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # A pg_dump of the database every day at $BACKUP_HOUR_UTC (default 03) into $BACKUP_DIR on the host,
+  # keeping $BACKUP_KEEP_DAYS days; also archives the uploaded files unless BACKUP_FILES=false.
+  # One-off: docker compose -f compose.prod.yaml exec backup /scripts/backup.sh once
+  backup:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/scripts/backup.sh"]
+    command: ["loop"]
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-flowforge}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:-flowforge}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_FILES: ${BACKUP_FILES:-true}
+      BACKUP_ON_START: ${BACKUP_ON_START:-false}
+    volumes:
+      - ./scripts/backup:/scripts:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+      - files_data:/data/files:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- optional: --profile monitoring ---------------------------------------------------------------
+  # Flower, the Celery dashboard, on the server's loopback only. Reach it with an SSH tunnel:
+  #   ssh -L 5555:localhost:5555 you@server     then open http://localhost:5555
+  flower:
+    <<: *api-image
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    env_file: *env-file
+    environment:
+      <<: *app-env
+      FLOWER_USER: ${FLOWER_USER:-admin}
+      FLOWER_PASSWORD: ${FLOWER_PASSWORD:?Set FLOWER_PASSWORD in .env to use Flower}
+    command:
+      - sh
+      - -c
+      - exec celery -A app.worker.celery_app:celery_app flower --port=5555 --basic-auth="$${FLOWER_USER}:$${FLOWER_PASSWORD}" --persistent=False
+    ports:
+      - "127.0.0.1:${FLOWER_HOST_PORT:-5555}:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # --- optional: --profile bots ---------------------------------------------------------------------
+  # The owner's Telegram Command Center and Discord voice recorder. In PUBLIC_DEMO mode they act only for
+  # DEMO_OWNER_EMAIL's account (and refuse to run without it). Each needs its tokens in .env.
+  telegram-listener:
+    <<: *api-image
+    profiles: ["bots"]
+    restart: unless-stopped
+    env_file: *env-file
+    environment:
+      <<: *app-env
+      WORKER_NAME: telegram-listener
+    command: ["python", "-m", "app.telegram_listener"]
+    volumes:
+      - files_data:/data/files
+      - whisper_models:/data/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  discord-bot:
+    <<: *api-image
+    profiles: ["bots"]
+    restart: unless-stopped
+    env_file: *env-file
+    environment:
+      <<: *app-env
+      WORKER_NAME: discord-bot
+    command: ["python", "-m", "app.discord_bot"]
+    volumes:
+      - files_data:/data/files
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  discord-recorder:
+    profiles: ["bots"]
+    build:
+      context: ./apps/discord-recorder
+    restart: unless-stopped
+    env_file: *env-file
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DISCORD_RECORDINGS_DIR: /data/files/recordings
+    volumes:
+      - files_data:/data/files
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  files_data:
+  whisper_models:
+  caddy_data:
+  caddy_config:

@@ -133,6 +133,8 @@ class IssueCode(StrEnum):
     DUPLICATE_VARIABLE = "duplicate_variable"
     DUPLICATE_NAME = "duplicate_name"
     AUTH_MISSING = "auth_missing"
+    # PUBLIC_DEMO: the account used up its daily allowance (raised by the API, not by validation).
+    DEMO_LIMIT = "demo_limit"
 
 
 class ValidationIssue(BaseModel):

@@ -252,3 +252,74 @@ async def test_no_thanks_runs_nothing(client, user, controller, bot, files_dir, 
     await controller.drain()
     assert (await shared_session.scalars(select(WorkflowExecution))).first() is None
     assert "No notes" in bot.edits[-1][2]
+
+
+# --- the Discord Voice Meeting block names the channel and the pipeline -------------------------------
+
+def graph_with_voice_block(guild="111", channel="222", **config):
+    graph = meeting_graph()
+    graph["nodes"].append({
+        "id": "discord", "type": "discord_voice", "label": "Discord", "position": {"x": 0, "y": -100},
+        "config": {"guild_id": guild, "channel_id": channel, **config},
+    })
+    return graph
+
+
+async def test_the_block_sets_the_watched_channel_and_pipeline(client, user, controller, redis, monkeypatch):
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_GUILD_ID", None)
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_CHANNEL_ID", None)
+    assert await controller.sync_watch() is False  # nothing to watch yet
+    assert await redis.get("flowforge:discord:watch") is None
+    wid = await create_workflow(client, user, graph_with_voice_block(max_minutes=30), name="Standup")
+    assert await controller.sync_watch() is True
+    assert json.loads(await redis.get("flowforge:discord:watch")) == {"guild_id": "111", "channel_id": "222", "max_minutes": 30}
+    assert controller.workflow_id == wid
+    assert await controller.sync_watch() is False  # unchanged
+
+
+async def test_a_block_without_ids_falls_back_to_the_env_channel(client, user, controller, redis, monkeypatch):
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_GUILD_ID", 5)
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_CHANNEL_ID", 6)
+    await create_workflow(client, user, graph_with_voice_block(guild="", channel=""))
+    await controller.sync_watch()
+    assert json.loads(await redis.get("flowforge:discord:watch"))["channel_id"] == "6"
+    assert controller.workflow_id is None
+
+
+async def test_the_block_pipeline_runs_for_a_recording_even_with_another_name(client, user, controller, redis, monkeypatch):
+    from app.services.discord_voice import find_pipeline
+
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_GUILD_ID", None)
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_CHANNEL_ID", None)
+    wid = await create_workflow(client, user, graph_with_voice_block(), name="Weekly sync")
+    await controller.sync_watch()
+    async with controller.sessions() as db:
+        found = await find_pipeline(db, settings.DISCORD_MEETING_PIPELINE, controller.workflow_id)
+        assert found is not None and str(found.workflow.id) == wid
+        assert await find_pipeline(db, settings.DISCORD_MEETING_PIPELINE) is None  # by name, "Weekly sync" is not found
+
+
+async def test_pausing_from_the_ui_stops_the_watch_and_ends_a_recording(client, user, controller, redis, monkeypatch):
+    from app.services import automations
+
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_GUILD_ID", None)
+    monkeypatch.setattr(settings, "DISCORD_MONITOR_CHANNEL_ID", None)
+    await create_workflow(client, user, graph_with_voice_block())
+    await controller.sync_watch()
+    assert await redis.get("flowforge:discord:watch") is not None
+    await automations.set_paused(redis, "discord", True)
+    await controller.sync_watch()
+    assert await redis.get("flowforge:discord:watch") is None
+    assert {"type": "stop_recording", "reason": "paused from the UI"} in await commands(redis)
+    await automations.set_paused(redis, "discord", False)
+    await controller.sync_watch()
+    assert await redis.get("flowforge:discord:watch") is not None
+    await redis.delete("flowforge:paused:discord")
+
+
+async def test_the_pause_endpoints_are_owner_only_and_toggle_the_flag(client, user, redis):
+    response = await client.put("/api/system/automations/telegram", json={"paused": True}, headers=user.headers)
+    assert response.status_code == 200 and response.json()["telegram"]["paused"] is True
+    assert (await client.get("/api/system/automations", headers=user.headers)).json()["discord"]["paused"] is False
+    await client.put("/api/system/automations/telegram", json={"paused": False}, headers=user.headers)
+    assert (await client.get("/api/system/automations", headers=user.headers)).json()["telegram"]["paused"] is False

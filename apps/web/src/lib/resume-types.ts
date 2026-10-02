@@ -1,3 +1,5 @@
+import type { Schemas } from "@flowforge/shared";
+
 // Types of the resume refinement API (apps/api/app/schemas/resume.py and the agents' outputs in
 // apps/api/app/services/resume_agents.py).
 
@@ -131,31 +133,13 @@ export interface RefinementResult {
   original_summary: string;
 }
 
-export interface ResumeEmail {
-  id: string;
-  refinement_id: string;
-  to_email: string;
-  version: number;
-  subject: string;
-  summary: string;
-  created_at: string;
-}
+export type ResumeEmail = Schemas["EmailRead"];
 
-export interface RefinementSummary {
-  id: string;
-  filename: string;
-  version: number;
+export type RefinementSummary = Omit<Schemas["RefinementSummary"], "status"> & { status: RefinementStatus };
+
+/** The stage outputs and the result are free-form objects in the API schema; their shapes are typed above. */
+export type Refinement = Omit<Schemas["RefinementRead"], "stages" | "result" | "status"> & {
   status: RefinementStatus;
-  has_job_description: boolean;
-  created_at: string;
-  finished_at: string | null;
-  error_message: string | null;
-  emails_sent: number;
-}
-
-export interface Refinement extends RefinementSummary {
-  job_description: string;
   stages: Stage[];
   result: RefinementResult | null;
-  emails: ResumeEmail[];
-}
+};

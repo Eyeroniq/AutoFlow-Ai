@@ -343,3 +343,12 @@ async def test_groq_verify_lists_the_whisper_models():
 def test_upload_limit_follows_the_setting():
     assert GroqTranscriber(KEY, max_file_mb=25).max_upload_bytes == 25 * 1024 * 1024
     assert GroqTranscriber(KEY, max_file_mb=100).max_upload_bytes == 100 * 1024 * 1024
+
+
+async def test_the_discord_voice_block_reports_its_settings_and_validates_ids():
+    result = await execute_node(
+        node("discord", "discord_voice", guild_id="123", channel_id="456", max_minutes=30), make_context(),
+    )
+    assert result.status is NodeStatus.SUCCESS and result.output["channel_id"] == "456" and result.output["max_minutes"] == 30
+    bad = await execute_node(node("discord", "discord_voice", channel_id="general"), make_context())
+    assert bad.status is not NodeStatus.SUCCESS

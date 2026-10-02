@@ -1,0 +1,49 @@
+# Caddy: the only public entry point in production (compose.prod.yaml).
+#
+# DOMAIN is the site address. A real domain gets a Let's Encrypt certificate automatically (ports 80 and
+# 443 must reach this container, and DNS must already point at the server). "localhost" gets a locally
+# trusted certificate from Caddy's own CA, which is how the stack is tried on a laptop.
+#
+# One origin for everything, so the browser needs no CORS and the live-run WebSocket is wss:// on the same host:
+#   /api/*  /ws/*  /health  /docs  /redoc  /openapi.json   -> the API
+#   everything else                                       -> the web app
+{
+	# Where Let's Encrypt writes about expiring certificates. Optional.
+	email {$ACME_EMAIL:}
+}
+
+{$DOMAIN:localhost} {
+	encode zstd gzip
+
+	@api path /api/* /ws/* /health /docs /docs/* /redoc /openapi.json
+	handle @api {
+		# WebSocket upgrades (WS /ws/executions/{id}) pass through reverse_proxy untouched.
+		reverse_proxy api:8000 {
+			# Caddy sets X-Forwarded-For itself from the real client address (the API's rate limiter
+			# trusts it only because nothing else can reach the API).
+			header_up X-Forwarded-For {remote_host}
+			# Long polls and runs with ?wait=true: don't cut the response short.
+			transport http {
+				response_header_timeout 15m
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), geolocation=(), payment=()"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

@@ -10,7 +10,7 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 
-TokenType = Literal["access", "refresh"]
+TokenType = Literal["access", "refresh", "session"]
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -43,6 +43,13 @@ def create_access_token(subject: str) -> str:
     return _create_token(
         subject, "access", timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
+
+
+def create_session_token(subject: str) -> str:
+    """A signed, httpOnly-cookie token that says "this browser signed in" for as long as a refresh token
+    lives. The web app's route guard verifies its signature (same secret) before rendering a protected
+    page; the API itself never accepts it as authentication."""
+    return _create_token(subject, "session", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
 
 
 def create_refresh_token(subject: str) -> str:

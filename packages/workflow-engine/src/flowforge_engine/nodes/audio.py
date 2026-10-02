@@ -182,3 +182,43 @@ class SpeechToTextNode(NodeDefinition[SpeechToTextConfig]):
             pieces.append((start, end, await transcriber.transcribe(chunk, **request)))
             chunk.unlink(missing_ok=True)
         return pieces
+
+
+class DiscordVoiceConfig(NodeConfig):
+    guild_id: str = Field(
+        default="", max_length=32, pattern=r"^\d*$",
+        description="The Discord server (guild) id. Discord: Settings > Advanced > Developer Mode, then right-click the server > Copy Server ID.",
+    )
+    channel_id: str = Field(
+        default="", max_length=32, pattern=r"^\d*$",
+        description="The voice channel id to watch (right-click the channel > Copy Channel ID).",
+    )
+    max_minutes: int = Field(default=90, ge=1, le=240, description="Stop recording after this many minutes.")
+
+
+class DiscordVoiceResult(BaseModel):
+    source: str
+    guild_id: str
+    channel_id: str
+    max_minutes: int
+
+
+@register_node("discord_voice")
+class DiscordVoiceNode(NodeDefinition[DiscordVoiceConfig]):
+    """The trigger block for Discord meetings. The always-on Discord bot reads this block's settings: it watches the
+    channel, asks in Telegram before recording, and runs this pipeline with the recording as its file Input."""
+
+    category = "sources"
+    label = "Discord Voice Meeting"
+    description = (
+        "Starts this pipeline from a Discord voice channel: after you approve in Telegram, the bot records the meeting "
+        "and passes the audio to the pipeline's File input."
+    )
+    icon = "audio-lines"
+    config_schema = DiscordVoiceConfig
+    output_schema = DiscordVoiceResult
+
+    async def execute(self, context: NodeContext, config: DiscordVoiceConfig) -> NodeResult:
+        return NodeResult.ok(
+            source="discord_voice", guild_id=config.guild_id, channel_id=config.channel_id, max_minutes=config.max_minutes
+        )

@@ -24,8 +24,16 @@ from flowforge_engine.nodes.lists import FilterNode, ForEachNode, JoinNode
 from flowforge_engine.nodes.logic import ConditionNode, DelayNode
 from flowforge_engine.nodes.notify import DiscordWebhookNode, TelegramNode
 from flowforge_engine.nodes.privacy import RedactImageNode, RedactNode, RestoreNode, SecretScannerNode
+from flowforge_engine.nodes.resume import (
+    ResumeATSNode,
+    ResumeContentNode,
+    ResumeMatchNode,
+    ResumeParseNode,
+    ResumeRewriteNode,
+)
 from flowforge_engine.nodes.search import WebSearchNode
 from flowforge_engine.nodes.structured import StructuredOutputNode
+from flowforge_engine.nodes.triggers import EmailTriggerNode, ScheduleTriggerNode, TelegramTriggerNode
 from flowforge_engine.nodes.vision import VisionNode
 from flowforge_engine.nodes.workspace import (
     AirtableCreateNode,
@@ -70,6 +78,14 @@ __all__ = [
     "RedactImageNode",
     "RedactNode",
     "RerankerNode",
+    "EmailTriggerNode",
+    "ScheduleTriggerNode",
+    "TelegramTriggerNode",
+    "ResumeATSNode",
+    "ResumeContentNode",
+    "ResumeMatchNode",
+    "ResumeParseNode",
+    "ResumeRewriteNode",
     "RestoreNode",
     "RetrieverNode",
     "RSSNode",

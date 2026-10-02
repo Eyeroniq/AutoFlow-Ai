@@ -1,3 +1,4 @@
+import { API_URL } from "./config";
 import type { TokenResponse } from "./types";
 
 // Phase 1 keeps tokens in localStorage. Moving to httpOnly cookies later only
@@ -34,6 +35,8 @@ export const tokenStorage = {
 
   clear() {
     if (read(ACCESS_KEY) === null && read(REFRESH_KEY) === null) return;
+    // The route guard reads a signed httpOnly cookie that only the API can remove.
+    void fetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include", keepalive: true }).catch(() => {});
     try {
       window.localStorage.removeItem(ACCESS_KEY);
       window.localStorage.removeItem(REFRESH_KEY);

@@ -36,6 +36,7 @@ from app.services.credentials import build_execution_services
 from app.services.files import file_path
 from app.services.resume_documents import build_docx, build_pdf
 from app.services.resume_layout import analyze_pdf, describe, layout_issues
+from flowforge_engine.nodes.resume import assemble, merge_ats_issues
 
 logger = logging.getLogger(__name__)
 
@@ -264,107 +265,6 @@ class _Pipeline:
         return assemble(
             parsed, ats_output, content_run.output, match_run.output if match_run else None, rewrite.output,
         )
-
-
-def merge_ats_issues(output: dict[str, Any], measured: list[dict[str, Any]]) -> dict[str, Any]:
-    """The agent's issues, plus any measured finding in a category the agent didn't report: a blocker the
-    model overlooked still reaches the report. Each issue says where it came from."""
-    issues = [{**i, "source": "agent"} for i in output["issues"]]
-    reported = {i["category"] for i in issues}
-    issues += [{**m, "source": "layout"} for m in measured if m["category"] not in reported]
-    issues.sort(key=lambda i: (i["severity"] != "blocker",))
-    return {**output, "issues": issues}
-
-
-def assemble(
-    parsed: dict[str, Any], ats: dict[str, Any], content: dict[str, Any], match: dict[str, Any] | None,
-    rewrite: dict[str, Any],
-) -> dict[str, Any]:
-    """The final result from the agents' outputs. Facts the agents must not change (contact details,
-    companies, titles, dates, education) are taken from the parsed resume, whatever the Rewrite Agent returned."""
-    index = agents.bullet_index(parsed)
-    feedback = {b["id"]: b for b in content["bullets"]}
-    matched_by: dict[str, list[str]] = {}
-    for req in (match or {}).get("requirement_matches", []):
-        for bid in req["bullet_ids"]:
-            matched_by.setdefault(bid, []).append(req["requirement"])
-    experience, changes, corrections = [], [], []
-    for i, (job, new) in enumerate(zip(parsed["experience"], rewrite["experience"], strict=True)):
-        texts = []
-        # Without a job description there is nothing to reorder for: keep each job's original order.
-        ordered = new["bullets"] if match is not None else sorted(new["bullets"], key=lambda b: int(b["source_id"].split(".b")[1]))
-        for position, bullet in enumerate(ordered):
-            sid = bullet["source_id"]
-            before = index[sid]["text"]
-            after = bullet["text"].strip()
-            note = feedback.get(sid, {"flags": [], "explanation": ""})
-            # Guardrails the models can't be trusted with: no invented numbers, the right tense, and untouched
-            # bullets staying untouched unless a job description asks for tailoring. Fall back to the Content
-            # Agent's suggestion if it is clean, else to the original, and say so.
-            suggestion = (note.get("rewrite") or "").strip()
-            clean_suggestion = suggestion if suggestion and not agents.invented_numbers(suggestion, before) else ""
-            reason = None
-            if after != before and (made_up := agents.invented_numbers(after, before, suggestion)):
-                after, reason = clean_suggestion or before, f"removed invented number(s) {sorted(made_up)}"
-            elif after != before and (padding := agents.padded(after, before, suggestion)):
-                after, reason = clean_suggestion or before, f"removed invented claims ({', '.join(padding[:5])})"
-            elif after != before and agents.wrong_tense(after, index[sid]["current"]):
-                after, reason = clean_suggestion or before, "past-role bullet didn't start with a past-tense verb"
-            elif after != before and not note["flags"] and match is None:
-                after, reason = before, "the Content Agent found nothing to fix, so it stays as written"
-            if reason:
-                corrections.append({"source_id": sid, "reason": reason})
-            original_position = int(sid.split(".b")[1])
-            changed = after.strip() != before.strip()
-            moved = position != original_position
-            changes.append({
-                "source_id": sid, "job": i, "company": job["company"], "title": job["title"],
-                "before": before, "after": after, "changed": changed, "moved": moved,
-                "flags": note["flags"], "explanation": note["explanation"], "agent_rewrite": note.get("rewrite", ""),
-                "job_requirements": matched_by.get(sid, []),
-            })
-            texts.append(after)
-        experience.append({"company": job["company"], "title": job["title"], "dates": job["dates"], "bullets": texts})
-    summary = rewrite["summary"].strip()
-    if summary and agents.invented_numbers(summary, agents.resume_text(parsed)):
-        corrections.append({"source_id": "summary", "reason": "the new summary contained numbers that aren't in the resume; kept the original"})
-        summary = ""
-    resume = {
-        "contact_info": parsed["contact_info"],
-        "summary": summary or parsed["summary"],
-        "experience": experience,
-        "education": parsed["education"],
-        "skills": rewrite["skills"] or parsed["skills"],
-    }
-    placeholders = sum(len(re.findall(r"\[[^\]\n]{1,40}\]", c["after"])) for c in changes if "[" not in c["before"])
-    issues = ats["issues"]
-    stats: dict[str, Any] = {
-        "bullets_total": len(index),
-        "bullets_rewritten": sum(1 for c in changes if c["changed"]),
-        "bullets_reordered": sum(1 for c in changes if c["moved"]),
-        "bullets_flagged": sum(1 for b in content["bullets"] if b["flags"]),
-        "flag_counts": {f: sum(1 for b in content["bullets"] if f in b["flags"]) for f in agents.BULLET_FLAGS},
-        "ats_score": ats["score"],
-        "ats_blockers": sum(1 for i in issues if i["severity"] == "blocker"),
-        "ats_warnings": sum(1 for i in issues if i["severity"] == "warning"),
-        "ats_fixed_by_reformat": sum(1 for i in issues if i["category"] in agents.FIXED_BY_REFORMAT),
-        "ats_remaining": [i["title"] for i in issues if i["category"] not in agents.FIXED_BY_REFORMAT],
-        "placeholders": placeholders,
-        "summary_changed": resume["summary"].strip() != parsed["summary"].strip(),
-    }
-    if match is not None:
-        matched, missing = len(match["matched_keywords"]), len(match["missing_keywords"])
-        stats.update({
-            "jd": True, "keywords_matched": matched, "keywords_total": matched + missing, "match_score": match["match_score"],
-            "missing_high": [k["keyword"] for k in match["missing_keywords"] if k["importance"] == "high"],
-        })
-    else:
-        stats["jd"] = False
-    stats["corrections"] = len(corrections)
-    return {
-        "resume": resume, "changes": changes, "stats": stats, "notes": rewrite["notes"], "corrections": corrections,
-        "summary_review": content.get("summary_review", ""), "original_summary": parsed["summary"],
-    }
 
 
 async def run_refinement(session_factory: SessionFactory, refinement_id: uuid.UUID) -> dict[str, Any]:

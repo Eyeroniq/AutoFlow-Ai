@@ -568,3 +568,37 @@ async def test_emailing_needs_a_finished_run_and_ownership(client, user, user_fa
     assert (await client.post(f"/api/resume-refinements/{started['id']}/email", headers=stranger.headers)).status_code == 404
     assert (await client.get(f"/api/resume-refinements/{started['id']}", headers=stranger.headers)).status_code == 404
     assert (await client.delete(f"/api/resume-refinements/{started['id']}", headers=user.headers)).status_code == 204
+
+
+# --- The agents as pipeline nodes -------------------------------------------------------------------------------
+
+
+async def test_the_resume_nodes_chain_into_the_same_refinement(db_session, user, files_dir):
+    from flowforge_engine import GraphNode, NodeContext, execute_node
+
+    from app.models.user import User
+    from app.services.credentials import build_execution_services
+
+    owner = await db_session.get(User, user.id)
+    services = await build_execution_services(db_session, owner)
+    llm = ScriptedLLM()
+    services._llm["mock"] = llm
+    context = NodeContext(workflow_id="w", execution_id="e", services=services)
+    text = " ".join(b for j in PARSED["experience"] for b in j["bullets"]) + " Priya Nair backend engineer " * 3
+
+    async def run(node_type, **config):
+        result = await execute_node(GraphNode(id=node_type, type=node_type, config=config), context)
+        assert result.status.value == "success", result.error
+        return result.output
+
+    parsed = (await run("resume_parse", text=text))["data"]
+    ats = (await run("resume_ats", parsed=parsed))["data"]
+    content = (await run("resume_content", parsed=parsed))["data"]
+    skipped = await run("resume_match", parsed=parsed, job_description="")
+    assert skipped["matched"] is False and skipped["data"] is None and "Job-Match" not in llm.calls
+    match = (await run("resume_match", parsed=parsed, job_description=resume_samples.PRIYA_JD))["data"]
+    final = await run("resume_rewrite", parsed=parsed, ats=ats, content=content, match=match, job_description=resume_samples.PRIYA_JD)
+    assert final["stats"]["bullets_rewritten"] == 3 and final["resume"]["contact_info"]["name"] == "Priya Nair"
+    assert "Priya Nair" in final["text"] and "EXPERIENCE" in final["text"]
+    bad = await execute_node(GraphNode(id="r", type="resume_content", config={"parsed": "not a resume"}), context)
+    assert bad.status.value != "success" and "Resume Parse" in bad.error

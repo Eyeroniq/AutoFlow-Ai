@@ -10,6 +10,8 @@ interface EditorUi {
   runPanelOpen: boolean;
   runInputsOpen: boolean;
   deployOpen: boolean;
+  /** The provider whose "connect your own account" slide-over is open (opened from a node). */
+  connectProvider: string | null;
   connection: { status: ConnectionStatus; detail: string | null };
   /** Bumped to ask the config panel to open the Test section for the selected node. */
   testRequest: number;
@@ -25,6 +27,7 @@ export const useEditorUi = create<EditorUi>((set) => ({
   runPanelOpen: false,
   runInputsOpen: false,
   deployOpen: false,
+  connectProvider: null,
   connection: { status: "idle", detail: null },
   testRequest: 0,
   runRequest: 0,

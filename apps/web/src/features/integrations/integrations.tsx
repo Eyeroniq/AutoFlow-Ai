@@ -81,7 +81,7 @@ const TINTS = { llm: "bg-violet-50 text-violet-600", email: "bg-sky-50 text-sky-
 type FormValues = Record<string, string | undefined>;
 
 /** Write-only credential form: secrets go to the API and are cleared from the page. */
-function ConnectForm({ integration, onDone }: { integration: Integration; onDone: (saved: boolean) => void }) {
+export function ConnectForm({ integration, onDone }: { integration: Integration; onDone: (saved: boolean) => void }) {
   const queryClient = useQueryClient();
   const email = integration.kind === "email";
   const schema = schemaFor(integration);
@@ -374,6 +374,64 @@ export function IntegrationsScreen() {
   );
 }
 
+function BackgroundServices() {
+  const queryClient = useQueryClient();
+  const state = useQuery({ queryKey: ["automations"], queryFn: api.system.automations, refetchInterval: 15_000, meta: { silent: true } });
+  const toggle = useMutation({
+    mutationFn: ({ name, paused }: { name: "discord" | "telegram"; paused: boolean }) => api.system.pause(name, paused),
+    onSuccess: (next) => queryClient.setQueryData(["automations"], next),
+    onError: (error) => toast.error("Couldn't change that", error.message),
+  });
+  if (!state.data) return null; // not the owner of a public demo, or still loading
+  const rows = [
+    {
+      name: "discord" as const,
+      title: "Discord voice meetings",
+      detail: state.data.discord.paused
+        ? "Paused: the bot isn't watching any channel."
+        : state.data.discord.watching
+          ? "Watching the channel set on a Discord Voice Meeting block. It asks in Telegram before recording."
+          : "On, but no pipeline has a Discord Voice Meeting block with a channel yet.",
+      paused: state.data.discord.paused,
+    },
+    {
+      name: "telegram" as const,
+      title: "Telegram command center",
+      detail: state.data.telegram.paused ? "Paused: messages to your bot are ignored (not replayed later)." : "Listening for messages to your bot.",
+      paused: state.data.telegram.paused,
+    },
+  ];
+  return (
+    <section className="space-y-3" aria-label="Background services" data-testid="background-services">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Background services</h2>
+      <div className="grid gap-4 md:grid-cols-2">
+        {rows.map((row) => (
+          <div key={row.name} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
+            <div>
+              <h3 className="flex items-center gap-2 font-semibold text-slate-900">
+                {row.title}
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${row.paused ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
+                  {row.paused ? "paused" : "running"}
+                </span>
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-slate-600">{row.detail}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => toggle.mutate({ name: row.name, paused: !row.paused })}
+              loading={toggle.isPending && toggle.variables?.name === row.name}
+              data-testid={`${row.paused ? "resume" : "pause"}-${row.name}`}
+            >
+              {row.paused ? "Resume" : "Pause"}
+            </Button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Integrations() {
   const integrations = useQuery({ queryKey: ["integrations"], queryFn: api.integrations.list });
   if (integrations.isPending) return <Spinner label="Loading integrations…" />;
@@ -404,6 +462,7 @@ function Integrations() {
           no email or message sent).
         </p>
       </div>
+      <BackgroundServices />
       {groups.map(([title, items]) =>
         items.length ? (
           <section key={title} className="space-y-3">

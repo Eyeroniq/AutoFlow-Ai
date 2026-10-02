@@ -16,13 +16,15 @@ export function screenshotPath(name: string) {
   return path.join(SCREENSHOTS, `${name}.png`);
 }
 
-const sessions = new Map<string, { tokens: TokenResponse; at: number }>();
+// `cookie` is the API's signed session cookie, which the web app's route guard (src/proxy.ts) checks on the server.
+const sessions = new Map<string, { tokens: TokenResponse; cookie: string; at: number }>();
 
 /** A thin client for the real API, used for setup, cleanup, and checking results. */
 export class Api {
   private constructor(
     private readonly request: APIRequestContext,
     readonly tokens: TokenResponse,
+    readonly sessionCookie: string,
   ) {}
 
   /**
@@ -31,12 +33,14 @@ export class Api {
    */
   static async login(request: APIRequestContext, email = DEMO_EMAIL, password = DEMO_PASSWORD) {
     const cached = sessions.get(email);
-    if (cached && Date.now() - cached.at < 20 * 60_000) return new Api(request, cached.tokens);
+    if (cached && Date.now() - cached.at < 20 * 60_000) return new Api(request, cached.tokens, cached.cookie);
     const response = await request.post(`${API_URL}/api/auth/login`, { data: { email, password } });
     expect(response.status(), "demo login (seed it first: docker compose exec api python -m app.db.seed)").toBe(200);
     const tokens = (await response.json()) as TokenResponse;
-    sessions.set(email, { tokens, at: Date.now() });
-    return new Api(request, tokens);
+    const cookie = /flowforge_session=([^;]+)/.exec(response.headers()["set-cookie"] ?? "")?.[1] ?? "";
+    expect(cookie, "the login response sets the signed session cookie").not.toBe("");
+    sessions.set(email, { tokens, cookie, at: Date.now() });
+    return new Api(request, tokens, cookie);
   }
 
   private get headers() {
@@ -99,8 +103,12 @@ export class Api {
   }
 }
 
-/** Signs the page in as `api`'s user by seeding the tokens the web app keeps in localStorage. */
+/**
+ * Signs the page in as `api`'s user: the tokens the web app keeps in localStorage, plus the signed session
+ * cookie the route guard reads on the server (without it a protected page redirects to /login).
+ */
 export async function signIn(page: Page, api: Api) {
+  await page.context().addCookies([{ name: "flowforge_session", value: api.sessionCookie, domain: "localhost", path: "/", httpOnly: true, sameSite: "Lax" }]);
   await page.addInitScript((tokens) => {
     window.localStorage.setItem("flowforge.access_token", tokens.access_token);
     window.localStorage.setItem("flowforge.refresh_token", tokens.refresh_token);

@@ -50,6 +50,8 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.crypto import get_cipher
+from app.services import demo
+from app.core.rate_limit import Limit, limiter
 from app.db.session import SessionFactory
 from app.models.deployment import Deployment
 from app.models.enums import ExecutionTrigger, TriggerType
@@ -72,7 +74,6 @@ UPDATE_KEY = "flowforge:telegram:update:{}"
 OFFSET_KEY = "flowforge:telegram:offset"
 PENDING_KEY = "flowforge:telegram:pending:{}"
 CLARIFY_KEY = "flowforge:telegram:clarify:{}"
-RATE_KEY = "flowforge:telegram:rate:{}:{}"
 # The answer to a Discord voice recording prompt, for the discord-bot service ("yes" or "no").
 VOICE_DECISION_KEY = "flowforge:discord:decision:{}"
 VOICE_DECISION_TTL_SECONDS = 600
@@ -133,7 +134,10 @@ async def candidates_for(db: Any, chat_id: str) -> list[Candidate]:
         .order_by(Deployment.created_at)
     )
     found = []
+    demo_owner = await demo.owner_user_id(db) if demo.is_demo() else None
     for trigger, deployment in rows.all():
+        if demo.is_demo() and deployment.owner_id != demo_owner:
+            continue  # PUBLIC_DEMO: the server's Telegram bot answers for the owner's pipelines only
         allowed = [str(c) for c in (trigger.config_json or {}).get("allowed_chat_ids") or []]
         if not allowed and settings.TELEGRAM_CHAT_ID:  # saved before the default was filled in
             allowed = [str(settings.TELEGRAM_CHAT_ID).strip()]
@@ -469,17 +473,14 @@ class CommandCenter:
     async def _within_rate(self, chat_id: str) -> bool:
         """At most TELEGRAM_RATE_LIMIT_PER_MINUTE requests a minute per chat; the first one
         over gets one "slow down" reply, the rest are dropped."""
-        key = RATE_KEY.format(chat_id, int(time.time() // 60))
-        count = await self.redis.incr(key)
-        if count == 1:
-            await self.redis.expire(key, 120)
         limit = settings.TELEGRAM_RATE_LIMIT_PER_MINUTE
-        if count == limit + 1:
+        result = await limiter.hit("telegram.chat", chat_id, Limit(limit, 60), redis=self.redis)
+        if result.allowed:
+            return True
+        if result.refusals == 1:
             await self._say(chat_id, f"That's more than {limit} requests in a minute; wait a moment and try again.")
-        if count > limit:
-            logger.warning("telegram chat rate limited", extra={"chat_id": chat_id})
-            return False
-        return True
+        logger.warning("telegram chat rate limited", extra={"chat_id": chat_id})
+        return False
 
     # -- confirmation ----------------------------------------------------------------------------
 

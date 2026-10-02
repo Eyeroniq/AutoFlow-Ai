@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.config import settings
 from app.core.logging import register_secret, setup_logging
 from app.core.redis import new_redis
+from app.services import automations
 from app.services.task_queue import CeleryTaskQueue
 from app.services.telegram_center import OFFSET_KEY, CommandCenter
 
@@ -63,6 +64,11 @@ async def listen(stop: asyncio.Event) -> None:
                 backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
                 continue
             backoff = BACKOFF_SECONDS
+            if updates and await automations.is_paused(redis, "telegram"):
+                # Paused from the UI: read the messages and drop them, so nothing is replayed on resume.
+                await redis.set(OFFSET_KEY, int(updates[-1]["update_id"]) + 1)
+                logger.info("telegram paused; dropped updates", extra={"count": len(updates)})
+                continue
             for update in updates:
                 try:
                     outcome = await center.handle_update(update)

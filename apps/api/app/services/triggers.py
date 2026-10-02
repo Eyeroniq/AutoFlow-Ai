@@ -24,6 +24,7 @@ failed runs in a row (app.services.trigger_outcomes).
 """
 
 import contextlib
+import copy
 import logging
 import re
 import uuid
@@ -33,6 +34,7 @@ from typing import Any
 
 from flowforge_engine import ExecutionServices, GraphError, ProviderError, WorkflowGraph, queue_for_graph, topological_sort
 from flowforge_engine.models import IDENTIFIER_PATTERN
+from flowforge_engine.registry import get_node_definition
 from flowforge_engine.providers import MailboxQuery
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from redis.asyncio import Redis
@@ -819,3 +821,69 @@ async def list_triggers(db: AsyncSession, workflow: Workflow, *, now: datetime |
         runs_last_hour=await runs_in_last_hour(db, workflow.id, now),
         triggers=views,
     )
+
+
+# --- Trigger blocks on the canvas -----------------------------------------------------------------------
+
+BLOCK_TYPES = {
+    "schedule_trigger": TriggerType.SCHEDULE,
+    "email_trigger": TriggerType.EMAIL,
+    "telegram_trigger": TriggerType.TELEGRAM,
+}
+
+
+def trigger_blocks(graph: dict[str, Any] | None) -> dict[TriggerType, dict[str, Any]]:
+    """The settings of each trigger block in `graph` (the first block of a type wins)."""
+    found: dict[TriggerType, dict[str, Any]] = {}
+    for node in (graph or {}).get("nodes", []):
+        trigger_type = BLOCK_TYPES.get(node.get("type"))
+        if trigger_type is not None and trigger_type not in found:
+            found[trigger_type] = dict(node.get("config") or {})
+    return found
+
+
+def switch_off_blocks(graph: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `graph` whose trigger blocks are all off (for a duplicate: a copy must not start firing by itself)."""
+    graph = copy.deepcopy(graph)
+    for node in graph.get("nodes", []):
+        if node.get("type") in BLOCK_TYPES and isinstance(node.get("config"), dict):
+            node["config"]["enabled"] = False
+    return graph
+
+
+async def sync_trigger_blocks(
+    db: AsyncSession, workflow: Workflow, previous_graph: dict[str, Any] | None, services: ExecutionServices,
+) -> dict[str, str]:
+    """Make the workflow's triggers match its trigger blocks (called after the graph is saved).
+
+    A block saves its settings as the trigger and switches it on or off with its `enabled` setting; a block that was
+    there before and is gone switches its trigger off. A block that can't be applied (a bad cron expression, an
+    unreadable mailbox, a Telegram trigger on a pipeline that isn't deployed) leaves the trigger off and the reason
+    on the trigger (`last_error`, shown in the Triggers panel). Returns {trigger type: reason} for those."""
+    blocks = trigger_blocks(workflow.graph_json)
+    before = trigger_blocks(previous_graph)
+    gone = [t for t in before if t not in blocks]
+    problems: dict[str, str] = {}
+    workflow_id = workflow.id
+    for trigger_type, raw in blocks.items():
+        if before.get(trigger_type) == raw:
+            continue  # untouched by this save: the Triggers panel may have changed the trigger since
+        try:
+            # The block's settings with the node's defaults filled in (a freshly dragged block has none saved).
+            config = get_node_definition(next(k for k, v in BLOCK_TYPES.items() if v is trigger_type)).config_schema.model_validate(raw).model_dump()
+            enabled = bool(config.pop("enabled", False))
+            if not enabled and await get_trigger(db, workflow_id, trigger_type) is None:
+                continue  # an untouched, switched-off block needs no trigger yet
+            await save_trigger(db, workflow, trigger_type, enabled=enabled, config=config, services=services)
+        except (TriggerConfigError, ScheduleError, ValidationError) as exc:
+            await db.rollback()
+            trigger = await ensure_trigger(db, workflow_id, trigger_type)
+            trigger.enabled, trigger.next_fire_at = False, None
+            _note(trigger, str(exc), utcnow())
+            await db.commit()
+            problems[trigger_type.value] = str(exc)
+    for trigger_type in gone:
+        existing = await get_trigger(db, workflow_id, trigger_type)
+        if existing is not None and existing.enabled:
+            await save_trigger(db, workflow, trigger_type, enabled=False, config=None, services=services)
+    return problems

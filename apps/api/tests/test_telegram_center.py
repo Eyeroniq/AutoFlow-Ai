@@ -444,6 +444,10 @@ def test_split_attachments():
 
 
 async def test_per_chat_rate_limit(client, user, bot, make_center, monkeypatch):
+    from app.core.rate_limit import limiter
+
+    monkeypatch.setattr(limiter, "enabled", True)  # the shared Redis limiter, which tests switch off elsewhere
+    limiter.reset()
     await connect(client, user, greeting_graph(), "Greets a person by name")
     monkeypatch.setattr(settings, "TELEGRAM_RATE_LIMIT_PER_MINUTE", 2)
     reply = {"pipeline": 1, "inputs": {"name": "A"}, "confidence": 0.9, "missing_inputs": []}
@@ -452,6 +456,7 @@ async def test_per_chat_rate_limit(client, user, bot, make_center, monkeypatch):
     await center.drain()
     assert outcomes == ["running", "running", "rate_limited", "rate_limited"]
     assert sum("more than 2 requests in a minute" in t for t in bot.texts()) == 1
+    limiter.reset()
 
 
 async def test_without_an_llm_a_single_simple_pipeline_still_runs(client, user, bot, make_center):
@@ -463,11 +468,11 @@ async def test_without_an_llm_a_single_simple_pipeline_still_runs(client, user, 
 
 
 async def test_the_telegram_trigger_needs_a_deployment_and_defaults_its_allowlist(client, user, monkeypatch, shared_session):
+    monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "123456")  # the default allowlist; CI has no .env to supply it
     wid = await create_workflow(client, user, greeting_graph())
     off = await client.put(f"/api/workflows/{wid}/triggers/telegram", json={"enabled": True, "config": {}}, headers=user.headers)
     assert off.status_code == 422 and "Deploy the pipeline first" in off.json()["detail"]
     await deploy(client, user, wid, expect=201)
-    monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "123456")
     on = await client.put(f"/api/workflows/{wid}/triggers/telegram", json={"enabled": True, "config": {}}, headers=user.headers)
     assert on.status_code == 200, on.text
     telegram = next(t for t in on.json()["triggers"] if t["type"] == "telegram")

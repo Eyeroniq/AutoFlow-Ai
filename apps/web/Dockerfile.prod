@@ -1,0 +1,34 @@
+# Production image: `next build`, then the small standalone server (no dev server, no bind mounts).
+#
+# NEXT_PUBLIC_API_URL is inlined into the browser bundle at build time, so it is a build argument:
+# the public URL of the site (https://example.com). The API and the site share that origin behind the
+# Caddy proxy, which is why the browser needs no CORS and uses wss:// for the live-run socket.
+#
+# The build also needs packages/shared (the generated API types), passed as the named build context
+# "shared" (compose.prod.yaml does this).
+
+FROM node:24-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM node:24-alpine AS build
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1 NEXT_STANDALONE=1
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=shared . /packages/shared
+COPY . .
+RUN npm run build
+
+FROM node:24-alpine AS run
+WORKDIR /app
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
+COPY --from=build --chown=node:node /app/.next/standalone ./
+COPY --from=build --chown=node:node /app/.next/static ./.next/static
+COPY --from=build --chown=node:node /app/public ./public
+USER node
+EXPOSE 3000
+# The route guard (src/proxy.ts) reads JWT_SECRET at run time to verify the API's session cookie.
+CMD ["node", "server.js"]

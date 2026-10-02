@@ -11,14 +11,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi.errors import RateLimitExceeded
 
 from app.api.router import api_router
 from app.api.routes import ws
 from app.core.config import settings
 from app.core.crypto import get_cipher
 from app.core.logging import register_secret, setup_logging
-from app.core.rate_limit import limiter
+from app.core.openapi import tighten
+from app.core.rate_limit import RateLimitExceeded
 from app.core.redis import close_redis, get_redis
 from app.db.session import AsyncSessionLocal, engine
 from app.services.control import recover_stale_executions
@@ -32,7 +32,7 @@ get_cipher()
 logger = logging.getLogger("app")
 request_logger = logging.getLogger("app.request")
 
-_QUIET_PATHS = frozenset({"/api/health"})
+_QUIET_PATHS = frozenset({"/api/health", "/health"})
 
 
 async def _recovery_loop() -> None:
@@ -49,7 +49,9 @@ async def _recovery_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    logger.info("api starting", extra={"environment": settings.ENVIRONMENT})
+    logger.info("api starting", extra={"environment": settings.ENVIRONMENT, "public_demo": settings.PUBLIC_DEMO})
+    if settings.is_production and (problems := settings.production_problems()):
+        raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
     try:
         async with AsyncSessionLocal() as db:
             count = await sync_templates(db)
@@ -77,14 +79,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.state.limiter = limiter
-
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(_: Request, exc: RateLimitExceeded) -> JSONResponse:
     return JSONResponse(
         status_code=429,
         content={"detail": f"Too many requests: limit is {exc.detail}. Try again shortly."},
+        headers={"Retry-After": str(max(1, round(exc.retry_after)))},
     )
 
 
@@ -153,6 +154,23 @@ app.add_middleware(
 
 app.include_router(api_router)
 app.include_router(ws.router)
+
+
+def _openapi() -> dict:
+    if app.openapi_schema is None:
+        app.openapi_schema = tighten(FastAPI.openapi(app))
+    return app.openapi_schema
+
+
+app.openapi = _openapi  # type: ignore[method-assign]
+
+
+@app.get("/health", include_in_schema=False)
+async def health_root(response: Response) -> dict:
+    """The same check as /api/health, at the path most hosts and load balancers expect."""
+    from app.api.routes.health import check_health
+
+    return await check_health(response)
 
 
 @app.get("/", include_in_schema=False)

@@ -39,6 +39,7 @@ from app.models.enums import IntegrationStatus
 from app.models.integration import Integration
 from app.models.user import User
 from app.schemas.integration import ConnectRequest, IntegrationRead, IntegrationTestResult
+from app.services import demo
 from app.services.files import DbFileStore
 from app.services.knowledge import DbKnowledgeStore
 
@@ -255,14 +256,25 @@ async def delete_credential(db: AsyncSession, user: User, provider: str) -> bool
 # --- effective provider settings ----------------------------------------------------------
 
 
-def server_provider_settings() -> ProviderSettings:
-    return ProviderSettings.from_mapping(settings.provider_env())
+def server_provider_settings(*, visitor: bool = False) -> ProviderSettings:
+    """The server's .env settings. For a PUBLIC_DEMO visitor the personal accounts in them (SMTP, Telegram,
+    Discord, Notion, Airtable: the owner's inbox, bot, server, workspaces) are removed; the AI keys stay."""
+    env = settings.provider_env()
+    if visitor:
+        env = {k: ("" if k in demo.PERSONAL_ENV_KEYS else v) for k, v in env.items()}
+    return ProviderSettings.from_mapping(env)
 
 
-def provider_settings_for(user_credentials: dict[str, dict[str, Any]]) -> ProviderSettings:
-    """Server defaults with the user's own credentials layered on top (user wins)."""
-    merged = server_provider_settings()
+def provider_settings_for(user_credentials: dict[str, dict[str, Any]], *, visitor: bool = False) -> ProviderSettings:
+    """Server defaults with the user's own credentials layered on top (user wins).
+
+    A PUBLIC_DEMO `visitor` gets the server's AI keys only (whatever AI keys they stored are ignored: no
+    per-visitor choice), and may use Gmail, Discord, Telegram, Notion, and Airtable only through their
+    own credentials."""
+    merged = server_provider_settings(visitor=visitor)
     for provider, data in user_credentials.items():
+        if visitor and provider not in demo.PERSONAL_PROVIDERS:
+            continue
         if provider == "gmail":
             # A user's mailbox replaces the server's entirely (host overrides included).
             merged = merged.model_copy(update={"gmail": EmailAccount.model_validate(data)})
@@ -287,22 +299,25 @@ async def build_execution_services(
     """Provider credentials, the user's uploaded files and knowledge bases, node state (`state`; in memory when
     omitted), and the SSRF policy for a run."""
     credentials = await load_user_credentials(db, user.id)
-    return ExecutionServices(
-        provider_settings=provider_settings_for(credentials),
-        files=DbFileStore(db, user.id),
-        knowledge=DbKnowledgeStore(db, user.id),
-        allow_private_network=settings.HTTP_ALLOW_PRIVATE_NETWORKS,
-        state=state,
-    )
+    visitor = demo.is_visitor(user)
+    options: dict[str, Any] = {
+        "provider_settings": provider_settings_for(credentials, visitor=visitor),
+        "files": DbFileStore(db, user.id),
+        "knowledge": DbKnowledgeStore(db, user.id),
+        "allow_private_network": settings.HTTP_ALLOW_PRIVATE_NETWORKS,
+        "state": state,
+    }
+    # A visitor's AI calls count against their daily token budget.
+    return demo.MeteredServices(user.id, **options) if visitor else ExecutionServices(**options)
 
 
 def credential_source(
-    provider: str, user_credentials: dict[str, dict[str, Any]], server: ProviderSettings | None = None
+    provider: str, user_credentials: dict[str, dict[str, Any]], server: ProviderSettings | None = None, *, visitor: bool = False
 ) -> Source:
-    if provider in user_credentials:
+    if provider in user_credentials and not (visitor and provider not in demo.PERSONAL_PROVIDERS):
         return "user"
     # Ignore TESTING here: the question is whether real credentials exist.
-    server = (server or server_provider_settings()).model_copy(update={"testing": False})
+    server = (server or server_provider_settings(visitor=visitor)).model_copy(update={"testing": False})
     return "server" if server.has_credentials(provider) else "none"
 
 
@@ -315,9 +330,12 @@ async def list_integrations(db: AsyncSession, user: User) -> list[IntegrationRea
         row.provider: row
         for row in await db.scalars(select(Integration).where(Integration.user_id == user.id))
     }
-    server = server_provider_settings()
+    visitor = demo.is_visitor(user)
+    server = server_provider_settings(visitor=visitor)
     result = []
     for name, info in CONNECTABLE.items():
+        if visitor and name not in demo.PERSONAL_PROVIDERS:
+            continue  # the demo provides the AI; a visitor has nothing to connect or choose
         row = rows.get(name)
         connected = name in credentials
         metadata = (row.metadata_json or {}) if row else {}
@@ -326,7 +344,7 @@ async def list_integrations(db: AsyncSession, user: User) -> list[IntegrationRea
             label=info.label,
             kind=info.kind,
             connected=connected,
-            source=credential_source(name, credentials, server),
+            source=credential_source(name, credentials, server, visitor=visitor),
             status=row.status if row and connected else IntegrationStatus.DISCONNECTED,
             masked=masked_view(name, credentials[name]) if connected else None,
             connected_at=row.connected_at if row and connected else None,
@@ -359,7 +377,7 @@ async def _verify(services: ExecutionServices, provider: str) -> dict[str, Any]:
 async def check_connection(db: AsyncSession, user: User, provider: str, services: ExecutionServices) -> IntegrationTestResult:
     """A real, minimal call with the credential a run would use (list/get models; SMTP+IMAP login)."""
     credentials = await load_user_credentials(db, user.id)
-    source = credential_source(provider, credentials)
+    source = credential_source(provider, credentials, visitor=demo.is_visitor(user))
     start = time.perf_counter()
     details: dict[str, Any] = {}
     error: str | None = None

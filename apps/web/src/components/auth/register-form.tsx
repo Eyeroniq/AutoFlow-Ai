@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/ui/form-field";
 import { useRedirectIfAuthenticated } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
+import { safeNext } from "@/lib/route-guard";
 import { tokenStorage } from "@/lib/token-storage";
 import { type RegisterValues, registerSchema } from "@/lib/validation";
 
@@ -33,7 +34,7 @@ export function RegisterForm() {
     try {
       const tokens = await api.auth.register({ full_name, email, password });
       tokenStorage.setTokens(tokens);
-      router.replace("/dashboard");
+      router.replace(safeNext(new URLSearchParams(window.location.search).get("next")) ?? "/dashboard");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         setError("email", { message: "An account with this email already exists" });

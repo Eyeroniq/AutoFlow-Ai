@@ -23,10 +23,13 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.core.config import settings
+from app.services import automations
 from app.services.discord_voice import (
     Action,
     Phase,
     SessionTracker,
+    WATCH_KEY,
+    discover_watch,
     clean_wav,
     process_recording,
     request_consent,
@@ -44,6 +47,8 @@ COMMANDS_KEY = "flowforge:discord:commands"
 STALE_EVENT_SECONDS = 120
 # Less speech than this in a recording and a summary isn't attempted.
 MIN_SPEECH_SECONDS = 3
+# How often the pipelines are rescanned for a Discord Voice Meeting block.
+WATCH_SYNC_SECONDS = 10
 
 
 def recordings_dir() -> Path:
@@ -57,6 +62,10 @@ class Controller:
         self.channel_name = ""
         self.tasks: set[asyncio.Task[Any]] = set()
         self.task_queue = CeleryTaskQueue()
+        self.workflow_id: str | None = None  # the pipeline of the Discord Voice Meeting block being watched
+        self.max_minutes = settings.DISCORD_RECORDING_MAX_MINUTES
+        self._watch_json: str | None = None
+        self._was_paused = False
 
     # -- plumbing ------------------------------------------------------------------------------
 
@@ -123,7 +132,7 @@ class Controller:
             logger.info("approval arrived after the session ended; not recording")
             return
         await self.command(
-            type="start_recording", session=session, max_minutes=settings.DISCORD_RECORDING_MAX_MINUTES,
+            type="start_recording", session=session, max_minutes=self.max_minutes,
             output=settings.DISCORD_OUTPUT,
         )
 
@@ -153,7 +162,7 @@ class Controller:
             if notes:
                 return await process_recording(
                     wav, seconds, chat_id=self.chat_id, channel_name=name, bot=self.telegram,
-                    session_factory=self.sessions, redis=self.redis, task_queue=self.task_queue,
+                    session_factory=self.sessions, redis=self.redis, task_queue=self.task_queue, workflow_id=self.workflow_id,
                 )
             wav = await asyncio.to_thread(clean_wav, wav)  # the recorder's mix, smoothed
             outcome = await send_recording(
@@ -176,13 +185,42 @@ class Controller:
             await say(self.telegram, self.chat_id, "⏳ Preparing the notes… this takes a minute or two.")
             await process_recording(
                 wav, seconds, chat_id=self.chat_id, channel_name=name, bot=self.telegram, session_factory=self.sessions,
-                redis=self.redis, task_queue=self.task_queue, choice=choice,
+                redis=self.redis, task_queue=self.task_queue, choice=choice, workflow_id=self.workflow_id,
             )
             return choice
         except Exception:
             logger.exception("the notes for a recording failed")
             await say(self.telegram, self.chat_id, "❌ I couldn't prepare the notes for that recording.")
             return "failed"
+
+    async def sync_watch(self) -> bool:
+        """Publish what the recorder should watch (the Discord Voice Meeting block, else the .env ids) and
+        remember its pipeline; returns True when it changed."""
+        paused = await automations.is_paused(self.redis, "discord")
+        if paused:
+            if not self._was_paused:
+                await self.command(type="stop_recording", reason="paused from the UI")
+            self._was_paused = True
+            watch = None
+        else:
+            self._was_paused = False
+            async with self.sessions() as db:
+                watch = await discover_watch(db)
+        payload = None if watch is None else json.dumps(
+            {"guild_id": watch.guild_id, "channel_id": watch.channel_id, "max_minutes": watch.max_minutes}
+        )
+        self.workflow_id = watch.workflow_id if watch else None
+        self.max_minutes = watch.max_minutes if watch else settings.DISCORD_RECORDING_MAX_MINUTES
+        if payload == self._watch_json:
+            return False
+        if payload is None:
+            await self.redis.delete(WATCH_KEY)
+            logger.info("no Discord Voice Meeting block to watch")
+        else:
+            await self.redis.set(WATCH_KEY, payload)
+            logger.info("watching", extra={"watch": payload, "workflow_id": self.workflow_id})
+        self._watch_json = payload
+        return True
 
     def close(self) -> None:
         for task in list(self.tasks):
@@ -191,7 +229,14 @@ class Controller:
     # -- the loop ------------------------------------------------------------------------------
 
     async def run(self, stop: asyncio.Event) -> None:
+        last_sync = 0.0
         while not stop.is_set():
+            if time.monotonic() - last_sync >= WATCH_SYNC_SECONDS:
+                last_sync = time.monotonic()
+                try:
+                    await self.sync_watch()
+                except Exception:
+                    logger.exception("could not read the Discord Voice Meeting blocks")
             try:
                 item = await self.redis.blpop(EVENTS_KEY, timeout=2)
             except Exception:

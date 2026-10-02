@@ -11,6 +11,11 @@ class DeploymentCreate(BaseModel):
     model_config = ConfigDict(json_schema_extra={"examples": [{"workflow_id": "00000000-0000-0000-0000-000000000000"}]})
 
     workflow_id: uuid.UUID
+    description: str | None = Field(
+        default=None, max_length=1000,
+        description="What the pipeline does, in a sentence or two (the Telegram Command Center matches messages "
+        "against it). Required on the first deploy; a redeploy without one keeps the current description.",
+    )
 
 
 class DeploymentInput(BaseModel):
@@ -40,6 +45,11 @@ class DeploymentRead(BaseModel):
     workflow_version: int = Field(description="The workflow's version that was deployed.")
     endpoint: str = Field(description="POST here (relative to the API's base URL) to run it.")
     api_key_prefix: str = Field(description="The API key's first characters, to recognize it.")
+    description: str = Field(default="", description="What it does (matched against Telegram messages).")
+    side_effects: bool = Field(
+        default=False, description="It sends or writes somewhere (email, messages, non-GET HTTP, Notion/Airtable): "
+        "runs from Telegram wait for a Confirm tap.",
+    )
     inputs: list[DeploymentInput]
     outputs: list[DeploymentOutput]
     key_created_at: datetime

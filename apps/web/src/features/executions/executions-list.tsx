@@ -18,7 +18,7 @@ import { isTerminal } from "../runs/run-state";
 
 const PAGE = 25;
 const STATUSES: ExecutionStatus[] = ["pending", "running", "success", "failed", "stopped"];
-const TRIGGERS: ExecutionTrigger[] = ["manual", "schedule", "email", "webhook"];
+const TRIGGERS: ExecutionTrigger[] = ["manual", "schedule", "email", "webhook", "telegram", "discord_voice"];
 
 /** A filter from the page's URL (?workflow_id=...&trigger=...), e.g. from the Triggers panel. */
 function initialFilter(name: string): string {

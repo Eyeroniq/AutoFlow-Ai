@@ -21,7 +21,7 @@ from tests.support import create_workflow
 
 TEMPLATE_SLUGS = [
     "morning-digest", "invoice-extractor", "email-triage", "job-alert-filter", "meeting-notes", "web-research",
-    "pdf-to-knowledge-base", "document-qa",
+    "pdf-to-knowledge-base", "document-qa", "paper-digest", "safe-to-share", "calendar-invite",
 ]
 
 

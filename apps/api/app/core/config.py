@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -163,6 +163,27 @@ class Settings(BaseSettings):
     TRIGGER_MISFIRE_GRACE_SECONDS: float = Field(default=3600, gt=0)
     # Email triggers poll at most this often (per trigger).
     EMAIL_TRIGGER_MIN_POLL_MINUTES: int = Field(default=1, ge=1)
+    # Telegram Command Center (app.services.telegram_center, the telegram-listener service).
+    TELEGRAM_RATE_LIMIT_PER_MINUTE: int = Field(default=10, ge=1, description="Requests per chat per minute.")
+    TELEGRAM_CONFIRM_SECONDS: int = Field(default=300, ge=30, description="How long a Confirm button works.")
+    TELEGRAM_RUN_WAIT_SECONDS: float = Field(default=600, gt=0, description="How long the bot waits for a run's result.")
+    # Discord voice monitor (app.discord_bot, the discord-bot service). Without a token, guild,
+    # and channel it idles.
+    DISCORD_BOT_TOKEN: SecretStr | None = None
+    DISCORD_MONITOR_GUILD_ID: int | None = Field(default=None, gt=0)
+    DISCORD_MONITOR_CHANNEL_ID: int | None = Field(default=None, gt=0)
+    DISCORD_RECORDING_MAX_MINUTES: float = Field(default=90, gt=0, description="Safety cap on one recording.")
+    DISCORD_MIN_RECORDING_SECONDS: float = Field(default=30, ge=0, description="Shorter recordings aren't processed.")
+    DISCORD_MEETING_PIPELINE: str = Field(default="Meeting Notes", description="Name of the pipeline that summarizes a recording.")
+    DISCORD_RECORDER: Literal["node", "pycord"] = Field(
+        default="node",
+        description="node: the discord-recorder service (discord.js) records. pycord: app.discord_bot records itself (its voice receive is unreliable).",
+    )
+    DISCORD_OUTPUT: Literal["audio", "notes"] = Field(
+        default="audio",
+        description="audio: send the recording to Telegram as an audio file. notes: run the Meeting Notes pipeline on it.",
+    )
+    DISCORD_RUN_WAIT_SECONDS: float = Field(default=1800, gt=0, description="How long the bot waits for the summary run.")
     # Longest an email poll may hold its lock (a crashed poller frees it after this).
     EMAIL_POLL_LOCK_SECONDS: int = Field(default=300, gt=0)
 
@@ -230,7 +251,7 @@ class Settings(BaseSettings):
         """Server secrets the log formatter redacts wherever they appear."""
         secrets = [self.JWT_SECRET, *self.ENCRYPTION_KEY.get_secret_value().split(",")]
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
-                     "ANTHROPIC_API_KEY", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL",
+                     "ANTHROPIC_API_KEY", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL", "DISCORD_BOT_TOKEN",
                      "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "CUSTOM_OPENAI_API_KEY", "TAVILY_API_KEY",
                      "NOTION_API_KEY", "AIRTABLE_API_KEY"):
             value = getattr(self, name)

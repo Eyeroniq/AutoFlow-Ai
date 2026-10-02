@@ -308,13 +308,21 @@ async def file_input_issues(
 
 async def import_file(db: AsyncSession, owner_id: uuid.UUID, source: Path, filename: str | None = None) -> UploadedFile:
     """Store a file from local disk as if `owner_id` had uploaded it (the seed's sample)."""
-    data = source.read_bytes()
+    return await import_bytes(db, owner_id, source.read_bytes(), filename or source.name)
+
+
+async def import_bytes(db: AsyncSession, owner_id: uuid.UUID, data: bytes, filename: str) -> UploadedFile:
+    """Store `data` as one of `owner_id`'s uploads (a Telegram photo, document, or voice note):
+    the same type detection and size limits as POST /api/files. Flushes, doesn't commit."""
     content_type = sniff_content_type(data[:SNIFF_BYTES])
     if content_type is None:
-        raise UploadRejected(415, f"{source.name} is not an allowed file type")
+        raise UploadRejected(415, f"{safe_filename(filename)} is not an allowed file type")
+    limit, label = upload_limit(content_type)
+    if len(data) > limit:
+        raise UploadRejected(413, f"{safe_filename(filename)} is larger than the {label} limit")
     file_id = uuid.uuid4()
     record = UploadedFile(
-        id=file_id, owner_id=owner_id, filename=safe_filename(filename or source.name), content_type=content_type,
+        id=file_id, owner_id=owner_id, filename=safe_filename(filename), content_type=content_type,
         size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), storage_key=f"{owner_id}/{file_id}",
     )
     target = _path(record)

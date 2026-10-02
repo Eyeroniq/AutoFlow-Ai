@@ -93,6 +93,8 @@ def deployment_read(deployment: Deployment) -> DeploymentRead:
         workflow_version=deployment.workflow_version,
         endpoint=endpoint_path(deployment.id),
         api_key_prefix=deployment.api_key_prefix,
+        description=deployment.description or "",
+        side_effects=bool(deployment.side_effects),
         inputs=inputs,
         outputs=outputs,
         key_created_at=deployment.key_created_at,
@@ -111,8 +113,32 @@ def _issue_key(deployment: Deployment) -> str:
     return key
 
 
+# Node types that send or write outside FlowForge. HTTP Request counts unless its method is
+# GET or HEAD; Gmail Read counts when it marks mail as read.
+SIDE_EFFECT_TYPES = frozenset({
+    "gmail", "telegram", "discord_webhook", "notion_create_page", "airtable_create_record", "kb_add_document",
+})
+
+
+def has_side_effects(graph: WorkflowGraph) -> bool:
+    """Whether running the graph could send or change something outside FlowForge."""
+    for node in graph.nodes:
+        config = node.config or {}
+        if node.type in SIDE_EFFECT_TYPES:
+            return True
+        if node.type == "http_request" and str(config.get("method") or "GET").upper() not in ("GET", "HEAD"):
+            return True
+        if node.type == "gmail_read" and config.get("mark_as_read"):
+            return True
+    return False
+
+
+class DescriptionRequired(ValueError):
+    pass
+
+
 async def deploy_workflow(
-    db: AsyncSession, workflow: Workflow, services: ExecutionServices
+    db: AsyncSession, workflow: Workflow, services: ExecutionServices, *, description: str | None = None
 ) -> tuple[Deployment, str | None, bool]:
     """Deploy (or redeploy) `workflow`'s saved graph. Returns (deployment, the API key on a
     first deploy else None, created). Raises InvalidWorkflowGraph (changing nothing) if the
@@ -131,6 +157,11 @@ async def deploy_workflow(
     )
     now = utcnow()
     created = deployment is None
+    description = (description or "").strip() or (deployment.description if deployment is not None else "")
+    if not description:
+        raise DescriptionRequired(
+            "Describe what the pipeline does (a sentence or two): the Telegram Command Center matches messages against it"
+        )
     key = None
     if deployment is None:
         deployment = Deployment(id=uuid.uuid4(), workflow_id=workflow.id, owner_id=workflow.owner_id, version=1)
@@ -145,6 +176,8 @@ async def deploy_workflow(
     else:
         deployment.version += 1
     deployment.name = workflow.name
+    deployment.description = description
+    deployment.side_effects = has_side_effects(graph)
     deployment.graph_json = graph.model_dump(mode="json")
     deployment.workflow_version = workflow.version
     deployment.deployed_at = now

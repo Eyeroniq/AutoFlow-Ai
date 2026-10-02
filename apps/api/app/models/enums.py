@@ -42,6 +42,10 @@ class ExecutionTrigger(str, enum.Enum):
     SCHEDULE = "schedule"
     # A new email matched a workflow's email trigger.
     EMAIL = "email"
+    # A Telegram message (Telegram Command Center).
+    TELEGRAM = "telegram"
+    # A recorded Discord voice meeting, approved over Telegram (app.services.discord_voice).
+    DISCORD_VOICE = "discord_voice"
     EVENT = "event"
     # Legacy: deployment runs before triggers existed (the migration renamed them webhook).
     API = "api"
@@ -51,6 +55,7 @@ class TriggerType(str, enum.Enum):
     SCHEDULE = "schedule"
     EMAIL = "email"
     WEBHOOK = "webhook"
+    TELEGRAM = "telegram"
 
 
 class NodeExecutionStatus(str, enum.Enum):

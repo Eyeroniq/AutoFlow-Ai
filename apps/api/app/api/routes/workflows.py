@@ -15,6 +15,7 @@ from flowforge_engine import (
     queue_for_graph,
     validate_workflow,
 )
+from flowforge_engine.errors import ProviderError
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, SessionFactoryDep, TaskQueueDep
@@ -29,6 +30,8 @@ from app.schemas.trigger import TriggerBrief
 from app.schemas.workflow import (
     LastExecution,
     NodeTestRequest,
+    GenerateRequest,
+    GenerateResult,
     NodeTestResult,
     PrivacySettings,
     ValidateRequest,
@@ -42,6 +45,8 @@ from app.schemas.workflow import (
 from app.services.files import file_input_issues
 from app.services.node_state import DbNodeStateStore
 from app.services.privacy import policy_for
+from app.services.generation import MAX_ATTEMPTS, GenerationFailed, LLMCall, generate, owner_llm
+from app.services.templates import fit_graph
 from app.services.providers import get_execution_services
 from app.services.runs import (
     InvalidWorkflowGraph,
@@ -187,6 +192,49 @@ async def validate(
     graph = body.graph if body and body.graph is not None else WorkflowGraph.model_validate(workflow.graph_json)
     errors = validate_workflow(graph, services=services)
     return WorkflowValidation(valid=not errors, errors=errors)
+
+
+def get_generator_llm(services: Services) -> LLMCall:
+    """The LLM that drafts pipelines (overridden in tests)."""
+    return owner_llm(services)
+
+
+@router.post(
+    "/generate",
+    response_model=GenerateResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate a pipeline from a plain-English description",
+    description=(
+        "An LLM drafts the graph from the node catalog; the draft must use real node types and pass validation "
+        f"(it gets the problems back and retries, up to {MAX_ATTEMPTS} attempts). The pipeline is saved as a "
+        "draft only when it validates; `warnings` lists providers to connect before it can run."
+    ),
+    responses={422: {"description": "No valid graph after the retries: `detail.problems` says why"},
+               502: {"description": "No LLM answered"}},
+)
+async def generate_workflow(
+    body: GenerateRequest, db: DbSession, user: CurrentUser, services: Services,
+    llm: Annotated[LLMCall, Depends(get_generator_llm)],
+) -> GenerateResult:
+    my_email = services.settings.gmail.username or user.email
+    try:
+        generated = await generate(llm, body.prompt, services, my_email=my_email,
+                                   fit=lambda graph: fit_graph(graph, services, email_to=my_email))
+    except GenerationFailed as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": f"Couldn't produce a valid pipeline in {exc.attempts} attempts", "problems": exc.problems[:15]},
+        ) from None
+    except ProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from None
+    workflow = Workflow(name=generated.name, description=generated.description, owner_id=user.id,
+                        graph_json=WorkflowGraph().model_dump(mode="json"))
+    db.add(workflow)
+    await db.flush()
+    await replace_graph(db, workflow, WorkflowGraph.model_validate(generated.graph))
+    await db.commit()
+    await db.refresh(workflow)
+    return GenerateResult(workflow=WorkflowRead.model_validate(workflow), attempts=generated.attempts, warnings=generated.warnings)
 
 
 @router.get(

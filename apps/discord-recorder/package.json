@@ -1,0 +1,22 @@
+{
+  "name": "flowforge-discord-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Records the monitored Discord voice channel on request from the FlowForge Discord controller (app/discord_controller.py), through Redis.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@discordjs/voice": "0.19.2",
+    "@snazzah/davey": "0.1.12",
+    "discord.js": "14.27.0",
+    "opusscript": "0.0.8",
+    "redis": "6.3.0"
+  }
+}

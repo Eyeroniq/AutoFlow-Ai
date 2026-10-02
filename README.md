@@ -65,7 +65,7 @@ A visual AI workflow automation builder. This repository is being built in phase
   768 dimensions, HNSW cosine index), with live status and a test search. Five nodes (Add
   Document, Chunker, Embedding, Retriever, Reranker) and two templates: **PDF to Knowledge
   Base** and **Document Q&A**, whose answers cite `[n]` sources that lead back to the exact chunk.
-- **Privacy layer (this state):** [privacy and security](#privacy-and-security). One detection
+- **Privacy layer:** [privacy and security](#privacy-and-security). One detection
   service finds secrets (key formats, JWTs, private keys, passwords, high-entropy tokens), card
   numbers (Luhn), Aadhaar (Verhoeff) and PAN, and, when switched on, personal data (Presidio +
   spaCy). A **privacy guard** on every outbound and LLM node blocks, redacts, or warns before the
@@ -73,6 +73,23 @@ A visual AI workflow automation builder. This repository is being built in phase
   types only). New nodes: **Secret Scanner**, **PII Redact** / **PII Restore** (the mapping in
   encrypted Redis for an hour, so it survives queue hand-offs), and **ICS Calendar Event**; the
   Telegram node sends files; `{{system.now}}` and `{{system.today}}`.
+- **Telegram Command Center:** [message your bot](#telegram-command-center) to run
+  deployed pipelines. A `telegram-listener` service long-polls the bot (each update handled once,
+  the offset kept in Redis); a **Telegram message** trigger allowlists chats; an LLM **intent router**
+  matches the message against each deployment's (now required) description, fills its inputs, and
+  asks one question when unsure. Voice notes are transcribed, photos fill file inputs. Pipelines with
+  **side effects** (detected on deploy) wait for a signed, chat-bound **Confirm** button that expires
+  after 5 minutes. Per-chat rate limit; the privacy layer checks messages in and replies out.
+- **Discord voice meetings:** a `discord-bot` service watches one voice channel and, only after you tap 
+  **Yes** in Telegram (signed, chat-bound, 5-minute buttons), joins, posts a visible notice, records, and sends 
+  the Meeting Notes summary back to that chat ([setup and flow](#discord-voice-meetings)).
+- **Multi-agent resume refinement:** upload a resume PDF (and optionally a job description) and five specialist agents
+  (parser, ATS checker, content coach, job matcher, rewriter) each show their findings, then a before/after
+  rewrite you can download as PDF/DOCX or email to yourself ([how it works](#multi-agent-resume-refinement)).
+- **Generate with AI, Run Replay, command palette (this state):** [describe a pipeline](#generate-with-ai-run-replay-and-the-command-palette)
+  and an LLM drafts it from the node catalog, checked against the validator and retried until it
+  validates; **Replay** animates a finished run from its stored timings with play/pause/scrub and
+  speeds; **Ctrl+K** jumps to any pipeline or page and runs quick actions.
 
 ## Stack
 
@@ -901,6 +918,7 @@ to step counts once.
 | **Secret Scanner** | Scans text or any JSON (`data`); `include_personal_data` (default on); `fail_on_findings` to stop the run | `findings` (type, category, path, start, end, confidence, detector), `count`, `clean`, `by_type`, `by_category` |
 | **PII Redact** | Replaces each distinct value with `<TYPE_n>` (the same value, the same placeholder), so an LLM never sees it | `text`, `mapping_id`, `placeholders`, `by_type` |
 | **PII Restore** | Puts the originals back in `text` (e.g. the LLM's answer) | `text`, `restored`, `unknown_placeholders` |
+| **Redact Image** | Covers what's sensitive in a screenshot or photo with black boxes: Tesseract reads each word with its position (small images at 1600 px wide), each line is scanned, and every word a finding overlaps is covered (`padding` px around it). On the ocr queue | `file` (a PNG attachment, base64), `summary` ("1 card number, 1 PAN"), `count`, `hidden_words`, `by_type` |
 
 Redact keeps its `{placeholder: original}` mapping in Redis, Fernet-encrypted, for **one hour**,
 keyed to the execution (another run can't read it), so Restore works after the run moved to
@@ -921,10 +939,248 @@ extraction prompt so an LLM can turn "tomorrow at 3" into a date.
 content such as `{{ics.attachment}}`, text or base64) or `document_file` (an upload). The text
 becomes its caption, or a message before it when longer than 1,024 characters. Up to 50 MB.
 
+File attachments with `encoding: base64` (a Redact Image result, a Gmail attachment) are never
+scanned or rewritten: random base64 can look like a PAN, and masking it would corrupt the file.
+Presidio's name and location matches without a capital letter are dropped (it tags words like
+"docker" as people), and a labelled field ("Name: Priya Deshmukh", "Full name –") counts as a name
+by rule, since the small model often misses those.
+
 **Limits.** Streaming LLM tokens are shown live as they arrive, unmasked (they're never stored).
 For Each's per-item prompts aren't guarded (they're resolved per item inside the node). Presidio's
 small English model misses some names and finds some false ones; personal-data detection is off
 by default for that reason. PANs are checked by shape, not a checksum.
+
+## Telegram Command Center
+
+Run your deployed pipelines by messaging your Telegram bot: "what's new in pgvector?", a voice
+note saying "email me a reminder to call the bank", or a photo of a receipt.
+
+**Setup.**
+1. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (see [Create a Telegram bot](#create-a-telegram-bot-and-find-your-chat-id)).
+   The `telegram-listener` service (started by `docker compose up`) long-polls that bot; without a
+   token it idles. Run exactly one: Telegram allows one `getUpdates` consumer per bot, and the
+   listener removes any webhook set on the bot when it starts.
+2. **Deploy** each pipeline you want to reach, with a **description** of what it does (now
+   required on the first deploy): the router matches messages against it.
+3. In the editor's **Triggers** panel, switch on **Telegram message**. Its allowlist of chat ids
+   defaults to `TELEGRAM_CHAT_ID`; add others (comma-separated; groups are negative numbers).
+
+**How a message is handled** ([`app/services/telegram_center.py`](apps/api/app/services/telegram_center.py)):
+
+1. **Once per update.** Each `update_id` is claimed with an atomic Redis `SET NX` (kept 7 days)
+   before anything happens, and the listener saves the next offset in Redis after each update, so a
+   restart, a redelivered batch, or a second listener never runs anything twice.
+2. **Allowlist.** Only chats on the allowlist of some workflow's enabled Telegram trigger whose
+   pipeline is deployed count. Everything else is ignored without a reply, and logged with the chat
+   id only (never the text).
+3. **Rate limit.** `TELEGRAM_RATE_LIMIT_PER_MINUTE` (10) requests per chat per minute, in Redis;
+   the first one over gets one "slow down" reply, the rest are dropped.
+4. **Media.** A voice note (or audio) is downloaded, stored as an upload, and transcribed by the
+   Speech to Text node (Groq's Whisper with a key, faster-whisper on the CPU without); the bot
+   replies "I heard: …" and routes the transcript like a typed message. A photo (the largest size)
+   or a document is stored as an upload and fills the chosen pipeline's file input.
+5. **Privacy.** A message holding a secret, a card number, an Aadhaar or a PAN runs nothing ("I
+   didn't run anything: your message contains 1 card number"). Every reply goes out through the
+   privacy layer's masking, and the run follows the pipeline's own guard and masking settings.
+6. **Intent router.** An LLM (the owner's Gemini, then Groq, then OpenRouter) gets the message and
+   each candidate's name, description, and inputs, and answers JSON: the pipeline, the inputs it
+   could fill from the message, a confidence, and what's missing. The answer is checked rather than
+   trusted: inputs the pipeline doesn't have are dropped, and a required input that isn't filled, a
+   missing file, or confidence under 0.6 means **one clarifying question** ("Who should I greet?").
+   The reply is routed together with the first message; if it's still unclear, the bot lists what
+   it can run. Without a working LLM, a chat with one simple pipeline (at most one text input) still
+   works: the whole message becomes that input.
+7. **Confirmation for side effects.** A deployment records `side_effects` when its graph sends or
+   writes somewhere: Gmail, Telegram, Discord, Notion Create Page, Airtable Create Record, Knowledge
+   Base: Add Document, HTTP Request with a method other than GET/HEAD, or Gmail Read with "mark as
+   read". Those runs wait for a tap on **✅ Confirm** / **✖ Cancel** under a summary of the inputs.
+   Each button's data is `c|x:<id>:<expiry>:<signature>` (under Telegram's 64 bytes): an HMAC of the
+   action, the request id, the chat, and the expiry, with the server's `JWT_SECRET`. A tap in another
+   chat, a changed token, or a tap after `TELEGRAM_CONFIRM_SECONDS` (300: 5 minutes) is rejected with
+   a clear message ("This confirmation expired… Send the request again"). The request itself waits
+   in Redis, Fernet-encrypted, and can be confirmed once.
+8. **Running.** "⏳ Running <name>…", then the deployment runs exactly as through its API (its graph
+   snapshot, the owner's credentials, the workflow's runs-per-hour limit), recorded with trigger
+   **telegram**. The bot waits up to `TELEGRAM_RUN_WAIT_SECONDS` (600) and replies with the final
+   output (a single text output as is, anything else as JSON, cut at 3,500 characters; "Done." when
+   the pipeline has no Output node), or "❌ <name> failed: <error>" with the run id. A file in the
+   output (`{filename, content, encoding, content_type}`, e.g. an ICS node's `{{ics.attachment}}`)
+   is sent as a Telegram document, with the text as its caption. Three templates are made for this:
+   **Paper Digest**, **Safe to Share**, and **Calendar Invite** (deploy each with a description).
+
+## Discord voice meetings
+
+Two services watch **one voice channel in one server**: `discord-recorder`
+([`apps/discord-recorder`](apps/discord-recorder), discord.js: it sits in the channel and does the
+recording, with Discord's end-to-end encrypted voice handled by `@discordjs/voice`) and `discord-bot`
+([`app/discord_controller.py`](apps/api/app/discord_controller.py): it decides). They talk through two Redis
+lists. Nothing is recorded on its own: it asks you in Telegram first, tells everyone in the channel when it
+records, and sends the recording (or notes) back to the same Telegram chat.
+
+**Set it up**
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) → **New Application** →
+   **Bot** → **Reset Token**; put it in `.env` as `DISCORD_BOT_TOKEN`. No privileged intents are needed.
+2. **OAuth2 → URL Generator**: scope `bot`; bot permissions **View Channels**, **Connect**, **Speak**,
+   and **Send Messages** (the channel's text chat). Open the generated URL and add the bot to your server.
+   Make sure the bot's role can see and join the channel (a private channel needs an explicit grant).
+3. In Discord, **User Settings → Advanced → Developer Mode**; right-click the server and the voice
+   channel → **Copy ID** into `DISCORD_MONITOR_GUILD_ID` and `DISCORD_MONITOR_CHANNEL_ID`.
+4. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` must be set (the prompt goes to that chat) and the
+   `telegram-listener` must be running: it receives the Yes/No tap.
+5. Create the **Meeting Notes** workflow from its template (the bot looks for a deployed pipeline, else
+   a workflow, named `DISCORD_MEETING_PIPELINE`, default "Meeting Notes").
+6. `docker compose up -d discord-recorder discord-bot`. Run exactly one of each. Without the token, guild, and
+   channel they idle. (`DISCORD_RECORDER=pycord` makes `discord-bot` record by itself with py-cord instead;
+   py-cord 2.8's voice receive is unreliable, so that is only a fallback.)
+   Optional: `DISCORD_RECORDING_MAX_MINUTES` (90), `DISCORD_MIN_RECORDING_SECONDS` (30).
+
+**How it works, end to end**
+
+1. **Detect.** When the channel goes from empty to non-empty, a *session* begins (bots don't count). People
+   already in the channel when the service starts are an ongoing session it isn't asked about.
+2. **Ask.** The bot does *not* join. It sends the Telegram chat "Voice activity detected in #channel — record
+   and summarize this meeting?" with **Yes** and **No** buttons. They are the Command Center's signed
+   buttons: an HMAC token bound to that chat and an expiry `TELEGRAM_CONFIRM_SECONDS` (300, 5 minutes)
+   away, usable once; a tap from another chat, a forged or altered token, or a late tap is refused.
+3. **Answer.** The `telegram-listener` (the only `getUpdates` consumer) records the tap in Redis and the
+   bot picks it up.
+   - **No**, or **no answer in 5 minutes**: nothing is recorded, and that session isn't asked about again,
+     however long people keep talking. The next time the channel goes from empty to non-empty (a separate
+     session) it asks again.
+   - **Yes**: the bot joins, posts **"🔴 Recording started for meeting notes, per request"** in the
+     channel's text chat, and records everyone into one mixed mono 16 kHz WAV. If it can't post the notice
+     it doesn't record and says so in Telegram.
+4. **Stop.** When the channel empties, or at `DISCORD_RECORDING_MAX_MINUTES` (a capped session isn't re-asked
+   either). A recording under 30 seconds isn't processed (you get a one-line note), and a recording that
+   captured no audio at all is reported as such.
+5. **Deliver (`DISCORD_OUTPUT=audio`, the default).** The bot sends the recording to the Telegram chat as an
+   MP3 (64 kbps, so 90 minutes fit Telegram's 50 MB limit; a copy is kept in your uploads). Right after it comes
+   **"Want notes for this recording?"** with **📝 Summary**, **📄 Full transcript**, **Both**, and **✖ No thanks**
+   buttons (the same signed, chat-bound, 5-minute buttons). Only when you tap one does the **Meeting Notes**
+   pipeline run on that recording (trigger **discord voice**): you get the summary (decisions and action items)
+   as a message, the whole-meeting transcript as a `.txt` file, or both. Nothing is transcribed or summarized
+   unless you ask. Set `DISCORD_OUTPUT=notes` to skip the audio and run steps 5-6 below straight away.
+5. **Process (`notes`).** The WAV is stored like an upload and the **Meeting Notes** pipeline (Speech to Text →
+   summary, decisions, action items) starts on it right away, recorded as a run with trigger
+   **discord voice** in Executions. Its Telegram nodes are muted: the bot delivers the result itself.
+6. **Choose.** While that runs, the chat gets "What do you want?" with **📝 Summary**, **📄 Full transcript**,
+   and **Both** buttons (the same signed, chat-bound, 5-minute buttons). When the run finishes you get what
+   you picked: the summary as a message, the whole-meeting transcript as a `.txt` document. No answer in
+   5 minutes sends the summary. If transcription or summarization fails, the chat gets
+   "❌ The meeting summary failed: …" with the run id. Everything sent is masked by the privacy layer.
+
+State is in memory: restarting `discord-bot` forgets the current session (the recorder re-sends who is in the
+channel when it connects, and people already there aren't asked about). The recorder mixes everyone into one mono
+16 kHz WAV on the shared files volume; the controller smooths it (short holes from lost packets bridged, edges
+faded, level raised) and converts it to MP3 before sending. Tests: `docker compose exec api pytest
+tests/test_discord_controller.py tests/test_discord_voice.py`, and the mixer's with `npm test` in
+`apps/discord-recorder`.
+
+## Multi-agent resume refinement
+
+Upload a resume PDF (and, optionally, paste a job description) on the **Resume** page. Five specialist
+agents run one after another, each its own LLM call with its own role, schema, and checks, never one
+mega-prompt. The page shows what each agent found in an expandable section, then the improved draft
+with a before/after diff for every bullet.
+
+```
+PDF ─► Extract ─► Parser ─┬─► ATS Compatibility ─┐
+       (text +            ├─► Content & Impact ──┼─► Rewrite ─► refined PDF + DOCX ─► email to yourself
+        layout)           └─► Job-Match (if JD) ─┘
+```
+
+| Agent | Input | What it returns |
+|---|---|---|
+| **Extract** (no LLM) | the PDF | text via the **PDF Extract** node, plus *measured* layout facts from PyMuPDF: text columns, tables, images and icons, text in the page header/footer, section headers |
+| **Parser Agent** | the text | `{contact_info, summary, experience[{company, title, dates, bullets[]}], education[], skills[]}`; its bullets must appear in the resume text (it restructures, never invents) |
+| **ATS Compatibility Agent** | parsed structure + the measured layout | a score and a list of issues, each a `blocker` or `warning` with a plain-language explanation, the evidence, and a fix: multi-column, tables, images/icons instead of text, header/footer text, non-standard section names (a "My Journey" instead of Experience), missing sections, contact/date problems. Measured blockers the model overlooks are added to its list (marked *measured in the PDF*) |
+| **Content & Impact Agent** | every bullet, with an id | for each bullet: flags (`weak_opening_verb`, `no_metric`, `vague_claim`, `passive_voice`), a one-line explanation of *that* bullet, and a specific rewrite; plus a review of the summary |
+| **Job-Match Agent** (only with a job description) | parsed resume + the job description | matched and missing keywords (missing ones ranked high/medium/low, with an honest suggestion or "true gap"), and for each requirement the existing bullets that answer it best |
+| **Rewrite Agent** | everything above | the full improved draft: same jobs in the same order, every original bullet exactly once, rewritten per the Content Agent and (with a job description) ordered and emphasised per the Job-Match Agent |
+
+**Why a dedicated service rather than a template:** the feature needs stored per-agent output, versions of
+the same resume, downloads, and an email history, none of which a workflow run keeps in that shape. It
+still reuses the engine: PDF text comes from the **PDF Extract** node, and every agent asks through the
+engine's provider chain (`generate_with_fallback`: Gemini, then Groq, then OpenRouter, whichever you have keys
+for), so the usual fallback applies.
+
+**Every stage is stored, not just the result.** Each agent's row keeps the model that answered, the
+instructions it was given, *every raw reply* (with the problems that made a reply be retried), its validated
+output, and its timing, and the UI shows them under "The agent's raw output". The run executes on a Celery
+`llm` worker; the page polls and fills in as each agent finishes.
+
+**Guardrails.** A model's JSON can be valid and still wrong, so each reply is checked beyond its schema, with
+one or two retries that list the problems (`app/services/resume_agents.py`):
+
+- the Parser's bullets must come from the resume text; the Content Agent must review every bullet id; the
+  Job-Match Agent may only cite real bullet ids; the Rewrite Agent must keep the structure, use every original
+  bullet exactly once, and add no skills the resume doesn't list;
+- no invented numbers: a metric in a rewrite must already be in the original bullet, otherwise it is a
+  `[placeholder]` such as `[X%]` for you to fill in (the draft tells you how many there are);
+- no padding: a rewrite that adds explanatory clauses the original doesn't state is sent back;
+- past roles use the past tense, the current role the present tense;
+- after the last attempt the assembler corrects what is left deterministically (it falls back to the Content
+  Agent's clean suggestion, or to the original, keeps bullets the Content Agent judged fine word for word
+  unless a job description asks for tailoring, and restores contact details, companies, titles and dates from
+  the parsed resume). Each correction is listed under "automatic corrections".
+
+**Downloads and email.** `GET /api/resume-refinements/{id}/download?format=pdf|docx` builds the refined draft
+as a single-column, plain-text PDF (reportlab) and a DOCX with real headings and bullets (python-docx); the
+generated PDF passes this feature's own ATS layout checks. "Email me the refined resume" sends both files
+through your Gmail SMTP integration with a short summary ("Rewrote 6 of 9 bullets, fixed 5 ATS formatting
+issues, matched 8 of 11 job-description keywords…"). **The endpoint takes no recipient**: it sends only to
+the logged-in account's own address, so an auto-rewritten resume is reviewed by you before it goes to anyone
+else. Each send is recorded (who, when, which version, the summary, the files) and listed under the
+refinement; refining the same file again creates the next version.
+
+API: `POST /api/resume-refinements {file_id, job_description}` (upload the PDF with `POST /api/files` first;
+202, then poll `GET /api/resume-refinements/{id}`), `GET` list, `DELETE`, `/download`, and `/email`.
+
+**Verified on real runs.** [`docs/resume-verification`](docs/resume-verification) holds every agent's actual
+output and the final draft for three sample resumes ([`samples/resumes`](samples/resumes)), with and without
+a job description: a clean backend engineer (Priya), an ATS-hostile designer resume (two columns, a skills table,
+icons, creative headers, contact only in the page header), and a thin graduate resume with no summary or skills
+section. It also holds the PDF and DOCX that were emailed to a real inbox in the end-to-end check. Tests:
+`docker compose exec api pytest tests/test_resume_refinement.py` (schemas, checks, layout, guardrails,
+documents, and the API flow with a scripted LLM) and `npm test` in `apps/web` for the diff.
+
+## Generate with AI, Run Replay, and the command palette
+
+**Generate with AI** (Dashboard → **Generate with AI**, or `POST /api/workflows/generate {prompt}`).
+Describe a pipeline in plain English ("summarize my unread emails and Telegram me the summary").
+An LLM (your Gemini, then Groq, then OpenRouter) gets a compact catalog of every node type built
+from the registry (the same schemas as `GET /api/nodes`: config fields with types, required ones,
+defaults; output keys; the fields of list items such as `emails[]`), the `{{node.key}}` reference
+rules, and your request, and answers a graph as JSON. FlowForge then checks it rather than
+trusting it ([`app/services/generation.py`](apps/api/app/services/generation.py)): the JSON must
+parse; every node type must exist; edges must connect declared nodes; the workflow validator must
+pass (config schemas, references to upstream nodes, condition branches). LLM steps are pointed at
+the providers you have keys for, file inputs lose any invented default, and the canvas is laid out
+in columns. Any problem goes back to the model with the exact messages and its previous answer,
+up to **3 attempts**. Only a graph that validates is saved (as a draft) and opened in the editor;
+otherwise the dialog lists what was still wrong and nothing is saved. Providers that aren't
+connected come back as warnings. Verified with real Gemini: "summarize my unread emails and
+Telegram me", "extract the entities from an uploaded invoice", and "search the web for news about
+pgvector and email me a summary" each validated on the first attempt and ran successfully.
+
+**Run Replay** (**Replay** on a finished run's page). The run is rebuilt from what was already
+stored, with no new recording: each node row's `started_at` / `finished_at` / status, and the graph
+snapshot the execution keeps (now included in `GET /api/executions/{id}` as `graph`, the graph
+exactly as it ran, even if the pipeline was edited since). Every step becomes an offset from the
+run's start, so queue waits and hand-offs between workers keep their real length (the Meeting Notes
+run shows a 228 ms gap between the audio and llm workers). The canvas uses the live run's colors
+(gray, blue while running, green, red; edges animate into the running node) with play / pause, a
+1 ms scrub bar, speeds 0.5×–10×, and a list of start/finish events you can click to jump to
+([`replay-model.ts`](apps/web/src/features/executions/replay-model.ts)).
+
+**Command palette** (**Ctrl+K** / **⌘K** anywhere, the editor included). Fuzzy-searches your
+pipelines, the pages (Dashboard, Executions, Knowledge bases, Integrations), and quick actions:
+Create pipeline, Generate pipeline with AI, and, in the editor, **Run current pipeline** (as the
+Run button: it asks for inputs if the pipeline has any) and **Deploy current pipeline**. Characters
+match in order ("zebr" finds "Palette zebra"), ranked by exact substrings, word starts, and
+consecutive letters; keywords match too ("rag" finds Knowledge bases, "settings" Integrations).
+↑/↓ and Enter to choose; Escape or a click outside closes it.
 
 ## Notifications: Telegram and Discord
 
@@ -979,7 +1235,7 @@ connection** makes real calls that send nothing: Telegram `getMe` (the token wor
 
 ![Templates on the dashboard](docs/screenshots/templates.png)
 
-The dashboard's **Templates** section lists eight ready-made pipelines. Each card shows its
+The dashboard's **Templates** section lists eleven ready-made pipelines. Each card shows its
 steps and the credentials it needs, with a check or a warning for each and the provider that
 would be used. **Use template** creates an editable copy you own and opens it in the editor.
 LLM steps use the first free provider you have a key for (Gemini, then Groq, then OpenRouter),
@@ -999,6 +1255,9 @@ and is written to the `templates` table on API start and by the seed
 | **Web Research** | Input (a question) → Web Search (DuckDuckGo, 5 results, Tavily fallback) → Web Page (the top result's text; a site that blocks readers gives empty text instead of failing) → Join (numbered sources) → Gemini (answers only from the sources, citing `[1]`, `[2]`, ... and ending with a `Sources:` list of `[n] Title - URL`) → Output (the answer and the sources) | An LLM key (Tavily optional) |
 | **PDF to Knowledge Base** | Input (a PDF, image, or text file) → Knowledge Base: Add Document (into `{{vars.knowledge_base}}`, default "My documents", created by **Use template** if missing) → Output (status, chunks, how it was read) | Gemini (or OpenAI) for embeddings; mock without |
 | **Document Q&A** | Input (a question) → Retriever (8 closest chunks) → Reranker (an LLM keeps the best 4) → Gemini (answers only from them, citing `[1]`, `[2]`, ... and ending with `Sources:` as `[n] file, page`) → Output (the answer and the sources, each with its `chunk_id`) | Gemini (or OpenAI) for embeddings, an LLM key |
+| **Paper Digest** | Input (a paper PDF) → PDF Extract → Structured Output (title, problem, contributions, data, results with numbers, limitations) and Knowledge Base: Add Document (`{{vars.knowledge_base}}`) → Join ×3 → Text → Output (the digest). Ask Document Q&A about it afterwards | Gemini (or OpenAI) for embeddings, an LLM key |
+| **Safe to Share** | Input (a screenshot or photo) → **Redact Image** (black boxes over each sensitive word) and, as a second opinion, Vision → Secret Scanner → Condition (did Vision see more than was covered?) → Output `{message, file}`: "🛡️ Covered: 1 database password, 1 AWS access key…" with the redacted picture, or a "check it before posting" warning. From Telegram, the picture comes back as a photo | A Gemini key (Vision) |
+| **Calendar Invite** | Input ("GATE mock test next Sunday 10 to 1") → Structured Output (exact ISO times from `{{system.now}}` in `{{vars.timezone}}`, Asia/Kolkata) → ICS Calendar Event → Condition (date clear?) → Output `{message, file}`, or a question when the date is vague. From Telegram, the `.ics` arrives as a document | An LLM key |
 | **Job Alert Filter** | Schedule (every 6 h) → RSS Feed (We Work Remotely, programming; new since the last run) → For Each (score 0-100 against `{{vars.resume}}`, as JSON) → Filter (`output.score` ≥ `{{vars.threshold}}`, 70) → Condition (any?) → Join → Telegram → Output | An LLM key, Telegram (or Discord) |
 
 Edit the variables (`feed_url`, `resume`, `threshold`) in the **Variables** panel. **Download

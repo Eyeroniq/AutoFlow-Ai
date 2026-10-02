@@ -17,6 +17,7 @@ from app.models.execution import NodeExecution, WorkflowExecution
 from app.models.file import UploadedFile
 from app.models.integration import Integration
 from app.models.knowledge import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
+from app.models.resume import ResumeEmail, ResumeRefinement
 from app.models.template import Template
 from app.models.trigger import NodeState, TriggerEvent, WorkflowTrigger
 from app.models.user import User
@@ -37,6 +38,8 @@ __all__ = [
     "NodeExecution",
     "NodeExecutionStatus",
     "NodeState",
+    "ResumeEmail",
+    "ResumeRefinement",
     "Template",
     "TriggerEvent",
     "TriggerType",

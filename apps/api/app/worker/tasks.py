@@ -30,8 +30,10 @@ from app.services.runs import InfrastructureUnavailable, run_execution, utcnow
 from app.services.task_queue import CeleryTaskQueue
 from app.services.triggers import claim_email_polls, fire_due_schedules, poll_email_trigger
 from app.services.knowledge import run_ingestion
+from app.services.resume_refinement import run_refinement
 from app.worker.celery_app import (
     INGEST_DOCUMENT_TASK,
+    REFINE_RESUME_TASK,
     POLL_EMAIL_TASK,
     RUN_EXECUTION_TASK,
     TRIGGERS_TICK_TASK,
@@ -150,6 +152,17 @@ def ingest_document_task(document_id: str) -> dict[str, Any]:
             return await run_ingestion(session_factory, uuid.UUID(document_id))
 
     return asyncio.run(ingest())
+
+
+@celery_app.task(name=REFINE_RESUME_TASK, acks_late=True)
+def refine_resume_task(refinement_id: str) -> dict[str, Any]:
+    """Run the multi-agent resume pipeline for one refinement (it ends success or failed)."""
+
+    async def refine() -> dict[str, Any]:
+        async with worker_resources() as (session_factory, _redis):
+            return await run_refinement(session_factory, uuid.UUID(refinement_id))
+
+    return asyncio.run(refine())
 
 
 @signals.worker_init.connect

@@ -414,6 +414,105 @@ Text node with `AWS key AKIAIOSFODNN7EXAMPLE, password=Hunter2isNotSafe, request
 
 ---
 
+## Part I — Telegram Command Center
+
+Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`, and the `telegram-listener` service
+running (`docker compose ps`). Check its logs with `docker compose logs -f telegram-listener`.
+
+### ☐ 42. Connect a pipeline
+1. Open the **Web Research** template copy (or any pipeline with one text input), **Deploy**, and write a description: `Answers a question by searching the web, with cited sources.`
+2. **Triggers** → **Telegram message** → switch it on (the chat id field can stay empty: it uses `TELEGRAM_CHAT_ID`).
+
+**You should see:** the card is on with your chat id listed. Switching it on before deploying fails with "Deploy the pipeline first (with a description)".
+
+### ☐ 43. Ask in plain words
+Message the bot: `what is pgvector used for?`
+
+**You should see:** "⏳ Running …" within a couple of seconds, then the answer with [1], [2] citations. Executions lists the run with trigger **telegram**.
+
+### ☐ 44. A voice note
+Hold the mic button in the bot's chat and say: "What is the capital of Australia?"
+
+**You should see:** "🎙️ Transcribing…", "🎙️ I heard: What is the capital of Australia?", then the answer.
+
+### ☐ 45. A side-effect pipeline waits for Confirm
+1. Make a pipeline: Input `note` → Gmail (to: you, body `{{note.value}}`) → Output. Deploy it with `Emails a note or reminder to my own inbox.`, and switch on its Telegram trigger.
+2. Message: `email me a reminder to call the bank tomorrow`.
+
+**You should see:** a "Run “…”? It sends or changes something…" message with the note it would send, and **✅ Confirm / ✖ Cancel** buttons. Nothing is emailed until you tap **Confirm**; then "✅ Confirmed", "⏳ Running…", the email arrives, and "Emailed you: …". Tapping Confirm again says "Already handled". Doing it again and tapping **Cancel** sends nothing.
+
+### ☐ 46. An expired confirmation
+Repeat 45 but wait more than 5 minutes before tapping **Confirm**.
+
+**You should see:** a popup "This confirmation expired (they last 5 minutes). Send the request again.", the message changes to "⌛ …", and no email is sent.
+
+### ☐ 47. One clarifying question
+With both pipelines connected, message: `send something`.
+
+**You should see:** one question back (e.g. what to send, or which pipeline). Answer it: the answer is routed together with your first message.
+
+### ☐ 48. A chat that isn't allowed
+In the Telegram card, replace the chat id with `1` (someone else) and save; then message the bot. (Or add the bot to a group and write there.)
+
+**You should see:** no reply at all, and the listener log line "telegram message from a chat on no allowlist; ignored" with the chat id. Put your chat id back afterwards.
+
+### ☐ 49. Sensitive data in a message
+Message: `email my card 4111 1111 1111 1111 to me`.
+
+**You should see:** "I didn't run anything: your message contains 1 card number." Nothing runs.
+
+### ☐ 50. Rate limit
+Send 11 messages within a minute.
+
+**You should see:** the 11th gets "That's more than 10 requests in a minute…", and further ones are ignored until the minute is over.
+
+---
+
+## Part J — Telegram showcase templates
+
+Use each template (Dashboard → Templates), **Deploy** it with a one-line description, and switch on its **Telegram message** trigger.
+
+### ☐ 51. Paper Digest
+Send the bot a research paper PDF (e.g. `samples/survey paper.pdf`). It asks you to Confirm (it writes to your knowledge base).
+
+**You should see:** the title, problem, contributions, dataset with sizes, results with their numbers, and limitations, ending "Added to “My documents” (N chunks)". Then ask Document Q&A something about the paper and get page citations.
+
+### ☐ 52. Safe to Share
+Screenshot a chat or form with a (fake) card number, Aadhaar, PAN, email, phone, and a "Name:" field, and send it.
+
+**You should see:** the same picture back as a photo, with black boxes over each of those, captioned "🛡️ Covered: 2 names, 1 Aadhaar number, 1 PAN, 1 card number, 1 email address, 1 Indian phone number. The rest of the picture is unchanged." Everything else stays readable. Also try a terminal or log screenshot with a `postgresql://user:password@host` URL and an API key: only the password and the key are covered. If Vision sees something OCR couldn't locate (blurry or tiny text), the caption says to check the copy before posting.
+
+### ☐ 53. Calendar Invite
+Send (or say) `GATE mock test next Sunday 10am to 1pm at COEP`, then `dinner with Asha tomorrow evening`, then `remind me about the thing sometime`.
+
+**You should see:** an `.ics` file for each of the first two (Sunday 10:00–13:00; tomorrow 18:00–19:00) that opens in your calendar app with a 30-minute reminder; the third gets "I couldn't pin down when that is…" and no file.
+
+---
+
+## Part K — Generate with AI, Replay, command palette
+
+### ☐ 54. Generate a pipeline
+Dashboard → **Generate with AI** → `summarize my unread emails and Telegram me the summary` → **Generate**.
+
+**You should see:** after 5–20 seconds the editor opens on a new draft: Gmail Read → Join → Gemini → Telegram → Output, already connected, with the Gemini prompt referencing the emails. Run it: the summary arrives on Telegram. Try `extract the vendor, amounts and dates from an uploaded invoice` (it asks for the file when you run it) and `search the web for X and email me a summary`.
+
+### ☐ 55. When generation can't produce a valid pipeline
+Ask for something FlowForge has no node for, e.g. `control my smart lights`.
+
+**You should see:** either a sensible approximation (often an HTTP Request) or, after 3 attempts, the dialog listing what was still wrong. Nothing half-built is saved.
+
+### ☐ 56. Replay a run
+Open a finished run with several steps (Executions → e.g. a Meeting Notes or Document Q&A run) → **Replay** → **Play**.
+
+**You should see:** the run's graph, with each node turning blue then green at the moments it really did, including the pauses between steps on different workers. Drag the scrub bar to any moment; click an event in "What happened" to jump to it; try 10× speed. The clock's total matches the run's Duration.
+
+### ☐ 57. Command palette
+Press **Ctrl+K** (⌘K on a Mac) anywhere. Type part of a pipeline's name, use ↑/↓, press **Enter**.
+
+**You should see:** the pipeline opens in the editor. Press Ctrl+K again and choose **Run current pipeline**: it runs like the Run button. **Escape** or a click outside closes the palette. Typing `rag` offers Knowledge bases, `keys` offers Integrations.
+
+---
+
 ## Final checks
 
 - ☐ **Executions page:** filter by status and by trigger; open a run and click each step to see its input, output and time.

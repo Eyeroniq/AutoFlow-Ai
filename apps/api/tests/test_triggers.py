@@ -166,7 +166,7 @@ async def test_saving_a_schedule_sets_the_next_fire_time(client, user):
     assert len(trigger["upcoming"]) == 3
 
     body = (await client.get(f"/api/workflows/{wid}/triggers", headers=user.headers)).json()
-    assert [t["type"] for t in body["triggers"]] == ["schedule", "email", "webhook"]
+    assert [t["type"] for t in body["triggers"]] == ["schedule", "email", "webhook", "telegram"]
     assert body["settings"] == {"max_runs_per_hour": 30, "max_consecutive_failures": 3}
 
     off = trigger_of(await put_trigger(client, user, wid, "schedule", enabled=False), "schedule")

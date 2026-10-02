@@ -1,0 +1,8 @@
+Junior Data Analyst - BrightRetail
+
+Join our analytics team to turn retail data into decisions.
+- Write SQL queries and build dashboards in Tableau or Power BI
+- Clean and analyse data with Python (pandas) or Excel
+- Present insights to non-technical stakeholders
+- Run A/B test analysis and report results
+Requirements: degree in a quantitative field, SQL, basic statistics, strong communication, internship or project experience.

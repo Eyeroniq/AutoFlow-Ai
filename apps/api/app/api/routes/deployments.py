@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentUser, DbSession
 from app.models.deployment import Deployment
 from app.schemas.deployment import DeploymentCreate, DeploymentRead, DeploymentWithKey
-from app.services.deployments import deploy_workflow, deployment_read, rotate_api_key, undeploy
+from app.services.deployments import DescriptionRequired, deploy_workflow, deployment_read, rotate_api_key, undeploy
 from app.services.providers import get_execution_services
 from app.services.runs import InvalidWorkflowGraph
 from app.services.workflows import get_owned_workflow
@@ -47,7 +47,10 @@ _NO_STORE = {"Cache-Control": "no-store"}
 async def deploy(body: DeploymentCreate, db: DbSession, user: CurrentUser, services: Services) -> Any:
     workflow = await get_owned_workflow(db, body.workflow_id, user)
     try:
-        deployment, key, created = await deploy_workflow(db, workflow, services)
+        deployment, key, created = await deploy_workflow(db, workflow, services, description=body.description)
+    except DescriptionRequired as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from None
     except InvalidWorkflowGraph as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

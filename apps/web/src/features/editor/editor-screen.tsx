@@ -123,6 +123,15 @@ function EditorLayout({ workflowId }: { workflowId: string }) {
     else void run({});
   }, [run]);
 
+  // The command palette's "Run current pipeline" bumps runRequest.
+  const runRequest = useEditorUi((s) => s.runRequest);
+  const handled = useRef(runRequest);
+  useEffect(() => {
+    if (runRequest === handled.current) return;
+    handled.current = runRequest;
+    onRun();
+  }, [runRequest, onRun]);
+
   return (
     <div className="flex h-screen flex-col overflow-hidden" data-testid="editor">
       <TopBar onValidate={onValidate} onRun={onRun} />

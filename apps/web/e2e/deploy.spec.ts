@@ -33,6 +33,8 @@ test("deploys the demo pipeline and runs it through its endpoint with the genera
   await expect(dialog.getByTestId("deploy-inputs")).toContainText("text");
   await expect(dialog.getByTestId("deploy-outputs")).toContainText("final_output.result");
 
+  // A description is required (the Telegram Command Center matches messages against it).
+  await dialog.getByTestId("deploy-description").fill("Summarizes a topic with Gemini and emails the summary.");
   // Deploy. The first deploy shows a key; a redeploy (an earlier run of this test) keeps the
   // existing one, which can't be shown again, so issue a new one to call the endpoint with.
   const deployed = page.waitForResponse((r) => r.url().endsWith("/api/deployments") && r.request().method() === "POST");
@@ -121,7 +123,7 @@ test("Undeploy takes the endpoint down after a confirmation, and the old key get
     variables: [],
   });
   try {
-    const deployed = await api.call<{ id: string; endpoint: string; api_key: string }>("POST", "/api/deployments", { workflow_id: workflow.id });
+    const deployed = await api.call<{ id: string; endpoint: string; api_key: string }>("POST", "/api/deployments", { workflow_id: workflow.id, description: "E2E undeploy check" });
     expect(deployed.status).toBe(201);
     const { endpoint, api_key: key } = deployed.body;
     const runIt = () => request.post(`${API_URL}${endpoint}`, { data: { inputs: { topic: "x" } }, headers: { Authorization: `Bearer ${key}` } });

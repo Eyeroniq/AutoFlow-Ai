@@ -223,6 +223,86 @@ services:
       api:
         condition: service_healthy
 
+  # Telegram Command Center (app.telegram_listener): long-polls the bot in TELEGRAM_BOT_TOKEN
+  # and runs deployed pipelines from allowlisted chats. Run exactly one: Telegram allows one
+  # getUpdates consumer per bot. Without a token it idles. It transcribes voice notes itself
+  # (ffmpeg + Whisper are in the image), so it mounts the models volume too.
+  telegram-listener:
+    build:
+      context: ../apps/api
+      additional_contexts:
+        workflow_engine: ../packages/workflow-engine
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      <<: *worker-env
+      WORKER_NAME: telegram-listener
+    command:
+      - sh
+      - -c
+      - >-
+        exec watchfiles --filter python "python -m app.telegram_listener" app /packages/workflow-engine/src
+    volumes:
+      - ../apps/api:/app
+      - ../packages/workflow-engine:/packages/workflow-engine
+      - files_data:/data/files
+      - whisper_models:/data/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  # Discord voice monitor (app.discord_bot): watches DISCORD_MONITOR_CHANNEL_ID and, after a Yes
+  # tapped in Telegram (answered through the telegram-listener), records the channel and sends the
+  # Meeting Notes summary to the same chat. Run exactly one. Without a bot token, guild, and
+  # channel it idles. Same image as the API; it stores recordings on the shared files volume.
+  discord-bot:
+    build:
+      context: ../apps/api
+      additional_contexts:
+        workflow_engine: ../packages/workflow-engine
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      <<: *worker-env
+      WORKER_NAME: discord-bot
+    command:
+      - sh
+      - -c
+      - >-
+        exec watchfiles --filter python "python -m app.discord_bot" app /packages/workflow-engine/src
+    volumes:
+      - ../apps/api:/app
+      - ../packages/workflow-engine:/packages/workflow-engine
+      - files_data:/data/files
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  # Discord voice recorder (apps/discord-recorder, discord.js): sits in the monitored channel's
+  # events and, when the discord-bot controller says so (after a Yes in Telegram), joins, posts the
+  # notice, records everyone into one WAV on the shared files volume, and reports back through
+  # Redis. Run exactly one. Without a bot token, guild, and channel it idles.
+  discord-recorder:
+    build:
+      context: ../apps/discord-recorder
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DISCORD_RECORDINGS_DIR: /data/files/recordings
+    volumes:
+      - files_data:/data/files
+    depends_on:
+      redis:
+        condition: service_healthy
+
   # Load testing (loadtest/README.md). Not started by `up`; run it with
   #   docker compose --profile loadtest run --rm locust --headless -u 7 -r 5 -t 2m
   locust:

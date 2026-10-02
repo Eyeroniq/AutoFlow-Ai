@@ -3,6 +3,7 @@
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
+import { CommandPalette } from "@/components/command-palette";
 import { toast } from "@/components/ui/toast";
 
 function describe(error: unknown): string {
@@ -38,5 +39,10 @@ function getQueryClient() {
 }
 
 export function Providers({ children }: { children: ReactNode }) {
-  return <QueryClientProvider client={getQueryClient()}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={getQueryClient()}>
+      {children}
+      <CommandPalette />
+    </QueryClientProvider>
+  );
 }

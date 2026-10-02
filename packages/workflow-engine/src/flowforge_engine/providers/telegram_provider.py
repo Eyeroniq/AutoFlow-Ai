@@ -155,8 +155,9 @@ class TelegramProvider:
         parse_mode: str | None = None,
         disable_web_page_preview: bool = False,
         disable_notification: bool = False,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """sendMessage; returns Telegram's Message object."""
+        """sendMessage; returns Telegram's Message object. `reply_markup` e.g. an inline keyboard."""
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
@@ -165,7 +166,75 @@ class TelegramProvider:
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         return await self.call("sendMessage", payload)
+
+    async def send_photo(
+        self, chat_id: str, filename: str, data: bytes, content_type: str, *, caption: str | None = None,
+        disable_notification: bool = False,
+    ) -> dict[str, Any]:
+        """sendPhoto: shown inline in the chat (Telegram recompresses it; up to 10 MB)."""
+        payload: dict[str, Any] = {"chat_id": str(chat_id), "disable_notification": disable_notification}
+        if caption:
+            payload["caption"] = caption
+        return await self.call("sendPhoto", payload, files={"photo": (filename, data, content_type)})
+
+    # --- receiving (the Telegram Command Center's listener) -----------------------------------
+
+    async def delete_webhook(self) -> Any:
+        """getUpdates only works while no webhook is set; long polling clears it first."""
+        return await self.call("deleteWebhook", {"drop_pending_updates": False})
+
+    async def get_updates(
+        self, offset: int | None, *, timeout: int = 30, allowed_updates: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Long polling: waits up to `timeout` seconds for updates after `offset` (which also
+        confirms everything before it to Telegram)."""
+        payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": allowed_updates or ["message", "callback_query"]}
+        if offset is not None:
+            payload["offset"] = offset
+        saved, self._timeout = self._timeout, max(self._timeout, timeout + 15)
+        try:
+            return list(await self._call_once("getUpdates", payload) or [])
+        finally:
+            self._timeout = saved
+
+    async def download_file(self, file_id: str, *, max_bytes: int = 20 * 1024 * 1024) -> tuple[bytes, str]:
+        """(the file's bytes, its path on Telegram) for a file_id from a message (bots can
+        download up to 20 MB)."""
+        info = await self.call("getFile", {"file_id": file_id})
+        if int(info.get("file_size") or 0) > max_bytes:
+            raise ProviderError(self.name, f"getFile: the file is over {max_bytes // 1048576} MB")
+        path = str(info.get("file_path") or "")
+        if not path:
+            raise ProviderError(self.name, "getFile: Telegram returned no file path")
+        url = f"{self._api_base}/file/bot{self._token}/{path}"
+        try:
+            async with httpx.AsyncClient(timeout=max(self._timeout, 60), transport=self._transport) as client:
+                response = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise ProviderError(self.name, f"file download: {type(exc).__name__}: {self._clean(str(exc))}", retryable=True) from exc
+        if response.status_code != 200:
+            raise ProviderError(self.name, f"file download: HTTP {response.status_code}", status_code=response.status_code)
+        return response.content, path
+
+    async def answer_callback_query(self, callback_query_id: str, text: str | None = None, *, alert: bool = False) -> Any:
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id, "show_alert": alert}
+        if text:
+            payload["text"] = text[:200]
+        return await self.call("answerCallbackQuery", payload)
+
+    async def edit_message_text(
+        self, chat_id: str, message_id: int, text: str, *, parse_mode: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> Any:
+        """Replace a sent message's text (and drop its buttons unless `reply_markup` is given)."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text,
+                                   "reply_markup": reply_markup or {"inline_keyboard": []}}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        return await self.call("editMessageText", payload)
 
     async def verify(self, chat_id: str | None = None) -> dict[str, Any]:
         """getMe proves the token works; with a chat id, getChat proves the bot can reach it.

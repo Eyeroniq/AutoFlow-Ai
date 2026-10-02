@@ -86,6 +86,10 @@ class ExecutionDetail(ExecutionSummary):
     inputs: dict[str, Any] | None = Field(default=None, validation_alias="inputs_json")
     final_output: dict[str, Any] | None = Field(validation_alias="final_output_json")
     node_executions: list[NodeExecutionRead]
+    graph: dict[str, Any] | None = Field(
+        default=None, validation_alias="graph_json",
+        description="The graph exactly as it ran (a snapshot taken when the run was queued): what Replay draws.",
+    )
     privacy_report: dict[str, Any] | None = Field(
         default=None,
         description="Counts and types of secrets and personal data found in the run, per step, and what the guard did. Never the values.",

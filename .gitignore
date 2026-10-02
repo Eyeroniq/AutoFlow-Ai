@@ -27,3 +27,8 @@ Thumbs.db
 !.vscode/extensions.json
 
 recordings/
+
+# Production: database backups (BACKUP_DIR) and local production env files
+backups*/
+.env.prod*
+!.env.production.example

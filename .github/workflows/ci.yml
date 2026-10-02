@@ -153,3 +153,19 @@ jobs:
 
       - name: Build images (no push)
         run: docker compose build
+
+      # The production stack (compose.prod.yaml) must parse with every profile on, and its images must build:
+      # the API without dev dependencies, the web app as a compiled standalone server.
+      - name: Production stack, validate and build
+        run: |
+          {
+            echo "DOMAIN=example.com"
+            echo "PUBLIC_URL=https://example.com"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_')"
+            echo "POSTGRES_PASSWORD=ci"
+            echo "FLOWER_PASSWORD=ci"
+          } > .env.prod-ci
+          export ENV_FILE=.env.prod-ci
+          docker compose --env-file .env.prod-ci -f compose.prod.yaml --profile monitoring --profile bots config -q
+          docker compose --env-file .env.prod-ci -f compose.prod.yaml --profile monitoring --profile bots build

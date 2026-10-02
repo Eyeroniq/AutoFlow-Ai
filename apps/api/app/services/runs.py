@@ -32,6 +32,7 @@ from flowforge_engine import (
     ExecutionServices,
     GraphNode,
     GraphValidationFailed,
+    IssueCode,
     NodeContext,
     NodeRunResult,
     NodeStatus,
@@ -58,6 +59,7 @@ from app.models.execution import NodeExecution, WorkflowExecution
 from app.models.user import User
 from app.models.workflow import Workflow, WorkflowNode
 from app.schemas.execution import ExecutionDetail, NodeExecutionRead
+from app.services import demo
 from app.services.credentials import build_execution_services
 from app.services.events import EventPublisher, iso, stop_flag_set
 from app.services.node_state import DbNodeStateStore
@@ -125,6 +127,11 @@ async def create_execution(
     issues = validate_workflow(graph, services=services)
     if issues:
         raise InvalidWorkflowGraph(issues)
+    if await demo.user_is_visitor(db, workflow.owner_id):
+        try:
+            await demo.charge_run(workflow.owner_id)
+        except demo.DemoLimitReached as exc:
+            raise InvalidWorkflowGraph([ValidationIssue(code=IssueCode.DEMO_LIMIT, message=str(exc))]) from None
 
     execution_id = uuid.uuid4()
     execution = WorkflowExecution(

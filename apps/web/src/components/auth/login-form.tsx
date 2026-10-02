@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/ui/form-field";
 import { useRedirectIfAuthenticated } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
+import { safeNext } from "@/lib/route-guard";
 import { tokenStorage } from "@/lib/token-storage";
 import { type LoginValues, loginSchema } from "@/lib/validation";
 
@@ -32,7 +33,7 @@ export function LoginForm() {
     try {
       const tokens = await api.auth.login(values);
       tokenStorage.setTokens(tokens);
-      router.replace("/dashboard");
+      router.replace(safeNext(new URLSearchParams(window.location.search).get("next")) ?? "/dashboard");
     } catch (error) {
       setServerError(error instanceof Error ? error.message : "Login failed");
     }

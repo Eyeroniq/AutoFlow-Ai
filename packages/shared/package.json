@@ -1,0 +1,13 @@
+{
+  "name": "@flowforge/shared",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TypeScript types generated from the FlowForge API's OpenAPI document. Types only: nothing here runs.",
+  "types": "src/index.ts",
+  "scripts": {
+    "generate": "openapi-typescript openapi.json -o src/api.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0"
+  }
+}

@@ -35,7 +35,7 @@ from flowforge_engine import WorkflowGraph, queue_for_graph
 from flowforge_engine.errors import ProviderError
 from flowforge_engine.privacy import PrivacyPolicy, mask
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 
 from app.core.config import settings
 from app.core.crypto import get_cipher
@@ -45,6 +45,7 @@ from app.models.enums import ExecutionTrigger, WorkflowStatus
 from app.models.execution import WorkflowExecution
 from app.models.user import User
 from app.models.workflow import Workflow
+from app.services import demo
 from app.services.credentials import build_execution_services
 from app.services.deployments import describe_io, execution_events, wait_for_execution
 from app.services.files import UploadRejected, import_bytes
@@ -392,21 +393,75 @@ class Pipeline:
     graph: dict[str, Any]
 
 
-async def find_pipeline(db: Any, name: str) -> Pipeline | None:
+DEFAULT_PIPELINES = ("Meeting Notes", "Discord Meeting Summary")
+
+
+WATCH_KEY = "flowforge:discord:watch"
+VOICE_NODE = "discord_voice"
+
+
+@dataclass
+class Watch:
+    """What the Discord recorder should watch, and the pipeline to run for it."""
+    guild_id: str
+    channel_id: str
+    max_minutes: int
+    workflow_id: str | None  # None: the pipeline is found by DISCORD_MEETING_PIPELINE's name (the .env setup)
+
+
+async def discover_watch(db: Any) -> Watch | None:
+    """The channel to watch: the newest pipeline with a Discord Voice Meeting block that names a server and a
+    channel (PUBLIC_DEMO: only the owner's pipelines), else the .env ids (DISCORD_MONITOR_*), else None."""
+    query = select(Workflow).where(
+        Workflow.status != WorkflowStatus.ARCHIVED, cast(Workflow.graph_json, Text).like(f"%{VOICE_NODE}%"),
+    )
+    if demo.is_demo():
+        query = query.where(Workflow.owner_id == (await demo.owner_user_id(db) or uuid.UUID(int=0)))
+    for workflow in await db.scalars(query.order_by(Workflow.updated_at.desc())):
+        for node in (workflow.graph_json or {}).get("nodes", []):
+            config = node.get("config") or {}
+            if node.get("type") == VOICE_NODE and str(config.get("guild_id") or "").isdigit() and str(config.get("channel_id") or "").isdigit():
+                return Watch(str(config["guild_id"]), str(config["channel_id"]), int(config.get("max_minutes") or 90), str(workflow.id))
+    if settings.DISCORD_MONITOR_GUILD_ID and settings.DISCORD_MONITOR_CHANNEL_ID:
+        return Watch(str(settings.DISCORD_MONITOR_GUILD_ID), str(settings.DISCORD_MONITOR_CHANNEL_ID),
+                     settings.DISCORD_RECORDING_MAX_MINUTES, None)
+    return None
+
+
+async def find_pipeline(db: Any, name: str, workflow_id: str | None = None) -> Pipeline | None:
+    """The pipeline with that workflow id when given (a Discord Voice Meeting block's pipeline); else
+    `find_named_pipeline` for the configured name; with the default name, the "Discord Meeting Summary"
+    template's workflow is accepted too."""
+    if workflow_id:
+        workflow = await db.get(Workflow, uuid.UUID(workflow_id))
+        if workflow is None or workflow.status == WorkflowStatus.ARCHIVED:
+            return None
+        if demo.is_demo() and workflow.owner_id != await demo.owner_user_id(db):
+            return None
+        return Pipeline(workflow, await db.get(User, workflow.owner_id), None, workflow.graph_json)
+    found = await find_named_pipeline(db, name)
+    if found is None and name.strip().lower() == DEFAULT_PIPELINES[0].lower():
+        found = await find_named_pipeline(db, DEFAULT_PIPELINES[1])
+    return found
+
+
+async def find_named_pipeline(db: Any, name: str) -> Pipeline | None:
     """The deployed pipeline called `name` (case-insensitive), else the workflow of that name
     (the newest first); None if neither exists."""
-    deployment = await db.scalar(
-        select(Deployment).where(func.lower(Deployment.name) == name.strip().lower(), Deployment.revoked_at.is_(None))
-        .order_by(Deployment.deployed_at.desc()).limit(1)
-    )
+    # PUBLIC_DEMO: the recorder belongs to the owner, so it only ever runs the owner's pipeline.
+    only_owner = (await demo.owner_user_id(db) or uuid.UUID(int=0)) if demo.is_demo() else None
+    deployment_query = select(Deployment).where(func.lower(Deployment.name) == name.strip().lower(), Deployment.revoked_at.is_(None))
+    if only_owner is not None:
+        deployment_query = deployment_query.where(Deployment.owner_id == only_owner)
+    deployment = await db.scalar(deployment_query.order_by(Deployment.deployed_at.desc()).limit(1))
     if deployment is not None:
         workflow = await db.get(Workflow, deployment.workflow_id)
         graph = deployment.graph_json
     else:
-        workflow = await db.scalar(
-            select(Workflow).where(func.lower(Workflow.name) == name.strip().lower(), Workflow.status != WorkflowStatus.ARCHIVED)
-            .order_by(Workflow.updated_at.desc()).limit(1)
-        )
+        workflow_query = select(Workflow).where(func.lower(Workflow.name) == name.strip().lower(), Workflow.status != WorkflowStatus.ARCHIVED)
+        if only_owner is not None:
+            workflow_query = workflow_query.where(Workflow.owner_id == only_owner)
+        workflow = await db.scalar(workflow_query.order_by(Workflow.updated_at.desc()).limit(1))
         graph = workflow.graph_json if workflow else {}
     if workflow is None:
         return None
@@ -555,7 +610,7 @@ async def send_recording(
 async def process_recording(
     wav: bytes, seconds: float, *, chat_id: str, channel_name: str, bot: Any,
     session_factory: SessionFactory, redis: Redis, task_queue: TaskQueue, wait_seconds: float | None = None,
-    choice_poll_seconds: float = 1.0, choice: str | None = None,
+    choice_poll_seconds: float = 1.0, choice: str | None = None, workflow_id: str | None = None,
 ) -> str:
     """Summarize a finished recording for `chat_id`; returns what happened:
     "too_short", "no_pipeline", "rejected", "invalid", "enqueue_failed", "still_running",
@@ -569,10 +624,10 @@ async def process_recording(
         return "too_short"
     wait = wait_seconds if wait_seconds is not None else settings.DISCORD_RUN_WAIT_SECONDS
     async with session_factory() as db:
-        pipeline = await find_pipeline(db, settings.DISCORD_MEETING_PIPELINE)
+        pipeline = await find_pipeline(db, settings.DISCORD_MEETING_PIPELINE, workflow_id)
         if pipeline is None:
             await say(bot, chat_id, f"I recorded #{channel_name} but there is no “{settings.DISCORD_MEETING_PIPELINE}” "
-                                    "pipeline to summarize it (create it from the Meeting Notes template).")
+                                    "pipeline to summarize it (create it from the Discord Meeting Summary template).")
             return "no_pipeline"
         graph = mute_telegram(pipeline.graph)
         model = WorkflowGraph.model_validate(graph)

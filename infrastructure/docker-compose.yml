@@ -80,6 +80,9 @@ services:
       - ../apps/api:/app
       # Same path the editable install points at, so engine edits hot-reload too.
       - ../packages/workflow-engine:/packages/workflow-engine
+      # packages/shared/openapi.json: the API's OpenAPI document, checked by a test (and regenerated
+      # by scripts/generate-shared-types.sh).
+      - ../packages/shared:/packages/shared:ro
       # Uploaded files (POST /api/files), shared with every worker.
       - files_data:/data/files
       # faster-whisper models, downloaded once and shared (Test node runs Speech to Text here).
@@ -223,6 +226,44 @@ services:
       api:
         condition: service_healthy
 
+  # Flower: a dashboard for the Celery workers and queues (http://localhost:5555, basic auth
+  # FLOWER_USER / FLOWER_PASSWORD from .env). It only watches: workers, queues, task history, and
+  # per-task arguments and results. Bound to localhost on purpose; the production profile does not
+  # publish it at all (reach it through an SSH tunnel, see docs/HOSTING.md).
+  flower:
+    build:
+      context: ../apps/api
+      additional_contexts:
+        workflow_engine: ../packages/workflow-engine
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      <<: *worker-env
+      WORKER_NAME: flower
+      FLOWER_USER: ${FLOWER_USER:-admin}
+      FLOWER_PASSWORD: ${FLOWER_PASSWORD:-flowforge}
+    command:
+      - sh
+      - -c
+      - >-
+        exec celery -A app.worker.celery_app:celery_app flower --port=5555
+        --basic-auth="$${FLOWER_USER}:$${FLOWER_PASSWORD}" --persistent=False
+    ports:
+      - "127.0.0.1:${FLOWER_HOST_PORT:-5555}:5555"
+    volumes:
+      - ../apps/api:/app
+      - ../packages/workflow-engine:/packages/workflow-engine
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import base64,os,urllib.request as u; r=u.Request('http://localhost:5555/healthcheck'); u.urlopen(r, timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   # Telegram Command Center (app.telegram_listener): long-polls the bot in TELEGRAM_BOT_TOKEN
   # and runs deployed pipelines from allowlisted chats. Run exactly one: Telegram allows one
   # getUpdates consumer per bot. Without a token it idles. It transcribes voice notes itself
@@ -330,6 +371,8 @@ services:
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # The route guard (src/proxy.ts) verifies the API's signed session cookie with this secret.
+      JWT_SECRET: ${JWT_SECRET}
       # See apps/web/next.config.ts — bind mounts need polling for hot reload.
       NEXT_DEV_POLL_INTERVAL_MS: "1000"
       NEXT_TELEMETRY_DISABLED: "1"
@@ -340,6 +383,9 @@ services:
       - "${WEB_HOST_PORT:-3000}:3000"
     volumes:
       - ../apps/web:/app
+      # Types generated from the API's OpenAPI document (packages/shared); resolved through tsconfig's
+      # "@flowforge/shared" path, which points at ../../packages/shared from /app.
+      - ../packages/shared:/packages/shared:ro
       # Keep the container's Linux node_modules and build cache out of the host mount.
       # After changing dependencies: docker compose up --build -V web
       - /app/node_modules

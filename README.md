@@ -2,129 +2,174 @@
 
 [![CI](https://github.com/Eyeroniq/AutoFlow-Ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eyeroniq/AutoFlow-Ai/actions/workflows/ci.yml)
 
-A visual AI workflow automation builder. This repository is being built in phases.
+A visual, self-hostable AI workflow automation builder: drag nodes onto a canvas, wire them together, and run
+the result live, on a schedule, from an email, from a webhook, or from a Telegram message. 55 node types
+(LLMs, documents/OCR, audio, RAG, web, Gmail/Telegram/Discord/Notion/Airtable, privacy), all on free-tier
+services by default.
 
-- **Phase 1:** monorepo skeleton, Docker Compose stack, the full database schema, JWT
-  authentication (with refresh), and a minimal Next.js frontend that proves auth end to end.
-- **Phase 2:** the workflow engine package (node registry, `{{...}}` variable resolution,
-  graph validation, execution) and workflow CRUD + synchronous execution APIs.
-- **Phase 2.5:** real, free-tier-friendly providers instead of mocks: Google
-  Gemini, Groq, OpenRouter (`:free` models), and local Ollama for LLMs (plus OpenAI and
-  Anthropic if you add keys), and Gmail over SMTP/IMAP with an App Password. Per-user
-  credentials are encrypted at rest, and a provider without credentials is a validation
-  error, never a silent mock.
-- **Phase 3:** asynchronous execution. `POST /run` queues the run on Redis and
-  returns `202` at once; Celery workers execute it, recording every node's state in Postgres
-  and publishing live events that `WS /ws/executions/{id}` streams to clients (with a
-  database replay for late joiners). Runs can be stopped, crashed workers are detected, and
-  delivery is idempotent. Everything is testable from `/docs` and `scripts/watch_run.py`.
-- **Phase 4:** the visual editor. A full-screen React Flow canvas at
-  `/pipelines/{id}` wired to the real API: a node library from `GET /api/nodes`, config forms
-  generated from each node's JSON Schema, `{{`-autocomplete for references, autosave with
-  undo/redo, live validation with errors on the nodes, one-node test runs, and runs whose
-  node and edge colors follow the WebSocket live. Plus a dashboard, execution history and
-  detail pages, and an integrations page for connecting provider keys.
-- **Phase 3.5:** document AI and independent scaling. File uploads
-  (`POST /api/files`), Input nodes of type File, and four document nodes: PDF Extract
-  (PyMuPDF), OCR (Tesseract), Summarize, and Entity Extraction (validated JSON). Workers are
-  split per queue (`worker-default`, `worker-llm`, `worker-ocr`), and a run hands itself from
-  queue to queue, so OCR and LLM capacity scale separately. Plus a Locust load test with
-  measured results, and an SSRF guard on the HTTP Request node.
-- **Deployments:** **Deploy** in the editor publishes a pipeline as
-  `POST /api/v1/deployments/{deployment_id}/run`, authenticated with a per-deployment API key
-  that is shown once and stored hashed. Calls run through the same Celery path, either queued
-  (`202` + `execution_id`) or with `?wait=true` (the final output in the response), and are
-  rate limited per deployment. See [Deploying a pipeline](#deploying-a-pipeline). Plus UI
-  polish: no Next.js dev badge, wrapping final output, and node summaries that truncate
-  cleanly with the full text on hover.
-- **Phase 5:** day-to-day automation on free services.
-  [Triggers](#triggers) run pipelines without a click: a cron **schedule** in any time zone
-  (Celery beat, fired exactly once per fire time), **new email** in Gmail (one run per
-  message, de-duplicated by Message-ID), and the deployment endpoint as a **webhook**, with a
-  per-workflow runs-per-hour cap and automatic switch-off after repeated failures.
-  [List nodes](#lists-for-each-filter-join): **For Each** (a prompt or an LLM call per item,
-  with concurrency and per-minute rate limits, failures recorded per item), **Filter**, and
-  **Join / Format**. [Free data sources](#free-data-sources-rss-and-web-pages): **RSS Feed**
-  (with "since last run") and **Web Page** (readable text). [Notifications](#notifications-telegram-and-discord):
-  **Telegram** and **Discord Webhook** nodes with real connection tests. Four seeded
-  [templates](#templates) with one-click **Use template**: Morning Digest, Invoice Extractor
-  (with a CSV download), Email Triage, and Job Alert Filter.
-- **Phase 6:** audio, web search, and more free LLMs.
-  [Speech to Text](#audio-speech-to-text) transcribes audio and video (Groq's free Whisper, or
-  faster-whisper on the worker's CPU with no key), with ffmpeg splitting long recordings at
-  pauses and stitching the timestamps back together, on its own `audio` queue and
-  `worker-audio` service. The run form can **record** from the microphone or a tab, behind a
-  consent checkbox. [Web Search](#web-search) queries DuckDuckGo (no key) with automatic fallback
-  to Tavily, and can read the top pages. **Structured Output** returns JSON validated against a
-  schema. New LLM providers: **Mistral**, **Cerebras**, and **Custom (OpenAI-compatible)** with
-  the SSRF guard on its base URL (GitHub Models was retired by GitHub on 2026-07-30, so it
-  isn't offered). Two more templates: **Meeting Notes** and **Web Research**.
-- **Knowledge bases:** [RAG](#knowledge-bases-rag) on Postgres + pgvector. Upload
-  PDFs, scans, or text on the **Knowledge** page: the ocr workers read them (text layer, OCR for
-  scanned pages), chunk them at sentence boundaries, and embed them (Gemini, OpenAI, or Ollama,
-  768 dimensions, HNSW cosine index), with live status and a test search. Five nodes (Add
-  Document, Chunker, Embedding, Retriever, Reranker) and two templates: **PDF to Knowledge
-  Base** and **Document Q&A**, whose answers cite `[n]` sources that lead back to the exact chunk.
-- **Privacy layer:** [privacy and security](#privacy-and-security). One detection
-  service finds secrets (key formats, JWTs, private keys, passwords, high-entropy tokens), card
-  numbers (Luhn), Aadhaar (Verhoeff) and PAN, and, when switched on, personal data (Presidio +
-  spaCy). A **privacy guard** on every outbound and LLM node blocks, redacts, or warns before the
-  node runs; stored step data is masked by default; each run gets a **Privacy Report** (counts and
-  types only). New nodes: **Secret Scanner**, **PII Redact** / **PII Restore** (the mapping in
-  encrypted Redis for an hour, so it survives queue hand-offs), and **ICS Calendar Event**; the
-  Telegram node sends files; `{{system.now}}` and `{{system.today}}`.
-- **Telegram Command Center:** [message your bot](#telegram-command-center) to run
-  deployed pipelines. A `telegram-listener` service long-polls the bot (each update handled once,
-  the offset kept in Redis); a **Telegram message** trigger allowlists chats; an LLM **intent router**
-  matches the message against each deployment's (now required) description, fills its inputs, and
-  asks one question when unsure. Voice notes are transcribed, photos fill file inputs. Pipelines with
-  **side effects** (detected on deploy) wait for a signed, chat-bound **Confirm** button that expires
-  after 5 minutes. Per-chat rate limit; the privacy layer checks messages in and replies out.
-- **Discord voice meetings:** a `discord-bot` service watches one voice channel and, only after you tap 
-  **Yes** in Telegram (signed, chat-bound, 5-minute buttons), joins, posts a visible notice, records, and sends 
-  the Meeting Notes summary back to that chat ([setup and flow](#discord-voice-meetings)).
-- **Multi-agent resume refinement:** upload a resume PDF (and optionally a job description) and five specialist agents
-  (parser, ATS checker, content coach, job matcher, rewriter) each show their findings, then a before/after
-  rewrite you can download as PDF/DOCX or email to yourself ([how it works](#multi-agent-resume-refinement)).
-- **Generate with AI, Run Replay, command palette (this state):** [describe a pipeline](#generate-with-ai-run-replay-and-the-command-palette)
-  and an LLM drafts it from the node catalog, checked against the validator and retried until it
-  validates; **Replay** animates a finished run from its stored timings with play/pause/scrub and
-  speeds; **Ctrl+K** jumps to any pipeline or page and runs quick actions.
+## Self-hosting in three commands
 
-## Stack
+You need Docker (Compose v2.24+). Nothing else.
 
-| Layer    | Tech                                                                        |
-| -------- | --------------------------------------------------------------------------- |
-| Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS v4, React Flow (`@xyflow/react` 12), Zustand, TanStack Query, React Hook Form + Zod, lucide-react |
-| Backend  | Python 3.13, FastAPI, SQLAlchemy 2.0 (async, asyncpg), Alembic, Pydantic v2 |
-| Engine   | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs; stdlib smtplib/imaplib |
-| Secrets  | Fernet (`cryptography`) for stored credentials                                |
-| Auth     | JWT (python-jose, HS256), passlib + bcrypt, slowapi rate limiting           |
-| Async    | Celery 5.6 (Redis broker + result backend), Redis pub/sub, WebSockets; one worker service per queue |
-| Documents | PyMuPDF (PDF text, page rendering), Tesseract 5 via pytesseract (OCR), Pillow |
-| Data     | PostgreSQL 16 with pgvector (knowledge-base embeddings, HNSW), Redis 7     |
-| Tests    | pytest + pytest-asyncio against a real Postgres test database; Vitest (web units); Playwright (end to end, real stack); Locust (load) |
-| Infra    | Docker Compose                                                              |
+```bash
+git clone https://github.com/Eyeroniq/AutoFlow-Ai.git && cd AutoFlow-Ai
+cp .env.example .env                # then paste fresh JWT_SECRET and ENCRYPTION_KEY into it:
+sh scripts/gen-secrets.sh           # prints random secrets (use the JWT_SECRET and ENCRYPTION_KEY lines)
+docker compose up --build           # first run builds the images; then open http://localhost:3000
+```
 
-## Prerequisites
+In a second terminal, create the demo user: `docker compose exec api python -m app.db.seed`, then log in with
+**demo@flowforge.ai** / **demo1234** (or register). Add at least one AI key (for example `GEMINI_API_KEY`, free)
+to `.env`; see [Providers and free API keys](#providers-and-free-api-keys). Full details are in
+[Quick start](#quick-start-development-stack) below.
 
-- **Docker Desktop** (or Docker Engine) with **Compose v2.24+**. Check with `docker compose version`.
-- For running services outside Docker (optional): **Python 3.11+** and **Node.js 20.9+** (the images use Python 3.13 and Node 24).
+| Want to... | Go to |
+| --- | --- |
+| Put it on a real server with a domain and automatic HTTPS | [docs/HOSTING.md](docs/HOSTING.md) (`compose.prod.yaml`, Caddy, backups) |
+| Show it publicly without handing out your own accounts | [Public demo mode](#public-demo-mode) |
+| Watch background jobs | [Flower](#monitoring-with-flower) |
+| Understand the pieces | [Architecture](#architecture) |
 
-## Quick start
+## Features
+
+Everything below is implemented and covered by tests (see [Tests](#tests)).
+
+**Building and running**
+- **Visual editor**: React Flow canvas with a searchable node library, config forms generated from each node's
+  JSON Schema, `{{...}}` autocomplete, autosave with undo/redo, live validation shown on the nodes, one-node test
+  runs ([The editor](#the-editor)).
+- **Live runs**: runs are queued on Redis and executed by Celery workers; node and edge colors follow a WebSocket
+  stream; runs can be stopped, crashed workers are detected, delivery is idempotent
+  ([Asynchronous execution](#asynchronous-execution)).
+- **Generate with AI**: describe a pipeline in words; an LLM drafts it from the node catalog and the draft is
+  checked by the validator and retried until it validates.
+- **Run Replay**: animate any finished run from its stored timings (play/pause/scrub, speeds).
+- **Command palette** (Ctrl+K): jump to any pipeline or page, run quick actions
+  ([details](#generate-with-ai-run-replay-and-the-command-palette)).
+- **Templates**: 11 one-click starting points (Morning Digest, Invoice Extractor, Email Triage, Job Alert Filter,
+  Meeting Notes, Web Research, PDF to Knowledge Base, Document Q&A, and more) ([Templates](#templates)).
+- **Execution history** with per-node inputs, outputs, timings and errors.
+
+**Everything is a block.** Triggers and the always-on services are nodes you drag onto the canvas: **Schedule Trigger**, **Email Trigger**, **Telegram Trigger** and **Discord Voice Meeting** (Sources), and the resume agents as **Resume Parse**, **ATS Check**, **Content Coach**, **Job Match** and **Resume Rewrite** (Documents). A trigger block holds the settings and an **Enabled** switch (off by default); saving the pipeline turns it into the real trigger, with the reason shown in the Triggers panel if it can't be switched on. Deleting a block switches its trigger off, and duplicates always start switched off.
+
+**Ways to start a run**
+- **Triggers**: cron schedule in any time zone, new Gmail message, webhook, with a runs-per-hour cap and automatic
+  switch-off after repeated failures ([Triggers](#triggers)).
+- **Deployments**: publish a pipeline as `POST /api/v1/deployments/{id}/run` with a per-deployment API key (shown
+  once, stored hashed), queued or `?wait=true` ([Deploying a pipeline](#deploying-a-pipeline)).
+- **Telegram Command Center**: message your bot; an LLM intent router picks a deployment, fills inputs (voice notes
+  are transcribed, photos fill file inputs) and asks for a signed one-tap confirmation before side effects
+  ([Telegram Command Center](#telegram-command-center)).
+
+**Nodes** (55)
+- **AI**: Gemini, Groq, OpenRouter, Mistral, Cerebras, Ollama, OpenAI, Anthropic, Custom OpenAI-compatible, Structured
+  Output (schema-validated JSON), Vision.
+- **Documents**: PDF Extract, OCR (Tesseract), Summarize, Entity Extraction ([Document AI](#document-ai)).
+- **Knowledge / RAG** on Postgres + pgvector: Add Document, Chunker, Embedding, Retriever, Reranker; answers cite
+  `[n]` sources that lead back to the exact chunk ([Knowledge bases](#knowledge-bases-rag)).
+- **Audio**: Speech to Text with Groq's Whisper or local faster-whisper, long recordings split at pauses; record
+  from the microphone behind a consent checkbox ([Audio](#audio-speech-to-text)).
+- **Sources**: RSS (with "since last run"), Web Page, Web Search (DuckDuckGo, Tavily fallback).
+- **Lists**: For Each (concurrency and rate limits, per-item failures), Filter, Join / Format.
+- **Integrations**: Gmail (SMTP/IMAP), Telegram (text and files), Discord Webhook, Notion, Airtable, HTTP Request
+  (SSRF-guarded), ICS Calendar Event.
+- **Privacy**: Secret Scanner, PII Redact / PII Restore, plus a privacy guard on every outbound and LLM node
+  ([Privacy and security](#privacy-and-security)).
+
+**Specialised pipelines**
+- **Discord voice meeting summaries**: a bot watches one voice channel and, only after you tap Yes in Telegram,
+  joins with a visible notice, records, and sends the Meeting Notes summary (and optionally the audio and
+  transcript) back to that chat ([Discord voice meetings](#discord-voice-meetings)).
+- **Multi-agent resume refinement**: five specialist agents (parser, ATS checker, content coach, job matcher,
+  rewriter) each show findings, then a before/after rewrite to download as PDF/DOCX or email
+  ([Resume refinement](#multi-agent-resume-refinement)).
+
+**Platform and operations**
+- **Auth**: JWT access/refresh tokens plus a signed httpOnly session cookie; the Next.js `proxy.ts` route guard
+  redirects unauthenticated visitors server-side before any protected page renders.
+- **Rate limiting**: one Redis-backed sliding-window limiter (atomic Lua) for logins, workflow runs, deployment
+  runs and Telegram messages; shared across processes, 429 with `Retry-After`, fails open if Redis is down.
+- **Credentials**: per-user, Fernet-encrypted at rest; a provider without credentials is a validation error, never
+  a silent mock.
+- **Typed API contract**: TypeScript types in `packages/shared` are generated from the backend's OpenAPI document;
+  a backend test run in CI fails if they drift.
+- **Public demo mode** with per-user caps and per-node credential safety ([below](#public-demo-mode)).
+- **Production stack**: `compose.prod.yaml` with Caddy automatic HTTPS, a CORS allowlist, no database ports
+  exposed, healthchecks, `/health`, and a daily verified backup service.
+- **Monitoring**: Flower for Celery; structured JSON logs.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Browser["Browser<br/>(Next.js 16 + React Flow)"] -->|HTTPS / wss| Caddy
+  Caddy -->|"/api /ws /health"| API["FastAPI API<br/>(JWT, rate limiter, WebSocket)"]
+  Caddy -->|everything else| Web["Next.js web<br/>(proxy.ts route guard)"]
+  API --> PG[("PostgreSQL 16<br/>+ pgvector")]
+  API <--> Redis[("Redis 7<br/>broker, pub/sub, limits")]
+  Redis --> W1["worker-default"]
+  Redis --> W2["worker-llm"]
+  Redis --> W3["worker-ocr"]
+  Redis --> W4["worker-audio"]
+  Beat["beat<br/>(triggers tick)"] --> Redis
+  W1 & W2 & W3 & W4 --> Engine["workflow-engine<br/>(registry, validation, execution)"]
+  Engine --> Ext["LLMs, Gmail, Telegram,<br/>Discord, Notion, Airtable, web"]
+  W1 & W2 & W3 & W4 --> PG
+  TG["telegram-listener"] --> API
+  DB["discord-bot / recorder"] --> Redis
+  Backup["backup (daily pg_dump)"] --> PG
+  Flower --> Redis
+```
+
+A run is one Celery task chain: the API validates the graph, records the execution, and queues it on the first
+node's queue. Each node's state is written to Postgres and published on Redis; the WebSocket relays those events
+(with a database replay for late joiners). Workers hand a run from queue to queue, so OCR, LLM and audio capacity
+scale separately ([Workers: queues and scaling](#workers-queues-and-scaling)). The engine package has no web or
+database dependency; it receives its services (LLMs, mail, files) from the worker.
+
+| Layer | Tech |
+| --- | --- |
+| Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS v4, React Flow 12, Zustand, TanStack Query, React Hook Form + Zod |
+| Backend | Python 3.13, FastAPI, SQLAlchemy 2.0 (async), Alembic, Pydantic v2 |
+| Engine | `packages/workflow-engine` (Pydantic v2, httpx); google-genai, openai, anthropic SDKs |
+| Secrets | Fernet (`cryptography`) for stored credentials |
+| Auth | JWT (python-jose, HS256), passlib + bcrypt, signed session cookie |
+| Rate limiting | Redis sliding window (Lua), no third-party limiter |
+| Async | Celery 5.6 (Redis broker + results), Redis pub/sub, WebSockets, Flower |
+| Documents | PyMuPDF, Tesseract 5, Pillow |
+| Data | PostgreSQL 16 with pgvector (HNSW), Redis 7 |
+| Types | `openapi-typescript` generates `packages/shared` from the API's OpenAPI |
+| Tests | pytest + pytest-asyncio (real Postgres), Vitest, Playwright, Locust |
+| Infra | Docker Compose (dev and production), Caddy, GitHub Actions CI |
+
+## Roadmap
+
+Done: editor, async execution, documents/OCR, deployments, triggers, audio, RAG, privacy layer, Telegram and Discord
+automation, resume refinement, AI generation, replay, command palette, hardening and hosting readiness.
+
+Not done yet:
+- **Agents** (tool-using, looping nodes) are the next big feature.
+- **Google Sheets / Docs** nodes.
+- A **spending tracker** does not exist yet. Today the only spend control is the per-user daily run and token cap in
+  [demo mode](#public-demo-mode).
+- Live-API tests for **Notion, Airtable and Cerebras** exist but are skipped unless you set their keys
+  ([Tests](#tests)).
+- Multi-tenant teams/sharing, billing, and an OAuth flow for Gmail (it uses an App Password).
+- Hosting itself: the production stack is built and tested locally; deploying it needs a domain
+  ([docs/HOSTING.md](docs/HOSTING.md)).
+
+## Quick start (development stack)
 
 ```bash
 # 1. Create your env file
 cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
 
-# 2. Set the two required secrets in .env:
-#    JWT_SECRET      any long random string
-python -c "import secrets; print(secrets.token_urlsafe(64))"
-#    ENCRYPTION_KEY  a Fernet key (encrypts stored credentials)
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 2. Set the two required secrets in .env (or run: sh scripts/gen-secrets.sh and copy the lines)
+python -c "import secrets; print(secrets.token_urlsafe(64))"                               # JWT_SECRET
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # ENCRYPTION_KEY
 
-# 3. Add at least one LLM key (e.g. GEMINI_API_KEY) and, for email, SMTP_USER +
-#    SMTP_PASSWORD (a Gmail App Password). See "Providers and free API keys" below.
+# 3. Add at least one LLM key (e.g. GEMINI_API_KEY) and, for email, SMTP_USER + SMTP_PASSWORD
+#    (a Gmail App Password). See "Providers and free API keys" below.
 
 # 4. Boot everything (first run builds the images)
 docker compose up --build
@@ -140,7 +185,8 @@ Then open:
 | Web app         | http://localhost:3000                    |
 | API             | http://localhost:8000                    |
 | API docs        | http://localhost:8000/docs (Swagger UI)  |
-| Health check    | http://localhost:8000/api/health         |
+| Health check    | http://localhost:8000/health (also `/api/health`; 503 if Postgres or Redis is down) |
+| Flower          | http://localhost:5555 (user/password `FLOWER_USER` / `FLOWER_PASSWORD`) |
 | Postgres (host) | `localhost:5433`, user/pass `flowforge` |
 | Redis (host)    | `localhost:6379`                         |
 
@@ -156,8 +202,7 @@ Output) runs on the bundled sample scan: OCR on `worker-ocr`, the two LLM nodes 
 
 The stack is defined in [`infrastructure/docker-compose.yml`](infrastructure/docker-compose.yml).
 The root [`compose.yaml`](compose.yaml) just `include`s it and passes it the root `.env`, so
-`docker compose` commands work from the repo root. Without the root file, Compose would look
-for `.env` in `infrastructure/`. The equivalent long form is:
+`docker compose` commands work from the repo root. The equivalent long form is:
 
 ```bash
 docker compose -f infrastructure/docker-compose.yml --env-file .env up --build
@@ -167,28 +212,69 @@ What happens on `up`:
 
 1. `postgres` and `redis` start and wait until healthy.
 2. `api` runs `alembic upgrade head`, then starts uvicorn with `--reload`.
-3. The workers, `worker-default`, `worker-llm`, and `worker-ocr` (Celery, one per queue; see
-   [Workers: queues and scaling](#workers-queues-and-scaling)), `beat` (Celery beat: the
-   one-minute [triggers](#triggers) tick), and `web` (`next dev`) start once the API
-   healthcheck passes.
+3. The workers (`worker-default`, `worker-llm`, `worker-ocr`, `worker-audio`; see
+   [Workers: queues and scaling](#workers-queues-and-scaling)), `beat` (the one-minute
+   [triggers](#triggers) tick), `flower`, and `web` (`next dev`) start once the API healthcheck passes.
 
-`api`, the workers, and `web` bind-mount their source directories, so edits hot-reload (the
-workers are restarted by `watchfiles`). The API and workers also mount `packages/workflow-engine`
-(installed editable), so engine edits reload them too, and they share the `files_data` volume
-(uploads) at `/data/files`.
+`api`, the workers, and `web` bind-mount their source directories, so edits hot-reload. The API and workers also mount
+`packages/workflow-engine` (installed editable) and share the `files_data` volume (uploads) at `/data/files`.
 
 Useful commands:
 
 ```bash
 docker compose up -d                   # run in the background
 docker compose logs -f api             # follow API logs (structured JSON)
-docker compose logs -f worker-ocr      # follow one worker service (worker-default / -llm / -ocr)
+docker compose logs -f worker-ocr      # follow one worker service
 docker compose ps                      # service status and health
 docker compose down                    # stop (keeps the database volume)
 docker compose down -v                 # stop and delete all data
 docker compose up --build -V web       # after changing package.json (renews node_modules volume)
-docker compose up --build api worker-default worker-llm worker-ocr   # after changing requirements.txt, the engine's dependencies, or the Dockerfile
+docker compose up --build api worker-default worker-llm worker-ocr worker-audio   # after changing requirements.txt or the Dockerfile
 ```
+
+### Monitoring with Flower
+
+Flower is part of the dev stack at <http://localhost:5555> (bound to `127.0.0.1` only, behind HTTP basic auth with
+`FLOWER_USER` / `FLOWER_PASSWORD`, default `admin` / `admin`: change them if the port is reachable by others). It shows
+the four workers, their queues, active/failed tasks and task history. In production it is opt-in
+(`--profile monitoring`) and reached through an SSH tunnel; see [docs/HOSTING.md](docs/HOSTING.md).
+
+### Public demo mode
+
+Set `PUBLIC_DEMO=true` (default `false`) and `DEMO_OWNER_EMAIL=you@example.com` to let strangers try the app without
+spending your accounts:
+
+- Everyone except the owner is a **visitor**. Visitors can run pipelines with the server's AI keys, capped per
+  account per day (`DEMO_RUNS_PER_DAY`, `DEMO_TOKENS_PER_DAY`); over the cap a run is refused with a clear message.
+- Gmail, Discord, Telegram, Notion and Airtable are **never lent**: a visitor must connect their own. A node that
+  needs one shows an inline **Connect your own [service]** prompt with step-by-step "how to get this" instructions in
+  a slide-over, without leaving the editor. The server never falls back to the owner's `.env` credentials for a
+  visitor, never lists them, and the integrations API refuses visitors the AI-key endpoints. Tests prove there is no
+  path to the owner's credential (`apps/api/tests/test_public_demo.py`).
+- The Telegram Command Center and the Discord recorder act for the owner only and refuse other accounts.
+- With `ENVIRONMENT=production` the API refuses to start on unsafe settings (default secrets, wildcard CORS, a demo
+  without an owner) and lists every problem.
+
+### Typed API contract
+
+`packages/shared/src/api.ts` is generated from the API's OpenAPI document (`packages/shared/openapi.json`); the web
+app imports it as `@flowforge/shared` instead of hand-copying response types. After changing an API schema, run
+`sh scripts/generate-shared-types.sh`; a backend test (run in CI) fails if the committed files are stale.
+
+### Route guard
+
+Pages other than `/login` and `/register` are protected on the server by `apps/web/src/proxy.ts` (Next.js 16's
+renamed middleware). The API sets a signed httpOnly session cookie on login/register/refresh and clears it at
+`POST /api/auth/logout`; the proxy verifies its signature (Web Crypto, `JWT_SECRET`) and redirects to
+`/login?next=<page>` otherwise. This is a convenience gate for page loads; every API call is still authorised by the
+bearer token.
+
+### Production stack
+
+`compose.prod.yaml` is a standalone production setup (Caddy with automatic HTTPS, built images, only ports 80/443
+published, health-checked services, daily backups). Start with `docker compose -f compose.prod.yaml up -d --build`
+after filling `.env` from [`.env.production.example`](.env.production.example). The whole walkthrough, from buying a
+domain to restoring a backup, is in [docs/HOSTING.md](docs/HOSTING.md).
 
 ## The editor
 
@@ -1009,6 +1095,8 @@ note saying "email me a reminder to call the bank", or a photo of a receipt.
    **Paper Digest**, **Safe to Share**, and **Calendar Invite** (deploy each with a description).
 
 ## Discord voice meetings
+
+**As a drag-and-drop block.** Drag **Discord Voice Meeting** (Sources) onto a pipeline and fill in the server id and voice channel id; the always-on `discord-bot`/`discord-recorder` services rescan pipelines every 10 seconds and watch that channel, so `DISCORD_MONITOR_GUILD_ID` / `DISCORD_MONITOR_CHANNEL_ID` in `.env` are now only a fallback for when no pipeline has the block. After you approve in Telegram, the bot records and runs that pipeline with the audio as its File input. The **Discord Meeting Summary** template has the block wired up. Needs only `DISCORD_BOT_TOKEN` plus the Telegram settings in `.env`.
 
 Two services watch **one voice channel in one server**: `discord-recorder`
 ([`apps/discord-recorder`](apps/discord-recorder), discord.js: it sits in the channel and does the
@@ -2479,7 +2567,15 @@ See [`.env.example`](.env.example) for the full list with comments. The main one
 | `ACCESS_TOKEN_EXPIRE_MINUTES`   | `30`                             | API                  |
 | `REFRESH_TOKEN_EXPIRE_DAYS`     | `7`                              | API                  |
 | `CORS_ORIGINS`                  | `http://localhost:3000,http://127.0.0.1:3000` | API     |
-| `AUTH_RATE_LIMIT`               | `10/minute`                      | API                  |
+| `AUTH_RATE_LIMIT`               | `10/minute`                      | API: logins, register, refresh (Redis limiter) |
+| `WORKFLOW_RUN_RATE_LIMIT`       | `60/minute`                      | API: per-user limit on starting runs |
+| `TRUST_PROXY_HEADERS`           | `false`                          | API: use `X-Forwarded-For` for the client IP (true behind Caddy; set in `compose.prod.yaml`) |
+| `SESSION_COOKIE_NAME`, `COOKIE_SECURE` | `flowforge_session`, `false` | API: the route-guard cookie; `COOKIE_SECURE=true` in production |
+| `ENVIRONMENT`                   | `development`                    | API: `production` refuses unsafe settings at start |
+| `PUBLIC_DEMO`, `DEMO_OWNER_EMAIL` | `false`, empty                 | API: [demo mode](#public-demo-mode) |
+| `DEMO_RUNS_PER_DAY`, `DEMO_TOKENS_PER_DAY` | `25`, `60000`          | API: per-visitor daily caps in demo mode |
+| `FLOWER_USER`, `FLOWER_PASSWORD` | `admin`, `flowforge`            | Flower basic auth |
+| `DISCORD_BOT_TOKEN`, `DISCORD_MONITOR_GUILD_ID`, `DISCORD_MONITOR_CHANNEL_ID` | empty | discord-bot / recorder |
 | `DEPLOYMENT_RUN_RATE_LIMIT`, `DEPLOYMENT_STATUS_RATE_LIMIT` | `30/minute`, `240/minute` | API: per-deployment limits on runs and status polls |
 | `DEPLOYMENT_WAIT_TIMEOUT_SECONDS`, `DEPLOYMENT_MAX_WAIT_SECONDS` | `30`, `120` | API: how long `?wait=true` waits by default / at most |
 | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL` | blank, `gemini-3.5-flash-lite`, `gemini-embedding-2` | Gemini nodes |
@@ -2538,9 +2634,10 @@ dotenv parser accepts trailing `# comments`.
 ```
 .
 ├── compose.yaml                  # root entrypoint → includes infrastructure/docker-compose.yml
+├── compose.prod.yaml             # production stack (Caddy, backups); see docs/HOSTING.md
 ├── .env.example
 ├── infrastructure/
-│   └── docker-compose.yml        # postgres, redis, api, worker-default/-llm/-ocr, beat, web; locust (profile)
+│   └── docker-compose.yml        # dev stack: postgres, redis, api, 4 workers, beat, flower, web; locust (profile)
 ├── apps/
 │   ├── api/                      # FastAPI backend
 │   │   ├── alembic.ini
@@ -2637,3 +2734,20 @@ dotenv parser accepts trailing `# comments`.
   [SSRF guard](#security-outbound-requests-ssrf-guard)), but the per-user `base_url` accepted
   for Ollama and OpenAI credentials isn't yet: add the same check before exposing the API to
   untrusted users.
+
+## Resume-ready bullet points
+
+- Built FlowForge AI, a self-hostable visual AI workflow automation platform (Next.js 16, React Flow, FastAPI, Celery,
+  PostgreSQL + pgvector, Redis) with 55 node types, 65 API endpoints, 11 templates, and ~1,000 backend and ~130 frontend
+  tests plus Playwright end-to-end and Locust load tests.
+- Designed an asynchronous execution engine: Redis-queued Celery workers split per workload (default, LLM, OCR, audio),
+  live node-by-node state over WebSockets with database replay, idempotent delivery, cancellation and crash detection.
+- Implemented RAG on pgvector (OCR, chunking, embeddings, HNSW search, reranking) with cited answers, and a privacy layer
+  that detects secrets, cards, Aadhaar/PAN and PII and blocks, redacts, or warns before data leaves a node.
+- Built a Telegram command center and Discord voice-meeting summariser with signed, expiring, chat-bound confirmations,
+  and a five-agent resume-refinement pipeline with PDF/DOCX export.
+- Hardened for production: Redis sliding-window rate limiter (atomic Lua) replacing in-memory limits, server-side Next.js
+  route guard with signed session cookies, OpenAPI-generated shared TypeScript types enforced in CI, Fernet-encrypted
+  credentials, SSRF guard, and a public-demo mode with per-user quotas where no visitor can reach the owner's credentials.
+- Shipped a production Docker Compose stack with Caddy automatic HTTPS, health checks, verified daily backups with a
+  tested restore script, Flower monitoring, and GitHub Actions CI.

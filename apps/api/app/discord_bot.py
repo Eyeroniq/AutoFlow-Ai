@@ -380,12 +380,20 @@ async def run(stop: asyncio.Event) -> None:
     telegram_token = settings.TELEGRAM_BOT_TOKEN.get_secret_value().strip() if settings.TELEGRAM_BOT_TOKEN else ""
     chat_id = str(settings.TELEGRAM_CHAT_ID or "").strip()
     missing = [name for name, value in (
-        ("DISCORD_BOT_TOKEN", token), ("DISCORD_MONITOR_GUILD_ID", settings.DISCORD_MONITOR_GUILD_ID),
-        ("DISCORD_MONITOR_CHANNEL_ID", settings.DISCORD_MONITOR_CHANNEL_ID), ("TELEGRAM_BOT_TOKEN", telegram_token),
-        ("TELEGRAM_CHAT_ID", chat_id),
+        ("DISCORD_BOT_TOKEN", token), ("TELEGRAM_BOT_TOKEN", telegram_token), ("TELEGRAM_CHAT_ID", chat_id),
+        # The recorder's channel comes from a Discord Voice Meeting block; only the py-cord monitor needs ids in .env.
+        *((name, value) for name, value in (
+            ("DISCORD_MONITOR_GUILD_ID", settings.DISCORD_MONITOR_GUILD_ID),
+            ("DISCORD_MONITOR_CHANNEL_ID", settings.DISCORD_MONITOR_CHANNEL_ID),
+        ) if settings.DISCORD_RECORDER != "node"),
     ) if not value]
     if missing:
         logger.warning("the Discord voice monitor is off; set %s", ", ".join(missing))
+        await stop.wait()
+        return
+    if settings.PUBLIC_DEMO and not settings.DEMO_OWNER_EMAIL.strip():
+        # The recorder is the owner's: in a public demo it runs only for DEMO_OWNER_EMAIL's account.
+        logger.error("PUBLIC_DEMO is on but DEMO_OWNER_EMAIL isn't set; the Discord voice monitor refuses to run")
         await stop.wait()
         return
     if settings.DISCORD_RECORDER == "node":

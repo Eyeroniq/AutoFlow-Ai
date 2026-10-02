@@ -6,6 +6,8 @@ import type { NextConfig } from "next";
 const pollIntervalMs = Number(process.env.NEXT_DEV_POLL_INTERVAL_MS) || undefined;
 
 const nextConfig: NextConfig = {
+  // The production image (Dockerfile.prod) runs the small standalone server.
+  ...(process.env.NEXT_STANDALONE === "1" && { output: "standalone" as const }),
   // The dev-mode badge sits over the canvas controls and shows up in screenshots.
   // Build and runtime errors still open the error overlay.
   devIndicators: false,

@@ -38,6 +38,7 @@ import type {
   WorkflowValidation,
 } from "./types";
 import type { Refinement, RefinementSummary, ResumeEmail } from "./resume-types";
+import type { AutomationsState, SystemInfo } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -99,6 +100,8 @@ async function send(path: string, options: RequestOptions, token?: string | null
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,
+      // Sign-in sets the signed session cookie the route guard reads (a different port in dev).
+      credentials: "include",
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
@@ -361,6 +364,15 @@ export const api = {
     get: (id: string) => authed<UploadedFile>(`/api/files/${enc(id)}`),
     remove: (id: string) => authed<null>(`/api/files/${enc(id)}`, { method: "DELETE" }),
     upload: uploadFile,
+  },
+  system: {
+    /** Deployment mode (public demo or not) and what this account may use. */
+    get: () => authed<SystemInfo>("/api/system"),
+    /** Whether the Discord monitor and the Telegram bot are paused. */
+    automations: () => authed<AutomationsState>("/api/system/automations"),
+    /** Pause or resume one of them; the containers keep running. */
+    pause: (name: "discord" | "telegram", paused: boolean) =>
+      authed<AutomationsState>(`/api/system/automations/${name}`, { method: "PUT", body: { paused } }),
   },
   resume: {
     /** Start the five-agent pipeline on an uploaded PDF (202; poll `get` until it is success or failed). */

@@ -24,9 +24,11 @@ RUN apt-get update \
 # (editable) from ../../packages/workflow-engine, i.e. /packages/workflow-engine.
 COPY --from=workflow_engine . /packages/workflow-engine
 
-# Dev image: includes the test dependencies so `docker compose exec api pytest` works.
+# Dev image: includes the test dependencies so `docker compose exec api pytest` works. The production
+# stack (compose.prod.yaml) builds with REQUIREMENTS=requirements.txt, without them.
+ARG REQUIREMENTS=requirements-dev.txt
 COPY requirements.txt requirements-dev.txt ./
-RUN pip install -r requirements-dev.txt
+RUN pip install -r ${REQUIREMENTS}
 
 COPY . .
 

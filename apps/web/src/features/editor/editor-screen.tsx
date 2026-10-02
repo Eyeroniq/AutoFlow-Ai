@@ -15,6 +15,7 @@ import { ConfigPanel, MultiSelectionPanel } from "./config-panel";
 import { DeployDialog } from "./deploy-dialog";
 import { useAutosave, useKeyboardShortcuts, useLiveValidation } from "./hooks";
 import { NodeLibrary } from "./node-library";
+import { ConnectSlideOver } from "./connect-slideover";
 import { RunControllerProvider, useRun } from "./run-controller";
 import { RunInputsDialog, RunPanel } from "./run-panel";
 import { ValidationPanel, VariablesPanel } from "./side-panels";
@@ -135,6 +136,7 @@ function EditorLayout({ workflowId }: { workflowId: string }) {
   return (
     <div className="flex h-screen flex-col overflow-hidden" data-testid="editor">
       <TopBar onValidate={onValidate} onRun={onRun} />
+      <ConnectSlideOver />
       <div className="flex min-h-0 flex-1">
         <NodeLibrary />
         <div className="flex min-w-0 flex-1 flex-col">

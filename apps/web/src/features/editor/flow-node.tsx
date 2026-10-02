@@ -9,6 +9,8 @@ import { Menu } from "@/components/ui/menu";
 import { StatusDot } from "@/components/ui/status";
 import { TruncatedText } from "@/components/ui/truncated-text";
 
+import { useConnections } from "./connect-slideover";
+import { missingConnection } from "./connect-model";
 import { configSummary, type FlowNode } from "./graph";
 import { getEditorStore, useEditor } from "./store";
 import { useEditorUi } from "./ui-store";
@@ -53,6 +55,9 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
   const branches = entry?.branches ?? [];
   const status = run?.status ?? "idle";
   const streaming = run?.status === "running" && run.tokens;
+  const { integrations, system } = useConnections();
+  const needsAccount = missingConnection(data.nodeType, data.config, integrations);
+  const visitor = !!system?.public_demo && !system.is_owner;
 
   const actions = () => getEditorStore().getState();
   const menuItems = [
@@ -122,6 +127,24 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
           items={menuItems}
         />
       </div>
+
+      {needsAccount && (
+        <div className="nodrag border-t border-amber-200 bg-amber-50 py-2 pl-3.5 pr-3" data-testid={`node-connect-${id}`}>
+          <p className="text-[11px] text-amber-900">
+            {visitor
+              ? `This node needs your own ${needsAccount.label}; the demo's account isn't available to visitors.`
+              : `${needsAccount.label} isn't connected yet.`}
+          </p>
+          <button
+            type="button"
+            data-testid={`node-connect-button-${id}`}
+            onClick={() => useEditorUi.getState().set({ connectProvider: needsAccount.provider })}
+            className="mt-1 rounded-md bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-500"
+          >
+            {visitor ? `Connect your own ${needsAccount.label}` : `Connect ${needsAccount.label}`}
+          </button>
+        </div>
+      )}
 
       {!data.collapsed && (
         <div className="space-y-1 border-t border-slate-100 py-2 pl-3.5 pr-3">

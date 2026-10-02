@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarClock, CircleCheck, CircleDashed, LayoutTemplate, Mail } from "lucide-react";
+import { CalendarClock, CircleCheck, CircleDashed, LayoutTemplate, Mail, Mic } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -50,6 +50,9 @@ function TemplateCard({ template, catalog }: { template: Template; catalog: Map<
           );
         })}
       </div>
+      <p className="text-[11px] leading-4 text-slate-500" aria-label="Nodes" data-testid={`template-nodes-${template.slug}`}>
+        {types.map((type) => catalog.get(type)?.label ?? type).join(" → ")}
+      </p>
       <ul className="space-y-1 text-xs" aria-label="Needs">
         {template.requirements.map((requirement) => (
           <li key={requirement.label} className="flex items-start gap-1.5" title={requirement.why ?? undefined}>
@@ -69,11 +72,51 @@ function TemplateCard({ template, catalog }: { template: Template; catalog: Map<
         <Button size="sm" onClick={() => use.mutate()} loading={use.isPending} data-testid={`use-template-${template.slug}`}>
           Use template
         </Button>
+        {template.slug === "resume-refiner" && (
+          <Link href="/resume" className="text-xs font-medium text-indigo-600 hover:text-indigo-500" data-testid="open-resume-refiner">
+            Open the full app
+          </Link>
+        )}
         {!template.ready && (
           <Link href="/integrations" className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
             Connect what&apos;s missing
           </Link>
         )}
+      </div>
+    </article>
+  );
+}
+
+function DiscordMeetingCard() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const use = useMutation({
+    meta: { silent: true },
+    mutationFn: () => api.templates.use("discord-meeting-summary", browserTimeZone()),
+    onSuccess: (workflow) => {
+      void queryClient.invalidateQueries({ queryKey: ["workflows"] });
+      toast.success(`“${workflow.name}” created`, "The Discord bot runs this pipeline for each approved recording.");
+      router.push(`/pipelines/${workflow.id}`);
+    },
+    onError: (error) => toast.error("Couldn't create the pipeline", error.message),
+  });
+  return (
+    <article className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4" data-testid="template-discord-meeting">
+      <div>
+        <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Meetings</p>
+        <h3 className="font-semibold text-slate-900">Discord voice meeting to Telegram</h3>
+        <p className="mt-1 text-xs leading-5 text-slate-600">
+          The pipeline starts with a <strong>Discord Voice Meeting</strong> block: set your server and channel ids on it and the always-on bot watches that channel. After you tap Yes in Telegram it records, runs the pipeline, and sends you the summary and/or transcript. Needs DISCORD_BOT_TOKEN in .env.
+        </p>
+      </div>
+      <div className="flex items-center gap-1 text-slate-500">
+        <Mic className="size-4" aria-hidden />
+        <span className="text-xs">Runs from the bot, not on a schedule</span>
+      </div>
+      <div className="mt-auto border-t border-slate-100 pt-3">
+        <Button size="sm" onClick={() => use.mutate()} loading={use.isPending} data-testid="use-template-discord-meeting">
+          Create the Discord pipeline
+        </Button>
       </div>
     </article>
   );
@@ -97,6 +140,7 @@ export function TemplatesSection() {
         {templates.data.map((template) => (
           <TemplateCard key={template.slug} template={template} catalog={catalog} />
         ))}
+        <DiscordMeetingCard />
       </div>
     </section>
   );

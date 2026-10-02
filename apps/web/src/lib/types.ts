@@ -1,30 +1,14 @@
+import type { Schemas } from "@flowforge/shared";
+
 // Mirrors the Pydantic schemas in apps/api/app/schemas (and flowforge_engine's graph models).
 
-export interface TokenResponse {
-  access_token: string;
-  refresh_token: string;
-  token_type: "bearer";
-  expires_in: number;
-}
+export type TokenResponse = Schemas["TokenResponse"];
 
-export interface User {
-  id: string;
-  email: string;
-  full_name: string;
-  created_at: string;
-  updated_at: string;
-}
+export type User = Schemas["UserRead"];
 
-export interface LoginPayload {
-  email: string;
-  password: string;
-}
+export type LoginPayload = Schemas["LoginRequest"];
 
-export interface RegisterPayload {
-  email: string;
-  password: string;
-  full_name: string;
-}
+export type RegisterPayload = Schemas["RegisterRequest"];
 
 // --- node catalog (GET /api/nodes) ---------------------------------------------------------
 
@@ -81,7 +65,7 @@ export interface NodeType {
 
 // --- workflows --------------------------------------------------------------------------------
 
-export type WorkflowStatus = "draft" | "active" | "archived";
+export type WorkflowStatus = Schemas["WorkflowStatus"];
 export type VariableType = "workflow" | "environment" | "node_output" | "user_input" | "system";
 
 export interface ApiGraphNode {
@@ -125,98 +109,32 @@ export interface WorkflowSummary {
   updated_at: string;
 }
 
-export interface WorkflowListItem extends WorkflowSummary {
-  node_count: number;
-  last_execution: {
-    id: string;
-    status: ExecutionStatus;
-    created_at: string;
-    started_at: string | null;
-    finished_at: string | null;
-  } | null;
-  /** Saved triggers: which are on, and which the failure limit switched off. */
-  triggers: { type: TriggerType; enabled: boolean; auto_disabled: boolean }[];
-}
+export type WorkflowListItem = Schemas["WorkflowListItem"];
 
-export interface Workflow extends WorkflowSummary {
-  graph: WorkflowGraph;
-}
+/** The graph is typed strictly here: the API's own schema lists every graph field as optional because the same model is also accepted as a request body. */
+export type Workflow = Omit<Schemas["WorkflowRead"], "graph"> & { graph: WorkflowGraph };
 
-export interface WorkflowUpdate {
-  name?: string;
-  description?: string | null;
-  status?: WorkflowStatus;
-  graph?: WorkflowGraph;
-}
+export type WorkflowUpdate = Omit<Schemas["WorkflowUpdate"], "graph"> & { graph?: WorkflowGraph };
 
-export interface ValidationIssue {
-  code: string;
-  message: string;
-  node_id: string | null;
-  edge_id: string | null;
-  field: string | null;
-}
+/** Plus "request_failed", which the editor raises itself when validation could not be requested. */
+export type ValidationIssue = Omit<Schemas["ValidationIssue"], "code"> & { code: Schemas["ValidationIssue"]["code"] | "request_failed" };
 
-export interface WorkflowValidation {
-  valid: boolean;
-  errors: ValidationIssue[];
-}
+export type WorkflowValidation = Schemas["WorkflowValidation"];
 
-export interface NodeTestRequest {
-  config?: Record<string, unknown>;
-  upstream_outputs?: Record<string, Record<string, unknown>>;
-  variables?: Record<string, unknown>;
-  inputs?: Record<string, unknown>;
-}
+export type NodeTestRequest = Schemas["NodeTestRequest"];
 
-export interface NodeTestResult {
-  node_key: string;
-  node_type: string;
-  label: string;
-  status: "success" | "failed" | "skipped";
-  input: Record<string, unknown> | null;
-  output: Record<string, unknown> | null;
-  error: string | null;
-  started_at: string | null;
-  finished_at: string | null;
-  duration_ms: number | null;
-}
+export type NodeTestResult = Omit<Schemas["NodeTestResult"], "status"> & { status: NodeExecutionStatus };
 
 // --- executions -------------------------------------------------------------------------------
 
-export type ExecutionStatus = "pending" | "running" | "success" | "failed" | "stopped";
+export type ExecutionStatus = Schemas["ExecutionStatus"];
 /** What started a run. "api" is the old name for webhook runs (before triggers existed). */
-export type ExecutionTrigger = "manual" | "schedule" | "email" | "webhook" | "telegram" | "discord_voice" | "event" | "api";
-export type NodeExecutionStatus = "pending" | "running" | "success" | "failed" | "skipped";
+export type ExecutionTrigger = Schemas["ExecutionTrigger"];
+export type NodeExecutionStatus = Schemas["NodeExecutionStatus"];
 
-export interface ExecutionSummary {
-  id: string;
-  workflow_id: string;
-  status: ExecutionStatus;
-  trigger: ExecutionTrigger;
-  /** The schedule, email, or webhook trigger that started it; null for manual runs. */
-  trigger_id: string | null;
-  triggered_by_user_id: string | null;
-  created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-  error_message: string | null;
-  queue: string | null;
-  worker_hostname: string | null;
-  heartbeat_at: string | null;
-  stop_requested_at: string | null;
-  duration_ms: number | null;
-  /** Times the run moved to another queue's workers. */
-  segment: number;
-  /** Set while the run waits for a worker of `queue` after a hand-off. */
-  handoff_at: string | null;
-  /** The deployment whose endpoint started the run (trigger "webhook"). */
-  deployment_id: string | null;
-}
+export type ExecutionSummary = Schemas["ExecutionSummary"];
 
-export interface ExecutionListItem extends ExecutionSummary {
-  workflow_name: string;
-}
+export type ExecutionListItem = Schemas["ExecutionListItem"];
 
 export interface NodeExecution {
   id: string;
@@ -237,6 +155,7 @@ export interface NodeExecution {
   worker_hostname: string | null;
 }
 
+/** Hand-written: the API model is also a request body, so its schema lists every field as optional. */
 export interface PrivacySettings {
   mask_stored_io: boolean;
   detect_personal_data: boolean;
@@ -269,22 +188,14 @@ export interface PrivacyReport {
   }[];
 }
 
-export interface ExecutionDetail extends ExecutionSummary {
-  inputs: Record<string, unknown> | null;
-  final_output: Record<string, unknown> | null;
-  node_executions: NodeExecution[];
+/** The API describes `graph` and `privacy_report` as free-form objects; their shapes are typed here. */
+export type ExecutionDetail = Omit<Schemas["ExecutionDetail"], "graph" | "privacy_report"> & {
   /** The graph exactly as it ran (what Replay draws). */
   graph?: { nodes: unknown[]; edges: unknown[] } | null;
   privacy_report?: PrivacyReport | null;
-}
+};
 
-export interface ExecutionAccepted {
-  execution_id: string;
-  workflow_id: string;
-  status: ExecutionStatus;
-  queue: string;
-  links: { execution: string; events: string; stop: string };
-}
+export type ExecutionAccepted = Schemas["ExecutionAccepted"];
 
 // --- live events (WS /ws/executions/{id}) --------------------------------------------------
 
@@ -338,68 +249,19 @@ export type ExecutionEvent =
 
 // --- files ---------------------------------------------------------------------------------------
 
-export interface UploadedFile {
-  id: string;
-  filename: string;
-  content_type: string;
-  size_bytes: number;
-  sha256: string;
-  created_at: string;
-}
+export type UploadedFile = Schemas["FileRead"];
 
 export type EmbeddingProvider = "gemini" | "openai" | "ollama" | "mock";
 
-export interface KnowledgeBase {
-  id: string;
-  name: string;
-  description: string;
-  embedding_provider: EmbeddingProvider;
-  embedding_model: string | null;
-  dimensions: number;
-  chunk_size: number;
-  chunk_overlap: number;
-  document_count: number;
-  chunk_count: number;
-  created_at: string;
-  updated_at: string;
-}
+export type KnowledgeBase = Schemas["KnowledgeBaseRead"];
 
-export interface KnowledgeBaseCreate {
-  name: string;
-  description?: string;
-  embedding_provider: EmbeddingProvider;
-  embedding_model?: string | null;
-  chunk_size?: number;
-  chunk_overlap?: number;
-}
+export type KnowledgeBaseCreate = Schemas["KnowledgeBaseCreate"];
 
-export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
+export type DocumentStatus = Schemas["DocumentStatus"];
 
-export interface KnowledgeDocument {
-  id: string;
-  knowledge_base_id: string;
-  file_id: string | null;
-  filename: string;
-  status: DocumentStatus;
-  source_type: "pdf" | "image" | "text";
-  method: string | null;
-  chunk_count: number;
-  char_count: number;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type KnowledgeDocument = Schemas["DocumentRead"];
 
-export interface KnowledgeSearchHit {
-  rank: number;
-  chunk_id: string;
-  document_id: string;
-  filename: string;
-  chunk_index: number;
-  page: number | null;
-  score: number;
-  content: string;
-}
+export type KnowledgeSearchHit = Schemas["SearchHit"];
 
 /** What an Input node of type file outputs (and document nodes accept as `file`). */
 export interface FileDescription {
@@ -411,97 +273,30 @@ export interface FileDescription {
 
 // --- deployments ---------------------------------------------------------------------------------
 
-export interface DeploymentInput {
-  node_id: string;
-  label: string;
-  /** The key callers send in `inputs`. */
-  name: string;
-  type: "text" | "number" | "json" | "file";
-  /** The caller must send it (it has no default). */
-  required: boolean;
-  default: unknown;
-}
+export type DeploymentInput = Schemas["DeploymentInput"];
 
-export interface DeploymentOutput {
-  node_id: string;
-  label: string;
-  name: string;
-}
+export type DeploymentOutput = Schemas["DeploymentOutput"];
 
-export interface Deployment {
-  id: string;
-  workflow_id: string;
-  name: string;
-  version: number;
-  workflow_version: number;
-  /** Relative to the API's base URL: /api/v1/deployments/{id}/run */
-  endpoint: string;
-  api_key_prefix: string;
-  /** What it does: the Telegram Command Center matches messages against it. */
-  description: string;
-  /** It sends or writes somewhere: runs from Telegram wait for a Confirm tap. */
-  side_effects: boolean;
-  inputs: DeploymentInput[];
-  outputs: DeploymentOutput[];
-  key_created_at: string;
-  deployed_at: string;
-  /** Set once undeployed: the endpoint answers 404. Undeployed ones are left out of lists by default. */
-  revoked_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type Deployment = Schemas["DeploymentRead"];
 
-export interface DeploymentWithKey extends Deployment {
-  /** Only in the response that issued it; never retrievable again. */
-  api_key: string | null;
-}
+export type DeploymentWithKey = Schemas["DeploymentWithKey"];
 
 // --- integrations ------------------------------------------------------------------------------
 
-export interface Integration {
-  provider: string;
-  label: string;
-  kind: "llm" | "email" | "messaging" | "search" | "workspace";
-  connected: boolean;
-  source: "user" | "server" | "none";
-  status: "connected" | "disconnected" | "error";
-  masked: Record<string, unknown> | null;
-  connected_at: string | null;
+export type Integration = Omit<Schemas["IntegrationRead"], "last_test"> & {
   last_test: { success: boolean; latency_ms: number; error: string | null; tested_at: string } | null;
-  default_model: string | null;
-  get_key_url: string | null;
-}
+};
 
-export interface IntegrationConnect {
-  api_key?: string;
-  base_url?: string;
-  model?: string;
-  email?: string;
-  app_password?: string;
-  from_name?: string;
-  smtp_host?: string;
-  smtp_port?: number;
-  smtp_security?: "auto" | "starttls" | "ssl";
-  imap_host?: string;
-  imap_port?: number;
-  bot_token?: string;
-  chat_id?: string;
-  webhook_url?: string;
-}
+export type IntegrationConnect = Schemas["ConnectRequest"];
 
-export interface IntegrationTestResult {
-  provider: string;
-  success: boolean;
-  source: "user" | "server" | "none";
-  latency_ms: number;
-  error: string | null;
-  details: Record<string, unknown>;
-  tested_at: string;
-}
+export type IntegrationTestResult = Schemas["IntegrationTestResult"];
 
 // --- triggers ------------------------------------------------------------------------------------
 
-export type TriggerType = "schedule" | "email" | "webhook" | "telegram";
+export type SystemInfo = Schemas["SystemInfo"];
+export type AutomationsState = Schemas["AutomationsState"];
+
+export type TriggerType = Schemas["TriggerType"];
 
 export interface ScheduleConfig {
   cron: string;
@@ -521,55 +316,17 @@ export interface EmailTriggerConfig {
   max_body_chars: number;
 }
 
-export interface TriggerLastRun {
-  execution_id: string;
-  status: ExecutionStatus;
-  created_at: string;
-  finished_at: string | null;
-  error_message: string | null;
-}
+export type TriggerLastRun = Schemas["TriggerLastRun"];
 
-export interface Trigger {
-  type: TriggerType;
-  id: string | null;
-  configured: boolean;
-  enabled: boolean;
-  config: Record<string, unknown>;
-  /** Schedule: the next fire time. Email: the next mailbox check. */
-  next_run_at: string | null;
-  upcoming: string[];
-  last_fired_at: string | null;
-  last_run: TriggerLastRun | null;
-  consecutive_failures: number;
-  /** Set when the consecutive-failure limit switched the trigger off. */
-  auto_disabled_at: string | null;
-  disabled_reason: string | null;
-  last_error: string | null;
-  last_error_at: string | null;
-  warnings: string[];
-  webhook: { deployment_id: string; endpoint: string; api_key_prefix: string; deployed_version: number; behind: boolean } | null;
+export type Trigger = Omit<Schemas["TriggerRead"], "mailbox"> & {
   mailbox: { folder: string | null; last_uid: number | null; last_poll_at: string | null } | null;
-}
+};
 
-export interface TriggerSettings {
-  max_runs_per_hour: number;
-  max_consecutive_failures: number;
-}
+export type TriggerSettings = Schemas["TriggerSettings"];
 
-export interface TriggersResponse {
-  workflow_id: string;
-  settings: TriggerSettings;
-  runs_last_hour: number;
-  triggers: Trigger[];
-}
+export type TriggersResponse = Omit<Schemas["TriggersRead"], "triggers"> & { triggers: Trigger[] };
 
-export interface SchedulePreview {
-  valid: boolean;
-  error: string | null;
-  cron: string | null;
-  interval: boolean | null;
-  next: string[];
-}
+export type SchedulePreview = Schemas["SchedulePreview"];
 
 export interface EmailCheckResult {
   trigger_id: string;
@@ -582,22 +339,6 @@ export interface EmailCheckResult {
 
 // --- templates -----------------------------------------------------------------------------------
 
-export interface TemplateRequirement {
-  providers: string[];
-  label: string;
-  why: string | null;
-  satisfied: boolean;
-  using: string | null;
-}
+export type TemplateRequirement = Schemas["TemplateRequirement"];
 
-export interface Template {
-  slug: string;
-  name: string;
-  description: string | null;
-  category: string;
-  node_types: string[];
-  requirements: TemplateRequirement[];
-  /** Every requirement has a credential (yours or the server's). */
-  ready: boolean;
-  triggers: { type: TriggerType; config: Record<string, unknown> }[];
-}
+export type Template = Schemas["TemplateRead"];

@@ -20,7 +20,7 @@ from app.services.templates import CATALOG, fit_graph, sync_templates
 from tests.support import create_workflow
 
 TEMPLATE_SLUGS = [
-    "morning-digest", "invoice-extractor", "email-triage", "job-alert-filter", "meeting-notes", "web-research",
+    "morning-digest", "invoice-extractor", "email-triage", "job-alert-filter", "meeting-notes", "resume-refiner", "discord-meeting-summary", "web-research",
     "pdf-to-knowledge-base", "document-qa", "paper-digest", "safe-to-share", "calendar-invite",
 ]
 
@@ -284,7 +284,7 @@ async def test_a_users_bot_replaces_the_servers_including_the_chat(monkeypatch):
     from app.services import credentials
 
     monkeypatch.setattr(credentials, "server_provider_settings",
-                        lambda: ProviderSettings(telegram={"bot_token": "1:server", "chat_id": "server-chat"}))
+                        lambda **_: ProviderSettings(telegram={"bot_token": "1:server", "chat_id": "server-chat"}))
     merged = credentials.provider_settings_for({"telegram": {"bot_token": BOT_TOKEN}})
     assert merged.telegram.bot_token.get_secret_value() == BOT_TOKEN and merged.telegram.chat_id is None
     assert credentials.provider_settings_for({}).telegram.chat_id == "server-chat"

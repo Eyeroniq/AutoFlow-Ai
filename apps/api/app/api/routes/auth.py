@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
@@ -13,6 +13,7 @@ from app.core.security import (
     InvalidTokenError,
     create_access_token,
     create_refresh_token,
+    create_session_token,
     decode_token,
     hash_password,
     verify_password,
@@ -30,8 +31,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _DUMMY_HASH = hash_password("timing-equalizer")
 
 
-def _issue_tokens(user: User) -> TokenResponse:
+def _set_session_cookie(response: Response, user: User) -> None:
+    response.set_cookie(
+        settings.SESSION_COOKIE_NAME, create_session_token(str(user.id)),
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400, httponly=True, samesite="lax",
+        secure=settings.COOKIE_SECURE, path="/",
+    )
+
+
+def _issue_tokens(user: User, response: Response) -> TokenResponse:
     subject = str(user.id)
+    _set_session_cookie(response, user)
     return TokenResponse(
         access_token=create_access_token(subject),
         refresh_token=create_refresh_token(subject),
@@ -46,8 +56,8 @@ def _issue_tokens(user: User) -> TokenResponse:
     summary="Create an account",
     responses={409: {"description": "Email already registered"}, 429: {"description": "Rate limited"}},
 )
-@limiter.limit(settings.AUTH_RATE_LIMIT)
-async def register(request: Request, body: RegisterRequest, db: DbSession) -> TokenResponse:
+@limiter.limit(lambda: settings.AUTH_RATE_LIMIT)
+async def register(request: Request, response: Response, body: RegisterRequest, db: DbSession) -> TokenResponse:
     existing = await db.scalar(select(User.id).where(User.email == body.email))
     if existing is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -67,7 +77,7 @@ async def register(request: Request, body: RegisterRequest, db: DbSession) -> To
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Email already registered") from None
 
     logger.info("user registered", extra={"user_id": str(user.id)})
-    return _issue_tokens(user)
+    return _issue_tokens(user, response)
 
 
 @router.post(
@@ -76,8 +86,8 @@ async def register(request: Request, body: RegisterRequest, db: DbSession) -> To
     summary="Log in with email and password",
     responses={401: {"description": "Invalid credentials"}, 429: {"description": "Rate limited"}},
 )
-@limiter.limit(settings.AUTH_RATE_LIMIT)
-async def login(request: Request, body: LoginRequest, db: DbSession) -> TokenResponse:
+@limiter.limit(lambda: settings.AUTH_RATE_LIMIT)
+async def login(request: Request, response: Response, body: LoginRequest, db: DbSession) -> TokenResponse:
     user = await db.scalar(select(User).where(User.email == body.email))
     password_ok = await run_in_threadpool(
         verify_password, body.password, user.hashed_password if user else _DUMMY_HASH
@@ -92,7 +102,7 @@ async def login(request: Request, body: LoginRequest, db: DbSession) -> TokenRes
         )
 
     logger.info("user logged in", extra={"user_id": str(user.id)})
-    return _issue_tokens(user)
+    return _issue_tokens(user, response)
 
 
 @router.post(
@@ -105,8 +115,8 @@ async def login(request: Request, body: LoginRequest, db: DbSession) -> TokenRes
     ),
     responses={401: {"description": "Invalid, expired, or non-refresh token"}, 429: {"description": "Rate limited"}},
 )
-@limiter.limit(settings.AUTH_RATE_LIMIT)
-async def refresh(request: Request, body: RefreshRequest, db: DbSession) -> TokenResponse:
+@limiter.limit(lambda: settings.AUTH_RATE_LIMIT)
+async def refresh(request: Request, response: Response, body: RefreshRequest, db: DbSession) -> TokenResponse:
     try:
         payload = decode_token(body.refresh_token, expected_type="refresh")
         user_id = uuid.UUID(payload["sub"])
@@ -118,7 +128,19 @@ async def refresh(request: Request, body: RefreshRequest, db: DbSession) -> Toke
         raise _invalid_refresh()
 
     logger.info("token refreshed", extra={"user_id": str(user.id)})
-    return _issue_tokens(user)
+    return _issue_tokens(user, response)
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Clear the session cookie",
+    description="Tokens are stateless; this only removes the signed session cookie the web app's route guard reads.",
+)
+async def logout() -> Response:
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(settings.SESSION_COOKIE_NAME, path="/", httponly=True, samesite="lax", secure=settings.COOKIE_SECURE)
+    return response
 
 
 def _invalid_refresh() -> HTTPException:

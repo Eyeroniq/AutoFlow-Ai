@@ -75,8 +75,8 @@ describe("reduceRun", () => {
       started_at: t(0), finished_at: null, error_message: null, queue: "default", worker_hostname: "worker@a",
       heartbeat_at: null, stop_requested_at: null, duration_ms: null, inputs: {}, final_output: null, segment: 0, handoff_at: null, deployment_id: null,
       node_executions: [
-        { id: "1", node_id: null, node_key: "input", position: 0, node_type: "input", node_label: "Topic", status: "success", input: null, output: { value: 1 }, error_message: null, started_at: t(0), finished_at: t(1), duration_ms: 1, queue: "llm", worker_hostname: "worker-llm@a" },
-        { id: "2", node_id: null, node_key: "gemini", position: 1, node_type: "gemini", node_label: "Summarize", status: "running", input: null, output: null, error_message: null, started_at: t(1), finished_at: null, duration_ms: null, queue: "llm", worker_hostname: "worker-llm@a" },
+        { id: "1", node_id: null, node_key: "input", position: 0, node_type: "input", node_label: "Topic", status: "success", input: null, output: { value: 1 }, error_message: null, started_at: t(0), finished_at: t(1), duration_ms: 1, queue: "llm", worker_hostname: "worker-llm@a", privacy: null },
+        { id: "2", node_id: null, node_key: "gemini", position: 1, node_type: "gemini", node_label: "Summarize", status: "running", input: null, output: null, error_message: null, started_at: t(1), finished_at: null, duration_ms: null, queue: "llm", worker_hostname: "worker-llm@a", privacy: null },
       ],
     };
     const streaming = apply([{ type: "node.token", seq: 3, node_key: "gemini", text: "so far", provider: "gemini" }]);

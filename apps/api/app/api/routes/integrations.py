@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
 from flowforge_engine import ExecutionServices
 
 from app.api.deps import CurrentUser, DbSession
+from app.services import demo
 from app.schemas.integration import ConnectRequest, IntegrationRead, IntegrationTestResult
 from app.services.credentials import (
     CONNECTABLE,
@@ -57,6 +58,8 @@ async def list_all(db: DbSession, user: CurrentUser) -> list[IntegrationRead]:
 )
 async def connect(provider: ProviderName, body: ConnectRequest, db: DbSession, user: CurrentUser) -> IntegrationRead:
     name = _known(provider)
+    if demo.is_visitor(user) and name not in demo.PERSONAL_PROVIDERS:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This demo provides the AI itself; there is nothing to connect for it.")
     try:
         data = normalize_credential(name, body)
     except CredentialInputError as exc:

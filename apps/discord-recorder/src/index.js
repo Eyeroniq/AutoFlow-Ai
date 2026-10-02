@@ -33,8 +33,12 @@ const STOPPED_NOTICE = '⏹️ Recording ended. The audio recording will be sent
 const STOPPED_NOTICE_NOTES = '⏹️ Recording ended. A summary will be sent to the person who approved it.';
 
 const token = (process.env.DISCORD_BOT_TOKEN ?? '').trim();
-const guildId = (process.env.DISCORD_MONITOR_GUILD_ID ?? '').trim();
-const channelId = (process.env.DISCORD_MONITOR_CHANNEL_ID ?? '').trim();
+// The channel to watch comes from the Discord Voice Meeting block of a pipeline (the controller publishes it in
+// Redis at WATCH); DISCORD_MONITOR_* in .env is the fallback when no pipeline has one.
+const WATCH = 'flowforge:discord:watch';
+const WATCH_POLL_MS = 5000;
+let guildId = (process.env.DISCORD_MONITOR_GUILD_ID ?? '').trim();
+let channelId = (process.env.DISCORD_MONITOR_CHANNEL_ID ?? '').trim();
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379/0';
 const recordingsDir = process.env.DISCORD_RECORDINGS_DIR ?? '/data/files/recordings';
 
@@ -42,8 +46,8 @@ function log(level, message, extra = {}) {
   console.log(JSON.stringify({ timestamp: new Date().toISOString(), level, logger: 'discord-recorder', message, ...extra }));
 }
 
-if (!token || !guildId || !channelId) {
-  log('WARNING', 'the Discord recorder is off; set DISCORD_BOT_TOKEN, DISCORD_MONITOR_GUILD_ID and DISCORD_MONITOR_CHANNEL_ID');
+if (!token) {
+  log('WARNING', 'the Discord recorder is off; set DISCORD_BOT_TOKEN');
   setInterval(() => {}, 1 << 30); // idle, so the container doesn't restart in a loop
 } else {
   await main();
@@ -64,13 +68,14 @@ async function main() {
   const emit = (event) => redis.rPush(EVENTS, JSON.stringify({ ts: Date.now(), ...event }));
   const guild = () => client.guilds.cache.get(guildId);
   const channel = () => guild()?.channels.cache.get(channelId);
+  let ready = false;
 
-  // -- the channel ---------------------------------------------------------------------------------
-
-  client.once('clientReady', async () => {
+  // Watch whatever channel the controller publishes; re-snapshot who is in it when that changes.
+  async function snapshot() {
+    humans.clear();
     const target = channel();
     if (!target) {
-      log('ERROR', 'the monitored channel is not visible to the bot; check the ids and the invite');
+      if (guildId || channelId) log('WARNING', 'the watched channel is not visible to the bot; check the ids and the invite', { guildId, channelId });
       return;
     }
     for (const state of guild().voiceStates.cache.values()) {
@@ -80,11 +85,43 @@ async function main() {
     }
     await emit({ type: 'snapshot', user_ids: [...humans], channel_name: target.name });
     log('INFO', 'watching voice channel', { channel: target.name, already_present: humans.size });
+  }
+
+  async function pollWatch() {
+    let raw = null;
+    try {
+      raw = await redis.get(WATCH);
+    } catch (error) {
+      log('ERROR', 'redis error', { error: String(error) });
+      return;
+    }
+    let next = { guild_id: '', channel_id: '' };
+    try {
+      if (raw) next = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const g = String(next.guild_id ?? '').trim();
+    const c = String(next.channel_id ?? '').trim();
+    if (g === guildId && c === channelId) return;
+    if (recording) return; // finish this meeting first
+    guildId = g;
+    channelId = c;
+    if (ready) await snapshot();
+  }
+
+  // -- the channel ---------------------------------------------------------------------------------
+
+  client.once('clientReady', async () => {
+    ready = true;
+    await pollWatch();
+    await snapshot();
+    setInterval(() => void pollWatch(), WATCH_POLL_MS);
   });
 
   client.on('voiceStateUpdate', async (before, after) => {
     const member = after.member ?? before.member;
-    if (!member || member.user.bot || after.guild.id !== guildId) return;
+    if (!ready || !guildId || !member || member.user.bot || after.guild.id !== guildId) return;
     const was = before.channelId === channelId;
     const now = after.channelId === channelId;
     if (was === now) return;
@@ -104,6 +141,10 @@ async function main() {
   async function startRecording(command) {
     if (recording) return;
     const target = channel();
+    if (!target) {
+      await emit({ type: 'recording_failed', session: command.session, reason: 'the watched channel is not visible to the bot' });
+      return;
+    }
     const session = command.session;
     let connection;
     try {

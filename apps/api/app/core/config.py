@@ -32,16 +32,38 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # The signed session cookie the web app's route guard (apps/web/src/proxy.ts) checks on the server,
+    # since tokens in localStorage are invisible to a server. httpOnly; Secure outside plain-http dev.
+    SESSION_COOKIE_NAME: str = "flowforge_session"
+    COOKIE_SECURE: bool = False
 
     # Required: Fernet key(s) that encrypt stored credentials. Comma-separate several to
     # rotate: the first encrypts, all of them decrypt.
     ENCRYPTION_KEY: SecretStr
 
-    # Comma-separated list of allowed browser origins.
+    # Comma-separated list of allowed browser origins. In production this must be the site's own
+    # https origin(s); "*" is refused (see validate_production).
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    # slowapi limit string applied to /auth/login, /auth/register, and /auth/refresh.
+    # --- Public demo mode (app/services/demo.py) ------------------------------------------------
+    # Off by default. When on, every account except DEMO_OWNER_EMAIL is a visitor: AI uses only the
+    # server's keys (within the daily caps below), and Gmail, Discord, Telegram, Notion, and Airtable
+    # work only with the visitor's own connected account, never the owner's. The Discord voice
+    # recorder and the Telegram Command Center act only for the owner.
+    PUBLIC_DEMO: bool = False
+    DEMO_OWNER_EMAIL: str = ""
+    DEMO_RUNS_PER_DAY: int = Field(default=25, ge=1, description="Runs per visitor account per UTC day.")
+    DEMO_TOKENS_PER_DAY: int = Field(default=60_000, ge=1_000, description="Estimated AI tokens per visitor account per UTC day.")
+
+    # Rate limits ("10/minute", "100/hour"...) are enforced by app.core.rate_limit, a sliding window
+    # kept in Redis and shared by every process. Auth: /auth/login, /auth/register, /auth/refresh
+    # (per client IP).
     AUTH_RATE_LIMIT: str = "10/minute"
+    # Starting a run from the editor (POST /api/workflows/{id}/run), per signed-in user.
+    WORKFLOW_RUN_RATE_LIMIT: str = "60/minute"
+    # Behind a reverse proxy that sets X-Forwarded-For (Caddy in the production profile), count
+    # callers by that address instead of the proxy's.
+    TRUST_PROXY_HEADERS: bool = False
 
     # --- Deployments (POST /api/v1/deployments/{id}/run) ------------------------------
     # Per deployment (every caller of one endpoint shares it), counted after the API key
@@ -246,6 +268,30 @@ class Settings(BaseSettings):
         env["TESTING"] = "true" if self.TESTING else ""
         env["HTTP_ALLOW_PRIVATE_NETWORKS"] = "true" if self.HTTP_ALLOW_PRIVATE_NETWORKS else ""
         return env
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.strip().lower() == "production"
+
+    def production_problems(self) -> list[str]:
+        """What is unsafe about this configuration for a public deployment (ENVIRONMENT=production).
+        The API refuses to start with any of these."""
+        problems = []
+        if self.JWT_SECRET.startswith("change-me") or len(self.JWT_SECRET) < 32:
+            problems.append("JWT_SECRET must be a random string of at least 32 characters")
+        origins = self.cors_origins
+        if not origins:
+            problems.append("CORS_ORIGINS must list the site's origin(s), e.g. https://example.com")
+        if "*" in origins:
+            problems.append('CORS_ORIGINS must not contain "*": list the exact origins that may call the API')
+        insecure = [o for o in origins if o.startswith("http://") and not o.startswith(("http://localhost", "http://127.0.0.1"))]
+        if insecure:
+            problems.append(f"CORS_ORIGINS has plain-http origins ({', '.join(insecure)}), but production serves https")
+        if not self.COOKIE_SECURE:
+            problems.append("COOKIE_SECURE must be true (the session cookie is Secure on https)")
+        if self.PUBLIC_DEMO and not self.DEMO_OWNER_EMAIL.strip():
+            problems.append("PUBLIC_DEMO needs DEMO_OWNER_EMAIL: the Discord recorder and Telegram bot act only for the owner")
+        return problems
 
     def secret_values(self) -> list[str]:
         """Server secrets the log formatter redacts wherever they appear."""

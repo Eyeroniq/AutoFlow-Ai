@@ -12,7 +12,6 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 # passlib 1.7.4 is incompatible with bcrypt>=4.1 (version probe) and bcrypt 5 (72-byte check).
 bcrypt==4.0.1
-slowapi==0.1.10
 # Multipart form parsing for file uploads (POST /api/files).
 python-multipart==0.0.32
 # Fernet encryption for stored credentials (app/core/crypto.py).
@@ -60,3 +59,5 @@ icalendar==7.3.0
 # numpy to mix recordings. libopus comes with ffmpeg in the Dockerfile.
 numpy==2.4.6
 py-cord[voice]==2.8.1
+# Flower: the Celery monitoring dashboard (the `flower` Compose service).
+flower==2.0.1
